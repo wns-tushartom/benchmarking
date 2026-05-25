@@ -1,0 +1,15 @@
+[Unit]
+Description=WNS embedding service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wns-vm-adapters
+EnvironmentFile=/opt/wns-vm-adapters/.env
+ExecStart=/opt/wns-vm-adapters/.venv/bin/uvicorn app.embedding_service:app --host 0.0.0.0 --port 5000
+Restart=always
+RestartSec=5
+User=wns
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+{
+  "completed_runs": 1,
+  "total_runs": 1,
+  "query_count": 5,
+  "elapsed_s": 0.193,
+  "last_config": {
+    "benchmark_run_id": "run_0001",
+    "chunking_method": "entity_heuristic_w6",
+    "embedding_model": "jina_v3",
+    "vector_database": "Qdrant",
+    "index_type": "HNSW",
+    "retrieval_method": "Cosine Similarity",
+    "reranking_model": "Amazon Rerank v1"
+  }
+}

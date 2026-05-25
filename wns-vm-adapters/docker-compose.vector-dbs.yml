@@ -1,0 +1,44 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: wns-qdrant
+    ports:
+      - "5001:6333"
+      - "5002:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  postgres-pgvector:
+    image: pgvector/pgvector:pg16
+    container_name: wns-pgvector
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wns}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wns_password}
+      POSTGRES_DB: ${POSTGRES_DB:-wns_benchmark}
+    ports:
+      - "5003:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+      - ./scripts/init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql:ro
+    restart: unless-stopped
+
+  weaviate:
+    image: semitechnologies/weaviate:latest
+    container_name: wns-weaviate
+    ports:
+      - "5004:8080"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      CLUSTER_HOSTNAME: node1
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    restart: unless-stopped
+
+volumes:
+  qdrant_storage:
+  pgvector_data:
+  weaviate_data:

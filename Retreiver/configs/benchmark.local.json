@@ -1,0 +1,169 @@
+{
+  "experiment": {
+    "name": "wns-rag-benchmark-selectable",
+    "description": "Config-driven WNS RAG benchmark harness with selectable chunking, embedding, vector DB, index, retrieval, and rerank dimensions",
+    "dataset": "data/qa_text_test.csv",
+    "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
+    "top_k": 10,
+    "mode": "local_offline_fallback",
+    "random_seed": 42,
+    "repetitions": 1
+  },
+  "matrix": {
+    "chunkers": [
+      "entity_heuristic_w6",
+      "entity_heuristic_w5",
+      "entity_heuristic_w4",
+      "Heading_sections_l2",
+      "fixed_tok1200_ov150"
+    ],
+    "embeddings": [
+      "jina_v3",
+      "gte_multilingual_base",
+      "openai_text-embedding-3-large"
+    ],
+    "vector_stores": [
+      "Qdrant",
+      "PGVector",
+      "Weaviate"
+    ],
+    "index_types": [
+      "HNSW"
+    ],
+    "retrieval_methods": [
+      "Cosine Similarity"
+    ],
+    "rerankers": [
+      "Amazon Rerank v1",
+      "Qwen3:4B Rerank",
+      "bge-reranker-base"
+    ],
+    "evaluators": [
+      "overlap_relevance"
+    ]
+  },
+  "techniques": {
+    "chunkers": {
+      "entity_heuristic_w6": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w6",
+        "source_type": "provided"
+      },
+      "entity_heuristic_w5": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w5",
+        "source_type": "provided"
+      },
+      "entity_heuristic_w4": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w4",
+        "source_type": "provided"
+      },
+      "Heading_sections_l2": {
+        "adapter": "local_workbook",
+        "sheet_name": "Heading_sections_l2",
+        "source_type": "provided"
+      },
+      "semantic_split": {
+        "adapter": "local_workbook",
+        "sheet_name": "semantic_split",
+        "source_type": "candidate_optional"
+      },
+      "fixed_tok1200_ov150": {
+        "adapter": "local_workbook",
+        "sheet_name": "fixed_tok1200_ov150",
+        "source_type": "provided"
+      }
+    },
+    "embeddings": {
+      "jina_v3": {
+        "adapter": "remote_http",
+        "dimensions": 384,
+        "license": "open_source",
+        "execution_location": "vm_remote_for_real_runs",
+        "endpoint_env": "JINA_EMBEDDING_URL",
+        "provider_ready": true,
+        "api_key_env": "JINA_API_KEY",
+        "timeout_seconds": 120,
+        "batch_size": 32
+      },
+      "gte_multilingual_base": {
+        "adapter": "remote_http",
+        "dimensions": 384,
+        "license": "open_source",
+        "execution_location": "vm_remote_for_real_runs",
+        "endpoint_env": "GTE_EMBEDDING_URL",
+        "provider_ready": true,
+        "api_key_env": "HF_TOKEN",
+        "timeout_seconds": 120,
+        "batch_size": 32
+      },
+      "openai_text-embedding-3-large": {
+        "adapter": "local_hash",
+        "dimensions": 512,
+        "license": "commercial",
+        "provider_ready": false
+      }
+    },
+    "vector_stores": {
+      "Qdrant": {
+        "adapter": "qdrant",
+        "provider_ready_env": "QDRANT_URL"
+      },
+      "PGVector": {
+        "adapter": "pgvector",
+        "provider_ready_env": "PGVECTOR_DSN"
+      },
+      "Weaviate": {
+        "adapter": "weaviate",
+        "provider_ready_env": "WEAVIATE_URL"
+      }
+    },
+    "index_types": {
+      "HNSW": {
+        "adapter": "metadata_only",
+        "provider_notes": "Real provider mode must create HNSW index or equivalent."
+      }
+    },
+    "retrieval_methods": {
+      "Cosine Similarity": {
+        "adapter": "local_cosine",
+        "provider_notes": "Local fallback computes cosine over deterministic hash embeddings."
+      }
+    },
+    "rerankers": {
+      "Amazon Rerank v1": {
+        "adapter": "weighted_overlap",
+        "license": "commercial",
+        "vector_weight": 0.65,
+        "overlap_weight": 0.35,
+        "provider_ready_env": "AWS_REGION"
+      },
+      "Qwen3:4B Rerank": {
+        "adapter": "weighted_overlap",
+        "license": "open_source",
+        "vector_weight": 0.5,
+        "overlap_weight": 0.5
+      },
+      "bge-reranker-base": {
+        "adapter": "weighted_overlap",
+        "license": "open_source",
+        "vector_weight": 0.4,
+        "overlap_weight": 0.6
+      }
+    }
+  },
+  "evaluation": {
+    "overlap_threshold": 0.22,
+    "metrics": [
+      "recall_at_1",
+      "recall_at_3",
+      "recall_at_5",
+      "recall_at_10",
+      "mrr",
+      "ndcg_at_10",
+      "precision_at_5"
+    ],
+    "bootstrap_iterations": 200
+  }
+}

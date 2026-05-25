@@ -1,0 +1,15 @@
+{
+  "completed_runs": 135,
+  "total_runs": 135,
+  "query_count": 50,
+  "elapsed_s": 33.85,
+  "last_config": {
+    "benchmark_run_id": "run_0135",
+    "chunking_method": "fixed_tok1200_ov150",
+    "embedding_model": "openai_text-embedding-3-large",
+    "vector_database": "Weaviate",
+    "index_type": "HNSW",
+    "retrieval_method": "Cosine Similarity",
+    "reranking_model": "bge-reranker-base"
+  }
+}

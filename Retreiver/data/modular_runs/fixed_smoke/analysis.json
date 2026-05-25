@@ -1,0 +1,193 @@
+{
+  "manifest": {
+    "experiment": {
+      "name": "wns-rag-benchmark-selectable",
+      "description": "Config-driven WNS RAG benchmark harness with selectable chunking, embedding, vector DB, index, retrieval, and rerank dimensions",
+      "dataset": "data/qa_text_test.csv",
+      "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
+      "top_k": 10,
+      "mode": "local_offline_fallback",
+      "random_seed": 42,
+      "repetitions": 1,
+      "selection": {
+        "chunker": "fixed_tok1200_ov150",
+        "embedding": "jina_v3",
+        "vector_store": "Qdrant",
+        "index_type": "HNSW",
+        "retrieval_method": "Cosine Similarity",
+        "reranker": "bge-reranker-base"
+      }
+    },
+    "config_path": "/home/fate/.openclaw/workspace/wns-benchmarking/Retreiver/configs/benchmark.local.json",
+    "config_hash": "d6fb1ca2904d5c43",
+    "dataset_hash": "3163c785de741e18",
+    "query_count": 5,
+    "matrix_count": 1,
+    "git_sha": "91feed1d",
+    "python": "3.12.3",
+    "created_at": "2026-05-20T10:39:46+0530",
+    "provider_readiness": {
+      "OPENAI_API_KEY": false,
+      "JINA_API_KEY": false,
+      "QDRANT_URL": false,
+      "PGVECTOR_DSN": false,
+      "DATABASE_URL": false,
+      "WEAVIATE_URL": false,
+      "AWS_REGION": false,
+      "AWS_DEFAULT_REGION": false
+    }
+  },
+  "best_config": {
+    "benchmark_run_id": "mod_0001",
+    "chunker": "fixed_tok1200_ov150",
+    "embedding": "jina_v3",
+    "vector_store": "Qdrant",
+    "index_type": "HNSW",
+    "retrieval_method": "Cosine Similarity",
+    "retriever": "Cosine Similarity",
+    "reranker": "bge-reranker-base",
+    "evaluator": "overlap_relevance",
+    "mode": "local_offline_fallback",
+    "query_count": 5,
+    "chunk_count": 56,
+    "embedding_dimension": 384,
+    "embedding_latency_s": 0.025902,
+    "upsert_latency_s": 1e-06,
+    "avg_latency_ms": 6.379435,
+    "recall_at_1": 0.8,
+    "recall_at_3": 0.8,
+    "recall_at_5": 0.8,
+    "recall_at_10": 0.8,
+    "mrr": 0.8,
+    "ndcg_at_10": 0.773903,
+    "precision_at_5": 0.56,
+    "recall_at_5_ci_low": 0.4,
+    "recall_at_5_ci_high": 1.0,
+    "category_recall_at_5": "{\"pnr\": 1.0, \"voucher\": 0.666667}",
+    "hit_examples": "[{\"query_id\": 1, \"query\": \"customer has multi pnr and received voucher email only for one pnr\", \"category\": \"voucher\", \"top_ids\": [44, 43, 8, 52, 9]}, {\"query_id\": 2, \"query\": \"what is the difference between open ticket and voucher\", \"category\": \"voucher\", \"top_ids\": [40, 29, 43, 25, 32]}, {\"query_id\": 3, \"query\": \"what is vi order\", \"category\": \"pnr\", \"top_ids\": [7, 51, 3, 47, 1]}, {\"query_id\": 5, \"query\": \"what is sc script - rir message for manual and auto handling in travelport\", \"category\": \"pnr\", \"top_ids\": [43, 8, 32, 1, 45]}]",
+    "miss_examples": "[{\"query_id\": 4, \"query\": \"how to display an old emd record\", \"category\": \"voucher\", \"top_ids\": [43, 42, 25, 27, 44]}]",
+    "errors": ""
+  },
+  "runner_up": {},
+  "top10": [
+    {
+      "benchmark_run_id": "mod_0001",
+      "chunker": "fixed_tok1200_ov150",
+      "embedding": "jina_v3",
+      "vector_store": "Qdrant",
+      "index_type": "HNSW",
+      "retrieval_method": "Cosine Similarity",
+      "retriever": "Cosine Similarity",
+      "reranker": "bge-reranker-base",
+      "evaluator": "overlap_relevance",
+      "mode": "local_offline_fallback",
+      "query_count": 5,
+      "chunk_count": 56,
+      "embedding_dimension": 384,
+      "embedding_latency_s": 0.025902,
+      "upsert_latency_s": 1e-06,
+      "avg_latency_ms": 6.379435,
+      "recall_at_1": 0.8,
+      "recall_at_3": 0.8,
+      "recall_at_5": 0.8,
+      "recall_at_10": 0.8,
+      "mrr": 0.8,
+      "ndcg_at_10": 0.773903,
+      "precision_at_5": 0.56,
+      "recall_at_5_ci_low": 0.4,
+      "recall_at_5_ci_high": 1.0,
+      "category_recall_at_5": "{\"pnr\": 1.0, \"voucher\": 0.666667}",
+      "hit_examples": "[{\"query_id\": 1, \"query\": \"customer has multi pnr and received voucher email only for one pnr\", \"category\": \"voucher\", \"top_ids\": [44, 43, 8, 52, 9]}, {\"query_id\": 2, \"query\": \"what is the difference between open ticket and voucher\", \"category\": \"voucher\", \"top_ids\": [40, 29, 43, 25, 32]}, {\"query_id\": 3, \"query\": \"what is vi order\", \"category\": \"pnr\", \"top_ids\": [7, 51, 3, 47, 1]}, {\"query_id\": 5, \"query\": \"what is sc script - rir message for manual and auto handling in travelport\", \"category\": \"pnr\", \"top_ids\": [43, 8, 32, 1, 45]}]",
+      "miss_examples": "[{\"query_id\": 4, \"query\": \"how to display an old emd record\", \"category\": \"voucher\", \"top_ids\": [43, 42, 25, 27, 44]}]",
+      "errors": ""
+    }
+  ],
+  "why_best": [
+    "Highest Recall@5: 0.8",
+    "Chunk count: 56, avg latency: 6.379435 ms"
+  ],
+  "pareto": [
+    {
+      "benchmark_run_id": "mod_0001",
+      "chunker": "fixed_tok1200_ov150",
+      "embedding": "jina_v3",
+      "vector_store": "Qdrant",
+      "index_type": "HNSW",
+      "retrieval_method": "Cosine Similarity",
+      "retriever": "Cosine Similarity",
+      "reranker": "bge-reranker-base",
+      "evaluator": "overlap_relevance",
+      "mode": "local_offline_fallback",
+      "query_count": 5,
+      "chunk_count": 56,
+      "embedding_dimension": 384,
+      "embedding_latency_s": 0.025902,
+      "upsert_latency_s": 1e-06,
+      "avg_latency_ms": 6.379435,
+      "recall_at_1": 0.8,
+      "recall_at_3": 0.8,
+      "recall_at_5": 0.8,
+      "recall_at_10": 0.8,
+      "mrr": 0.8,
+      "ndcg_at_10": 0.773903,
+      "precision_at_5": 0.56,
+      "recall_at_5_ci_low": 0.4,
+      "recall_at_5_ci_high": 1.0,
+      "category_recall_at_5": "{\"pnr\": 1.0, \"voucher\": 0.666667}",
+      "hit_examples": "[{\"query_id\": 1, \"query\": \"customer has multi pnr and received voucher email only for one pnr\", \"category\": \"voucher\", \"top_ids\": [44, 43, 8, 52, 9]}, {\"query_id\": 2, \"query\": \"what is the difference between open ticket and voucher\", \"category\": \"voucher\", \"top_ids\": [40, 29, 43, 25, 32]}, {\"query_id\": 3, \"query\": \"what is vi order\", \"category\": \"pnr\", \"top_ids\": [7, 51, 3, 47, 1]}, {\"query_id\": 5, \"query\": \"what is sc script - rir message for manual and auto handling in travelport\", \"category\": \"pnr\", \"top_ids\": [43, 8, 32, 1, 45]}]",
+      "miss_examples": "[{\"query_id\": 4, \"query\": \"how to display an old emd record\", \"category\": \"voucher\", \"top_ids\": [43, 42, 25, 27, 44]}]",
+      "errors": ""
+    }
+  ],
+  "by_chunker": [
+    {
+      "name": "fixed_tok1200_ov150",
+      "count": 1,
+      "recall_at_5": 0.8,
+      "mrr": 0.8,
+      "avg_latency_ms": 6.379435,
+      "chunk_count": 56.0
+    }
+  ],
+  "by_embedding": [
+    {
+      "name": "jina_v3",
+      "count": 1,
+      "recall_at_5": 0.8,
+      "mrr": 0.8,
+      "avg_latency_ms": 6.379435,
+      "chunk_count": 56.0
+    }
+  ],
+  "by_reranker": [
+    {
+      "name": "bge-reranker-base",
+      "count": 1,
+      "recall_at_5": 0.8,
+      "mrr": 0.8,
+      "avg_latency_ms": 6.379435,
+      "chunk_count": 56.0
+    }
+  ],
+  "by_index_type": [
+    {
+      "name": "HNSW",
+      "count": 1,
+      "recall_at_5": 0.8,
+      "mrr": 0.8,
+      "avg_latency_ms": 6.379435,
+      "chunk_count": 56.0
+    }
+  ],
+  "by_retrieval_method": [
+    {
+      "name": "Cosine Similarity",
+      "count": 1,
+      "recall_at_5": 0.8,
+      "mrr": 0.8,
+      "avg_latency_ms": 6.379435,
+      "chunk_count": 56.0
+    }
+  ],
+  "detail_count": 5
+}

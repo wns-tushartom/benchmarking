@@ -1,0 +1,11 @@
+query_id,pdf_name,chunking_method,embedding_model,vector_database,index_type,retrieval_method,reranking_model,top_k,retrieved_ids,retrieved_scores,retrieval_latency_ms,error,notes
+1,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,8.88,,
+2,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,0.00,,
+3,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,7.61,,
+4,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,3.50,,
+5,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,4.56,,
+6,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,2.51,,
+7,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,4.67,,
+8,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,2.08,,
+9,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,0.00,,
+10,Content - Businessclass.com - FL processes 20250310-073300.pdf,paragraph_from_csv,nvidia/nv-embedqa-e5-v5,Milvus,IVF_FLAT,COSINE,none,5,,,5.59,,

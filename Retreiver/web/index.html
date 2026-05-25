@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WNS Benchmark Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /> RAG Benchmarking</p>
+        <h1>Benchmark control room</h1>
+        <p class="sub">Compare recall, latency, chunk count, embeddings, vector stores, and rerankers from one local dashboard.</p>
+        <div class="hero-actions">
+          <button id="runBtn">Run legacy matrix</button>
+          <button id="modularBtn">Run modular matrix</button>
+          <button id="selectedBtn">Run selected combo</button>
+          <button id="chunkBtn" class="secondary">Run chunk recall</button>
+          <button id="refreshBtn" class="secondary">Refresh</button>
+        </div>
+      </div>
+      <div class="hero-card kpis">
+        <div class="metric"><span id="totalRuns">—</span><label>Configurations</label></div>
+        <div class="metric"><span id="queryCount">—</span><label>Queries</label></div>
+        <div class="metric"><span id="bestRecall">—</span><label>Best Recall@5</label></div>
+        <div class="metric"><span id="bestLatency">—</span><label>Best avg latency</label></div>
+        <div class="metric"><span id="modularRuns">—</span><label>Modular configs</label></div>
+        <div class="metric"><span id="modularBest">—</span><label>Modular best R@5</label></div>
+      </div>
+    </section>
+
+    <section class="panel modular-panel">
+      <div class="section-head">
+        <div>
+          <h2>Modular benchmark harness</h2>
+          <p>Config-driven registry with adapters, richer metrics, run manifest, confidence intervals, category analysis, and winner rationale.</p>
+        </div>
+        <span class="status-pill">Go-to system v1</span>
+      </div>
+      <div class="modular-grid">
+        <div><label>Experiment</label><strong id="experimentName">—</strong></div>
+        <div><label>Config hash</label><strong id="configHash">—</strong></div>
+        <div><label>Dataset hash</label><strong id="datasetHash">—</strong></div>
+        <div><label>Best config</label><strong id="bestConfigLabel">—</strong></div>
+      </div>
+      <div class="why-box"><h3>Why winner</h3><ul id="whyBest"></ul></div>
+    </section>
+
+    <section class="panel controls sticky-panel">
+      <div class="section-head">
+        <div>
+          <h2>Customize benchmark view</h2>
+          <p>Filters update instantly. The benchmark runner still uses deterministic local adapters unless real providers are wired in.</p>
+        </div>
+        <div class="status-pill" id="statusPill">Ready</div>
+      </div>
+      <div class="form-grid wide">
+        <label>Query limit <input id="limit" type="number" value="50" min="1" /></label>
+        <label>Max runs <input id="maxRuns" type="number" value="0" min="0" /></label>
+        <label>Rank by <select id="rankMetric"><option value="recall_at_5">Recall@5</option><option value="recall_at_10">Recall@10</option><option value="recall_at_3">Recall@3</option><option value="avg_query_latency_ms">Latency</option><option value="chunk_count">Chunk count</option></select></label>
+        <label>Top N <input id="topN" type="number" value="15" min="3" max="50" /></label>
+        <label>Chunking <select id="selectedChunker"><option value="all">All</option></select></label>
+        <label>Embedding <select id="selectedEmbedding"><option value="all">All</option></select></label>
+        <label>Vector database <select id="selectedVectorStore"><option value="all">All</option></select></label>
+        <label>Index <select id="selectedIndexType"><option value="all">All</option></select></label>
+        <label>Retrieval <select id="selectedRetrievalMethod"><option value="all">All</option></select></label>
+        <label>Rerank <select id="selectedReranker"><option value="all">All</option></select></label>
+        <label>Filter DB <select id="dbFilter"><option value="all">All</option></select></label>
+        <label>Filter embedding <select id="embeddingFilter"><option value="all">All</option></select></label>
+        <label>Filter chunking <select id="chunkFilter"><option value="all">All</option></select></label>
+        <label>Filter reranker <select id="rerankFilter"><option value="all">All</option></select></label>
+        <label class="check"><input id="includeCandidates" type="checkbox" /> Include semantic/fixed candidates in legacy run</label>
+        <label class="check"><input id="includeMilvus" type="checkbox" /> Include Milvus baseline in legacy run</label>
+      </div>
+      <pre id="runLog" class="log">Ready.</pre>
+    </section>
+
+    <section class="grid two">
+      <div class="panel chart-panel">
+        <div class="section-head"><h2>Recall vs latency</h2><span class="hint">each dot = config</span></div>
+        <canvas id="scatterChart" width="640" height="340"></canvas>
+      </div>
+      <div class="panel chart-panel">
+        <div class="section-head"><h2>Top configurations</h2><span class="hint" id="topHint">ranked</span></div>
+        <canvas id="barChart" width="640" height="340"></canvas>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel chart-panel">
+        <div class="section-head"><h2>Chunking comparison</h2><span class="hint">recall + chunk volume</span></div>
+        <canvas id="chunkChart" width="640" height="340"></canvas>
+      </div>
+      <div class="panel chart-panel">
+        <div class="section-head"><h2>Chunking × DB heatmap</h2><span class="hint">avg Recall@5</span></div>
+        <div id="heatmap" class="heatmap"></div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel">
+        <div class="section-head"><h2>Ranked configurations</h2><span id="rowCount" class="hint">—</span></div>
+        <div class="table-wrap"><table id="summaryTable"></table></div>
+      </div>
+      <div class="panel">
+        <div class="section-head"><h2>Chunk recall details</h2><span class="hint">candidate selection</span></div>
+        <div class="table-wrap"><table id="chunkTable"></table></div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel chart-panel">
+        <div class="section-head"><h2>Modular Pareto frontier</h2><span class="hint">quality vs latency</span></div>
+        <canvas id="paretoChart" width="640" height="340"></canvas>
+      </div>
+      <div class="panel">
+        <div class="section-head"><h2>Modular leaderboard</h2><span class="hint">MRR, nDCG, CI</span></div>
+        <div class="table-wrap"><table id="modularTable"></table></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>Artifacts</h2><span class="hint">generated files</span></div>
+      <ul id="files" class="files"></ul>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
