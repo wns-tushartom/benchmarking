@@ -1,0 +1,14 @@
+# Large data files
+Retreiver/data/modular_runs/full/modular_details.csv
+Retreiver/data/full_benchmark/benchmark_details.csv
+Retreiver/data/chunking_recall_results.csv
+Retreiver/data/qa_text_test.csv
+Retreiver/data/query.csv
+Retreiver/data/pdfs/*.pdf
+Retreiver/tests/test.pdf
+
+# Milvus database
+Retreiver/data/milvus_lite.db/
+
+# Excel files (can be regenerated)
+*.xlsx
