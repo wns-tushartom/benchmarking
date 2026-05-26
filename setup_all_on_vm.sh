@@ -2,389 +2,327 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VM_DIR="$ROOT/wns-vm-adapters"
-BENCH_DIR="$ROOT/Retreiver"
-INSTALLER_DIR="$ROOT/wns-benchmark-adapter-installer"
-LOG_DIR="$ROOT/logs"
-PID_FILE="$LOG_DIR/embedding_service.pid"
-DRY_RUN=0
-SKIP_MODEL_SMOKE=0
+RETRIEVER_DIR="$ROOT/Retreiver"
+VM_HOST=""
 SKIP_PIP=0
-VM_HOST="${WNS_PUBLIC_HOST:-}"
+SKIP_DOCKER=0
+SKIP_MODEL_SERVICE=0
+SKIP_MODEL_SMOKE=0
+DRY_RUN=0
+FORCE_ENV=0
+MODEL_PORT=5000
+QDRANT_HTTP_PORT=5001
+QDRANT_GRPC_PORT=5002
+PGVECTOR_PORT=5003
+WEAVIATE_HTTP_PORT=5004
+WEAVIATE_GRPC_PORT=5005
 
 usage() {
-  cat <<'EOF'
-Usage: bash setup_all_on_vm.sh [--host VM_HOST_OR_IP] [--skip-model-smoke] [--skip-pip] [--dry-run]
+  cat <<'USAGE'
+Usage:
+  bash setup_all_on_vm.sh [--host VM_HOST_OR_IP] [options]
 
-Does all VM setup in one command:
-  1. Creates .env files with only ports 5000-5010.
-  2. Installs VM embedding service requirements.
-  3. Starts Qdrant, PGVector, and Weaviate with Docker Compose.
-  4. Starts Jina/GTE embedding FastAPI service on port 5000.
-  5. Installs benchmark adapters into Retreiver.
-  6. Configures Retreiver/.env to point to this VM.
-  7. Writes local frontend connection helper files.
-  8. Runs syntax/config/service checks.
+Default behavior:
+  1. Detect VM host/IP if --host is omitted
+  2. Write Retreiver/.env.vm.generated
+  3. Create Retreiver/.env if missing, or preserve existing .env
+  4. Create Python venv and install model + benchmark adapter dependencies
+  5. Start Qdrant, PGVector, and Weaviate through Docker Compose
+  6. Start unified FastAPI model adapter service on port 5000
+  7. Run health checks and lightweight smoke tests
+  8. Write VM_SETUP_RESULT.txt
 
 Options:
-  --host HOST           Hostname/IP the local frontend should use to reach this VM.
-                        If omitted, the script auto-detects the first non-loopback IP.
-  --skip-model-smoke    Do not call /embed/jina and /embed/gte during setup.
-                        Useful if model downloads are slow and you only want service health first.
-  --skip-pip            Skip pip installs if dependencies are already installed.
-  --dry-run             Validate script flow and write configs, but do not install/start services.
-EOF
+  --host HOST              Public/reachable VM host or IP used in generated .env URLs
+  --force-env              Replace Retreiver/.env with generated VM env
+  --skip-pip               Do not create venv or install Python packages
+  --skip-docker            Do not start vector DB Docker Compose services
+  --skip-model-service     Do not start model adapter FastAPI service
+  --skip-model-smoke       Do not call model endpoints, only health URLs
+  --dry-run                Print actions and write generated files without starting services
+  -h, --help               Show this help
+
+Host-facing ports:
+  5000  unified model adapter FastAPI: /embed/jina, /embed/gte, /rerank/qwen, /rerank/bge
+  5001  Qdrant HTTP
+  5002  Qdrant gRPC
+  5003  PGVector/Postgres
+  5004  Weaviate HTTP
+  5005  Weaviate gRPC
+USAGE
 }
 
-log() { printf '\n\033[1;36m[WNS setup]\033[0m %s\n' "$*"; }
-warn() { printf '\n\033[1;33m[WNS setup warning]\033[0m %s\n' "$*"; }
-fail() { printf '\n\033[1;31m[WNS setup failed]\033[0m %s\n' "$*" >&2; exit 1; }
-run() { echo "+ $*"; if [ "$DRY_RUN" -eq 0 ]; then "$@"; fi; }
-
-while [ "$#" -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) VM_HOST="${2:-}"; shift 2 ;;
-    --skip-model-smoke) SKIP_MODEL_SMOKE=1; shift ;;
+    --force-env) FORCE_ENV=1; shift ;;
     --skip-pip) SKIP_PIP=1; shift ;;
+    --skip-docker) SKIP_DOCKER=1; shift ;;
+    --skip-model-service) SKIP_MODEL_SERVICE=1; shift ;;
+    --skip-model-smoke) SKIP_MODEL_SMOKE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) fail "Unknown option: $1" ;;
+    *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-require_file() { [ -e "$1" ] || fail "Required path missing: $1"; }
-require_file "$VM_DIR/app/embedding_service.py"
-require_file "$VM_DIR/docker-compose.vector-dbs.yml"
-require_file "$BENCH_DIR/scripts/benchmark_cli.py"
-require_file "$INSTALLER_DIR/scripts/install_adapters.sh"
+run() {
+  echo "+ $*"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    "$@"
+  fi
+}
 
-if [ -z "$VM_HOST" ]; then
-  VM_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
-fi
-if [ -z "$VM_HOST" ]; then
-  VM_HOST="127.0.0.1"
-  warn "Could not auto-detect VM IP. Using 127.0.0.1. Re-run with --host VM_IP if local machine connects remotely."
-fi
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "MISSING command: $1" >&2
+    return 1
+  fi
+}
 
-mkdir -p "$LOG_DIR"
-log "Using VM host for local frontend connection: $VM_HOST"
-log "Allowed host ports: 5000 embedding, 5001 Qdrant, 5002 Qdrant gRPC, 5003 PGVector, 5004 Weaviate, 5005 Jupyter optional"
+detect_host() {
+  if [[ -n "$VM_HOST" ]]; then
+    echo "$VM_HOST"
+    return
+  fi
+  local detected=""
+  detected="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -z "$detected" ]]; then
+    detected="127.0.0.1"
+  fi
+  echo "$detected"
+}
 
-if [ "$DRY_RUN" -eq 0 ]; then
-  command -v python3 >/dev/null 2>&1 || fail "python3 is missing on VM"
-  command -v docker >/dev/null 2>&1 || fail "docker is missing on VM"
-  docker compose version >/dev/null 2>&1 || fail "docker compose is missing or not available"
-fi
+write_env() {
+  local host="$1"
+  mkdir -p "$RETRIEVER_DIR/logs" "$RETRIEVER_DIR/run"
+  cat > "$RETRIEVER_DIR/.env.vm.generated" <<EOF
+# Generated by setup_all_on_vm.sh
+WNS_BENCHMARK_MODE=vm_remote_required
 
-log "Writing VM service .env"
-cat > "$VM_DIR/.env" <<EOF
-WNS_PUBLIC_HOST=$VM_HOST
-WNS_VM_HOST=0.0.0.0
-WNS_EMBEDDING_PORT=5000
-EMBEDDING_DEVICE=auto
-JINA_MODEL_NAME=jinaai/jina-embeddings-v3
-GTE_MODEL_NAME=Alibaba-NLP/gte-multilingual-base
-WNS_EMBEDDING_API_KEY=
-POSTGRES_USER=wns
-POSTGRES_PASSWORD=wns_password
-POSTGRES_DB=wns_benchmark
-EOF
+# Unified VM model adapter service, one HTTP port for model adapters
+JINA_EMBEDDING_URL=http://$host:$MODEL_PORT/embed/jina
+GTE_EMBEDDING_URL=http://$host:$MODEL_PORT/embed/gte
+QWEN_RERANK_URL=http://$host:$MODEL_PORT/rerank/qwen
+BGE_RERANK_URL=http://$host:$MODEL_PORT/rerank/bge
 
-log "Writing benchmark .env, used by local dashboard/backend and VM benchmark runs"
-cat > "$BENCH_DIR/.env" <<EOF
-# Auto-generated by setup_all_on_vm.sh
-WNS_PUBLIC_HOST=$VM_HOST
-JINA_EMBEDDING_MODE=vm_remote
-JINA_EMBEDDING_URL=http://$VM_HOST:5000/embed/jina
-JINA_API_KEY=
-JINA_EMBEDDING_MODEL=jina-embeddings-v3
-GTE_EMBEDDING_MODE=vm_remote
-GTE_EMBEDDING_URL=http://$VM_HOST:5000/embed/gte
-HF_TOKEN=
-GTE_EMBEDDING_MODEL=Alibaba-NLP/gte-multilingual-base
-QDRANT_URL=http://$VM_HOST:5001
-PGVECTOR_DSN=postgresql://wns:wns_password@$VM_HOST:5003/wns_benchmark
-DATABASE_URL=postgresql://wns:wns_password@$VM_HOST:5003/wns_benchmark
-WEAVIATE_URL=http://$VM_HOST:5004
-QWEN_RERANK_URL=
-AWS_REGION=
-AWS_DEFAULT_REGION=
+# Commercial APIs, fill only if using these commercial adapters
 OPENAI_API_KEY=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
+AMAZON_RERANK_MODEL_ID=amazon.rerank-v1:0
+
+# Vector DBs on VM host-facing ports
+QDRANT_URL=http://$host:$QDRANT_HTTP_PORT
+QDRANT_GRPC_URL=http://$host:$QDRANT_GRPC_PORT
+PGVECTOR_DSN=postgresql://wns:wns_password@$host:$PGVECTOR_PORT/wns_benchmark
+DATABASE_URL=postgresql://wns:wns_password@$host:$PGVECTOR_PORT/wns_benchmark
+WEAVIATE_URL=http://$host:$WEAVIATE_HTTP_PORT
+WEAVIATE_GRPC_URL=$host:$WEAVIATE_GRPC_PORT
+
+# Model names and device
+JINA_EMBEDDING_MODEL=jinaai/jina-embeddings-v3
+GTE_EMBEDDING_MODEL=Alibaba-NLP/gte-multilingual-base
+QWEN_RERANK_MODEL=Qwen/Qwen3-Reranker-4B
+BGE_RERANKER_MODEL=BAAI/bge-reranker-base
+WNS_MODEL_DEVICE=cuda
 EOF
 
-log "Writing local frontend helper CMD files"
-mkdir -p "$BENCH_DIR/scripts/windows"
-cat > "$BENCH_DIR/scripts/windows/Configure-LocalFrontendForVM.cmd" <<'EOF'
-@echo off
-setlocal EnableExtensions
-set VM_HOST=%~1
-if "%VM_HOST%"=="" set VM_HOST=__VM_HOST_PLACEHOLDER__
-if "%VM_HOST%"=="" (
-  echo Usage: scripts\windows\Configure-LocalFrontendForVM.cmd VM_HOST_OR_IP
-  exit /b 2
-)
-if not exist scripts\benchmark_cli.py (
-  echo Run this from the Retreiver project root.
-  exit /b 2
-)
-(
-  echo WNS_PUBLIC_HOST=%VM_HOST%
-  echo JINA_EMBEDDING_MODE=vm_remote
-  echo JINA_EMBEDDING_URL=http://%VM_HOST%:5000/embed/jina
-  echo JINA_API_KEY=
-  echo JINA_EMBEDDING_MODEL=jina-embeddings-v3
-  echo GTE_EMBEDDING_MODE=vm_remote
-  echo GTE_EMBEDDING_URL=http://%VM_HOST%:5000/embed/gte
-  echo HF_TOKEN=
-  echo GTE_EMBEDDING_MODEL=Alibaba-NLP/gte-multilingual-base
-  echo QDRANT_URL=http://%VM_HOST%:5001
-  echo PGVECTOR_DSN=postgresql://wns:wns_password@%VM_HOST%:5003/wns_benchmark
-  echo DATABASE_URL=postgresql://wns:wns_password@%VM_HOST%:5003/wns_benchmark
-  echo WEAVIATE_URL=http://%VM_HOST%:5004
-  echo QWEN_RERANK_URL=
-  echo AWS_REGION=
-  echo AWS_DEFAULT_REGION=
-  echo OPENAI_API_KEY=
-) > .env
-
-echo Wrote .env for VM %VM_HOST%.
-echo Now run: scripts\windows\Start-WnsDashboard-VM.cmd
-endlocal
-EOF
-python3 - <<PY
-from pathlib import Path
-p=Path(r"$BENCH_DIR/scripts/windows/Configure-LocalFrontendForVM.cmd")
-s=p.read_text()
-s=s.replace('__VM_HOST_PLACEHOLDER__', '$VM_HOST')
-p.write_text(s)
-PY
-cat > "$BENCH_DIR/scripts/windows/Start-WnsDashboard-VM.cmd" <<'EOF'
-@echo off
-setlocal EnableExtensions
-if not exist scripts\serve_benchmark_dashboard.py (
-  echo Run this from the Retreiver project root.
-  exit /b 2
-)
-if exist .env (
-  for /f "usebackq tokens=1,* delims==" %%A in (`type .env ^| findstr /v /r "^#"`) do set "%%A=%%B"
-)
-if not exist .venv (
-  py -3 -m venv .venv
-)
-call .venv\Scripts\activate.bat
-python -m pip install -r requirements-benchmark.txt
-python scripts\check_services.py
-start "WNS Benchmark Dashboard" http://127.0.0.1:8765
-python scripts\serve_benchmark_dashboard.py 8765
-endlocal
-EOF
-
-cat > "$BENCH_DIR/scripts/windows/Connect-Frontend-To-VM.cmd" <<'EOF'
-@echo off
-setlocal EnableExtensions
-set VM_HOST=%~1
-if "%VM_HOST%"=="" set VM_HOST=__VM_HOST_PLACEHOLDER__
-if "%VM_HOST%"=="" (
-  echo Usage: scripts\windows\Connect-Frontend-To-VM.cmd VM_HOST_OR_IP
-  exit /b 2
-)
-if not exist scripts\benchmark_cli.py (
-  echo Run this from the Retreiver project root.
-  exit /b 2
-)
-call scripts\windows\Configure-LocalFrontendForVM.cmd %VM_HOST%
-if errorlevel 1 exit /b %errorlevel%
-python scripts\test_vm_connection.py
-if errorlevel 1 (
-  echo VM connection check failed. Confirm VM setup completed and ports 5000, 5001, 5003, 5004 are reachable.
-  exit /b %errorlevel%
-)
-call scripts\windows\Start-WnsDashboard-VM.cmd
-endlocal
-EOF
-python3 - <<PY
-from pathlib import Path
-p=Path(r"$BENCH_DIR/scripts/windows/Connect-Frontend-To-VM.cmd")
-s=p.read_text()
-s=s.replace('__VM_HOST_PLACEHOLDER__', '$VM_HOST')
-p.write_text(s)
-PY
-
-cat > "$ROOT/LOCAL_FRONTEND_CONNECTION.md" <<EOF
-# Local frontend connection
-
-After this VM script completes, your local Retreiver frontend should use:
-
-\`\`\`env
-JINA_EMBEDDING_URL=http://$VM_HOST:5000/embed/jina
-GTE_EMBEDDING_URL=http://$VM_HOST:5000/embed/gte
-QDRANT_URL=http://$VM_HOST:5001
-PGVECTOR_DSN=postgresql://wns:wns_password@$VM_HOST:5003/wns_benchmark
-WEAVIATE_URL=http://$VM_HOST:5004
-\`\`\`
-
-On Windows CMD from the local Retreiver root, use the one-command launcher:
-
-\`\`\`cmd
-scripts\\windows\\Connect-Frontend-To-VM.cmd $VM_HOST
-\`\`\`
-
-This writes the local env file, tests VM connectivity, then starts the dashboard.
-
-Manual fallback:
-
-\`\`\`cmd
-scripts\\windows\\Configure-LocalFrontendForVM.cmd $VM_HOST
-scripts\\windows\\Start-WnsDashboard-VM.cmd
-\`\`\`
-
-If you cloned this package after the VM setup script was run, the VM host is embedded in \`Connect-Frontend-To-VM.cmd\` and \`Configure-LocalFrontendForVM.cmd\`. If not, pass the VM IP manually.
-EOF
-
-log "Installing VM Python requirements"
-if [ "$SKIP_PIP" -eq 0 ]; then
-  run python3 -m venv "$VM_DIR/.venv"
-  if [ "$DRY_RUN" -eq 0 ]; then
-    # shellcheck disable=SC1091
-    source "$VM_DIR/.venv/bin/activate"
-    python -m pip install --upgrade pip
-    python -m pip install -r "$VM_DIR/requirements.txt"
-    python - <<'PY'
-try:
-    import torch
-    print('torch:', torch.__version__)
-    print('cuda_available:', torch.cuda.is_available())
-    if torch.cuda.is_available(): print('cuda_device:', torch.cuda.get_device_name(0))
-except Exception as exc:
-    print('torch check failed:', exc)
-PY
-    deactivate || true
-  fi
-else
-  log "Skipping VM pip install"
-fi
-
-log "Starting vector databases"
-if [ "$DRY_RUN" -eq 0 ]; then
-  (cd "$VM_DIR" && docker compose -f docker-compose.vector-dbs.yml up -d)
-else
-  echo "+ (cd $VM_DIR && docker compose -f docker-compose.vector-dbs.yml up -d)"
-fi
-
-log "Starting embedding service on port 5000"
-if [ "$DRY_RUN" -eq 0 ]; then
-  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    log "Embedding service already running with PID $(cat "$PID_FILE")"
+  if [[ "$FORCE_ENV" == "1" || ! -f "$RETRIEVER_DIR/.env" ]]; then
+    run cp "$RETRIEVER_DIR/.env.vm.generated" "$RETRIEVER_DIR/.env"
+    echo "Wrote $RETRIEVER_DIR/.env"
   else
-    (cd "$VM_DIR" && bash -c 'set -a; source .env; set +a; source .venv/bin/activate; nohup uvicorn app.embedding_service:app --host 0.0.0.0 --port 5000 > ../logs/embedding_service.log 2>&1 & echo $! > ../logs/embedding_service.pid')
+    echo "Kept existing $RETRIEVER_DIR/.env. New generated values are in .env.vm.generated."
+    echo "Use --force-env if you want this script to replace .env."
   fi
-  echo "Embedding service log: $LOG_DIR/embedding_service.log"
-else
-  echo "+ start uvicorn app.embedding_service:app --host 0.0.0.0 --port 5000"
-fi
+}
 
-log "Installing benchmark adapters into Retreiver"
-if [ "$DRY_RUN" -eq 0 ]; then
-  bash "$INSTALLER_DIR/scripts/install_adapters.sh" "$BENCH_DIR"
-else
-  echo "+ bash $INSTALLER_DIR/scripts/install_adapters.sh $BENCH_DIR"
-fi
-
-log "Installing benchmark Python requirements"
-if [ "$SKIP_PIP" -eq 0 ]; then
-  run python3 -m venv "$BENCH_DIR/.venv"
-  if [ "$DRY_RUN" -eq 0 ]; then
-    # shellcheck disable=SC1091
-    source "$BENCH_DIR/.venv/bin/activate"
-    python -m pip install --upgrade pip
-    python -m pip install -r "$BENCH_DIR/requirements-benchmark.txt"
-    deactivate || true
+install_python_deps() {
+  if [[ "$SKIP_PIP" == "1" ]]; then
+    echo "Skipping Python package install."
+    return
   fi
-else
-  log "Skipping benchmark pip install"
-fi
+  need_cmd python3
+  run python3 -m venv "$RETRIEVER_DIR/.venv-vm"
+  # shellcheck source=/dev/null
+  source "$RETRIEVER_DIR/.venv-vm/bin/activate"
+  run python -m pip install --upgrade pip setuptools wheel
+  if [[ -f "$RETRIEVER_DIR/requirements-benchmark.txt" ]]; then
+    run python -m pip install -r "$RETRIEVER_DIR/requirements-benchmark.txt"
+  fi
+  run python -m pip install fastapi 'uvicorn[standard]' sentence-transformers torch transformers numpy pydantic
+}
 
-log "Running syntax and config validation"
-run python3 -m py_compile \
-  "$VM_DIR/app/embedding_service.py" \
-  "$VM_DIR/scripts/check_all.py" \
-  "$BENCH_DIR/scripts/check_services.py" \
-  "$BENCH_DIR/scripts/test_vm_connection.py" \
-  "$BENCH_DIR/scripts/benchmark_cli.py" \
-  "$BENCH_DIR/scripts/serve_benchmark_dashboard.py" \
-  "$BENCH_DIR/benchmarking/adapters/remote_embeddings.py" \
-  "$BENCH_DIR/benchmarking/adapters/vector_qdrant.py" \
-  "$BENCH_DIR/benchmarking/adapters/vector_pgvector.py" \
-  "$BENCH_DIR/benchmarking/adapters/vector_weaviate.py"
+start_vector_dbs() {
+  if [[ "$SKIP_DOCKER" == "1" ]]; then
+    echo "Skipping Docker vector DB startup."
+    return
+  fi
+  need_cmd docker
+  run docker compose -f "$RETRIEVER_DIR/docker-compose.benchmark.yml" up -d qdrant postgres-pgvector weaviate
+}
 
-if [ "$DRY_RUN" -eq 0 ]; then
-  (cd "$BENCH_DIR" && source .venv/bin/activate && python scripts/benchmark_cli.py validate)
-else
-  echo "+ (cd $BENCH_DIR && python scripts/benchmark_cli.py validate)"
-fi
+start_model_service() {
+  if [[ "$SKIP_MODEL_SERVICE" == "1" ]]; then
+    echo "Skipping model adapter service startup."
+    return
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "+ start unified model adapter service on port $MODEL_PORT"
+    return
+  fi
+  if [[ ! -x "$RETRIEVER_DIR/.venv-vm/bin/python" ]]; then
+    echo "Missing VM venv. Run without --skip-pip first." >&2
+    exit 1
+  fi
+  if [[ -f "$RETRIEVER_DIR/run/wns_vm_adapter_service.pid" ]]; then
+    old_pid="$(cat "$RETRIEVER_DIR/run/wns_vm_adapter_service.pid" || true)"
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+      kill "$old_pid" || true
+      sleep 2
+    fi
+  fi
+  # shellcheck source=/dev/null
+  source "$RETRIEVER_DIR/.venv-vm/bin/activate"
+  set -a
+  # shellcheck source=/dev/null
+  source "$RETRIEVER_DIR/.env.vm.generated"
+  set +a
+  nohup uvicorn scripts.wns_vm_adapter_service:app --app-dir "$RETRIEVER_DIR" --host 0.0.0.0 --port "$MODEL_PORT" > "$RETRIEVER_DIR/logs/wns_vm_adapter_service.log" 2>&1 &
+  echo $! > "$RETRIEVER_DIR/run/wns_vm_adapter_service.pid"
+  echo "Started model adapter service: PID $(cat "$RETRIEVER_DIR/run/wns_vm_adapter_service.pid")"
+}
 
-log "Waiting briefly for HTTP services"
-if [ "$DRY_RUN" -eq 0 ]; then
-  python3 - <<'PY'
-import time, urllib.request
-for url in ['http://127.0.0.1:5000/health','http://127.0.0.1:5001/','http://127.0.0.1:5004/v1/meta']:
-    ok=False; last=''
-    for _ in range(30):
-        try:
-            with urllib.request.urlopen(url, timeout=3) as r:
-                print(url, 'HTTP', r.status); ok=True; break
-        except Exception as e:
-            last=str(e); time.sleep(2)
-    if not ok:
-        print(url, 'not ready yet:', last)
+http_wait() {
+  local url="$1"
+  local name="$2"
+  local attempts="${3:-30}"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "+ check $name: $url"
+    return 0
+  fi
+  for _ in $(seq 1 "$attempts"); do
+    if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+      echo "OK: $name"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "CHECK FAILED: $name at $url" >&2
+  return 1
+}
+
+tcp_wait() {
+  local host="$1"
+  local port="$2"
+  local name="$3"
+  local attempts="${4:-30}"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "+ check $name: $host:$port"
+    return 0
+  fi
+  for _ in $(seq 1 "$attempts"); do
+    if python3 - "$host" "$port" <<'PY' >/dev/null 2>&1
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+with socket.create_connection((host, port), timeout=5):
+    pass
 PY
-fi
+    then
+      echo "OK: $name"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "CHECK FAILED: $name at $host:$port" >&2
+  return 1
+}
 
-log "Running service checks"
-if [ "$DRY_RUN" -eq 0 ]; then
-  if [ "$SKIP_MODEL_SMOKE" -eq 1 ]; then
-    python3 - <<'PY'
-import urllib.request
-for url in ['http://127.0.0.1:5000/health','http://127.0.0.1:5001/','http://127.0.0.1:5004/v1/meta']:
-    try:
-        with urllib.request.urlopen(url, timeout=5) as r: print(url, 'OK', r.status)
-    except Exception as e: print(url, 'CHECK', e)
+post_smoke() {
+  local url="$1"
+  local name="$2"
+  local payload="$3"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "+ smoke $name: $url"
+    return 0
+  fi
+  curl -fsS --max-time 180 -X POST "$url" -H 'Content-Type: application/json' -d "$payload" >/tmp/wns_smoke_response.json
+  python - <<'PY'
+import json
+from pathlib import Path
+p = Path('/tmp/wns_smoke_response.json')
+data = json.loads(p.read_text())
+if not (data.get('embeddings') or data.get('data') or data.get('scores') or data.get('results')):
+    raise SystemExit(f'Unexpected smoke response keys: {sorted(data.keys())}')
+print('OK smoke response keys:', ','.join(sorted(data.keys())))
 PY
+  echo "OK: $name smoke"
+}
+
+run_checks() {
+  local host="$1"
+  echo "Running readiness checks..."
+  http_wait "http://127.0.0.1:$MODEL_PORT/health" "model adapter health" 45
+  http_wait "http://127.0.0.1:$QDRANT_HTTP_PORT/" "Qdrant HTTP" 20
+  tcp_wait "127.0.0.1" "$PGVECTOR_PORT" "PGVector/Postgres" 20
+  http_wait "http://127.0.0.1:$WEAVIATE_HTTP_PORT/v1/meta" "Weaviate HTTP" 20
+
+  if [[ "$DRY_RUN" != "1" ]] && command -v python3 >/dev/null 2>&1; then
+    python3 -m py_compile "$RETRIEVER_DIR/scripts/wns_vm_adapter_service.py" "$RETRIEVER_DIR/benchmarking/core/runner.py" "$RETRIEVER_DIR/benchmarking/core/registry.py" || true
+    (cd "$RETRIEVER_DIR" && python3 scripts/benchmark_cli.py validate) || true
+  fi
+
+  if [[ "$SKIP_MODEL_SMOKE" == "1" || "$SKIP_MODEL_SERVICE" == "1" ]]; then
+    echo "Skipping model smoke tests."
   else
-    (cd "$VM_DIR" && source .venv/bin/activate && python scripts/check_all.py) || warn "Full service check had warnings. See logs and rerun: cd wns-vm-adapters && bash scripts/check_all.sh"
+    post_smoke "http://127.0.0.1:$MODEL_PORT/embed/jina" "Jina embedding" '{"texts":["refund policy","flight change"]}' || true
+    post_smoke "http://127.0.0.1:$MODEL_PORT/embed/gte" "GTE embedding" '{"texts":["refund policy","flight change"]}' || true
+    post_smoke "http://127.0.0.1:$MODEL_PORT/rerank/bge" "BGE rerank" '{"query":"refund policy","documents":["refund policy details","seat selection rules"],"top_k":2}' || true
+    if [[ "${WNS_ENABLE_QWEN_SMOKE:-0}" == "1" ]]; then
+      post_smoke "http://127.0.0.1:$MODEL_PORT/rerank/qwen" "Qwen rerank" '{"query":"refund policy","documents":["refund policy details","seat selection rules"],"top_k":2}' || true
+    else
+      echo "Qwen smoke skipped by default because Qwen3:4B download/load is heavy. Set WNS_ENABLE_QWEN_SMOKE=1 to preload/test it."
+    fi
   fi
-  (cd "$BENCH_DIR" && source .venv/bin/activate && set -a && source .env && set +a && python scripts/check_services.py) || warn "Benchmark service check had warnings"
-else
-  echo "+ run service checks"
-fi
+}
 
-cat > "$ROOT/VM_SETUP_RESULT.txt" <<EOF
-WNS VM setup result
-
-VM host used for local frontend: $VM_HOST
-Ports:
-  5000 embedding service
-  5001 Qdrant HTTP
-  5002 Qdrant gRPC
-  5003 PGVector/Postgres
-  5004 Weaviate
-  5005 Jupyter optional
-
-Local Retreiver CMD setup:
-  scripts\\windows\\Connect-Frontend-To-VM.cmd $VM_HOST
-
-Manual fallback:
-  scripts\\windows\\Configure-LocalFrontendForVM.cmd $VM_HOST
-  scripts\\windows\\Start-WnsDashboard-VM.cmd
+write_result() {
+  local host="$1"
+  cat > "$ROOT/VM_SETUP_RESULT.txt" <<EOF
+WNS VM setup completed/generated.
 
 Health URLs:
-  http://$VM_HOST:5000/health
-  http://$VM_HOST:5001/
-  http://$VM_HOST:5004/v1/meta
+  Model adapter: http://$host:$MODEL_PORT/health
+  Jina embedding: http://$host:$MODEL_PORT/embed/jina
+  GTE embedding: http://$host:$MODEL_PORT/embed/gte
+  Qwen rerank: http://$host:$MODEL_PORT/rerank/qwen
+  BGE rerank: http://$host:$MODEL_PORT/rerank/bge
+  Qdrant: http://$host:$QDRANT_HTTP_PORT
+  PGVector: postgresql://wns:wns_password@$host:$PGVECTOR_PORT/wns_benchmark
+  Weaviate: http://$host:$WEAVIATE_HTTP_PORT/v1/meta
 
-Logs:
-  $LOG_DIR/embedding_service.log
+Generated env:
+  $RETRIEVER_DIR/.env.vm.generated
+
+If Retreiver/.env already existed, it was preserved unless --force-env was used.
+Add OPENAI_API_KEY and AWS credentials in Retreiver/.env only if running commercial OpenAI/Amazon adapters.
 EOF
+  echo "Wrote $ROOT/VM_SETUP_RESULT.txt"
+}
 
-log "Setup script finished. Read: $ROOT/VM_SETUP_RESULT.txt"
-cat "$ROOT/VM_SETUP_RESULT.txt"
+main() {
+  VM_HOST="$(detect_host)"
+  echo "WNS VM setup root: $ROOT"
+  echo "Using VM host: $VM_HOST"
+  write_env "$VM_HOST"
+  install_python_deps
+  start_vector_dbs
+  start_model_service
+  run_checks "$VM_HOST"
+  write_result "$VM_HOST"
+  echo "Done."
+}
+
+main "$@"

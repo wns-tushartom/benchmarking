@@ -1,109 +1,52 @@
 from __future__ import annotations
 
-import json
 import os
-import re
 import time
-from typing import Any, Dict, List
+from typing import Any, List
 
 from benchmarking.core.schemas import Chunk, SearchHit
 
 
-def safe_name(name: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
-    return cleaned or "wns_benchmark"
-
-
-def vector_literal(vector: List[float]) -> str:
-    return "[" + ",".join(str(float(v)) for v in vector) + "]"
+def _vec(values: List[float]) -> str:
+    return "[" + ",".join(str(float(v)) for v in values) + "]"
 
 
 class PGVectorStoreAdapter:
-    def __init__(self, name: str, dsn: str = "", table_prefix: str = "wns_benchmark", **_: Any):
+    def __init__(self, name: str, dsn_env: str = "PGVECTOR_DSN", table_prefix: str = "wns_benchmark", **_: Any):
         try:
             import psycopg
         except Exception as exc:
-            raise RuntimeError("psycopg[binary] is required. Run: python -m pip install 'psycopg[binary]'") from exc
+            raise RuntimeError("psycopg[binary] is required for PGVectorStoreAdapter. Install requirements-benchmark.txt.") from exc
         self.psycopg = psycopg
         self.name = name
-        self.dsn = dsn or os.environ.get("PGVECTOR_DSN") or os.environ.get("DATABASE_URL")
+        self.dsn = os.environ.get(dsn_env) or os.environ.get("DATABASE_URL")
         if not self.dsn:
-            raise RuntimeError("Missing PGVECTOR_DSN or DATABASE_URL")
-        self.table_name = f"{safe_name(table_prefix)}_{safe_name(name)}_{os.getpid()}"
-        self.chunks_by_id: Dict[int, Chunk] = {}
-
-    def _connect(self):
-        return self.psycopg.connect(self.dsn)
+            raise RuntimeError(f"{dsn_env} or DATABASE_URL is required for PGVector")
+        self.table = f"{table_prefix}_{os.getpid()}_{int(time.time())}"
+        self.dimensions = 0
 
     def reset_collection(self, schema: Any = None) -> None:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f'DROP TABLE IF EXISTS "{self.table_name}"')
-            conn.commit()
+        with self.psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute(f'DROP TABLE IF EXISTS "{self.table}"')
 
-    def upsert(self, chunks: List[Chunk], vectors: List[List[float]]) -> Dict[str, float]:
+    def upsert(self, chunks: List[Chunk], vectors: List[List[float]]) -> dict[str, float]:
         if not vectors:
             return {"upsert_latency_s": 0.0, "vector_count": 0}
-        started = time.perf_counter()
-        dim = len(vectors[0])
-        self.chunks_by_id = {}
-        with self._connect() as conn:
+        start = time.perf_counter()
+        self.dimensions = len(vectors[0])
+        with self.psycopg.connect(self.dsn, autocommit=True) as conn:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            conn.execute(f'DROP TABLE IF EXISTS "{self.table}"')
+            conn.execute(f'CREATE TABLE "{self.table}" (id BIGINT PRIMARY KEY, chunk_id TEXT, pdf_name TEXT, paragraph TEXT, embedding vector({self.dimensions}))')
+            rows = [(i, str(chunk.id), chunk.pdf_name, chunk.paragraph, _vec(vector)) for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1)]
             with conn.cursor() as cur:
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-                cur.execute(f'DROP TABLE IF EXISTS "{self.table_name}"')
-                cur.execute(
-                    f'''
-                    CREATE TABLE "{self.table_name}" (
-                        id integer PRIMARY KEY,
-                        chunk_id integer,
-                        pdf_name text,
-                        paragraph text,
-                        parent_id text,
-                        metadata jsonb,
-                        embedding vector({dim})
-                    )
-                    '''
-                )
-                cur.execute(f'CREATE INDEX "{self.table_name}_hnsw_idx" ON "{self.table_name}" USING hnsw (embedding vector_cosine_ops)')
-                for idx, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
-                    self.chunks_by_id[idx] = chunk
-                    cur.execute(
-                        f'INSERT INTO "{self.table_name}" (id, chunk_id, pdf_name, paragraph, parent_id, metadata, embedding) VALUES (%s,%s,%s,%s,%s,%s,%s::vector)',
-                        (
-                            idx,
-                            int(chunk.id),
-                            chunk.pdf_name,
-                            chunk.paragraph,
-                            chunk.parent_id,
-                            json.dumps(chunk.metadata or {}),
-                            vector_literal(vector),
-                        ),
-                    )
-            conn.commit()
-        return {"upsert_latency_s": time.perf_counter() - started, "vector_count": len(vectors)}
+                cur.executemany(f'INSERT INTO "{self.table}" (id, chunk_id, pdf_name, paragraph, embedding) VALUES (%s, %s, %s, %s, %s::vector)', rows)
+            conn.execute(f'CREATE INDEX "{self.table}_hnsw" ON "{self.table}" USING hnsw (embedding vector_cosine_ops)')
+        return {"upsert_latency_s": time.perf_counter() - start, "vector_count": len(vectors)}
 
     def search(self, query_vector: List[float], top_k: int) -> List[SearchHit]:
-        qvec = vector_literal(query_vector)
-        hits: List[SearchHit] = []
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f'''
-                    SELECT id, chunk_id, pdf_name, paragraph, parent_id, metadata, 1 - (embedding <=> %s::vector) AS score
-                    FROM "{self.table_name}"
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    ''',
-                    (qvec, qvec, int(top_k)),
-                )
-                for row in cur.fetchall():
-                    rid, chunk_id, pdf_name, paragraph, parent_id, metadata, score = row
-                    chunk = self.chunks_by_id.get(int(rid)) or Chunk(
-                        id=int(chunk_id),
-                        pdf_name=str(pdf_name),
-                        paragraph=str(paragraph),
-                        parent_id=str(parent_id or ""),
-                        metadata=metadata or {},
-                    )
-                    hits.append(SearchHit(chunk=chunk, score=float(score)))
-        return hits
+        sql = f'SELECT chunk_id, pdf_name, paragraph, 1 - (embedding <=> %s::vector) AS score FROM "{self.table}" ORDER BY embedding <=> %s::vector LIMIT %s'
+        q = _vec(query_vector)
+        with self.psycopg.connect(self.dsn) as conn:
+            rows = conn.execute(sql, (q, q, top_k)).fetchall()
+        return [SearchHit(Chunk(id=int(row[0]) if str(row[0]).isdigit() else i, pdf_name=row[1], paragraph=row[2], parent_id=str(row[0]), metadata={"store": "PGVector"}), float(row[3])) for i, row in enumerate(rows, 1)]

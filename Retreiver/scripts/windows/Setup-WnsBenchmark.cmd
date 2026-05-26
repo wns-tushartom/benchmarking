@@ -111,7 +111,7 @@ if errorlevel 1 exit /b 1
 if "%SKIP_SMOKE%"=="0" (
   echo.
   echo ==^> Running selected local fallback smoke benchmark
-  "%VENV_PY%" scripts\benchmark_cli.py run --limit-queries 5 --chunker entity_heuristic_w6 --embedding jina_v3 --vector-store Qdrant --index-type HNSW --retrieval-method "Cosine Similarity" --reranker bge-reranker-base --output-dir data/modular_runs/windows_cmd_smoke
+  "%VENV_PY%" scripts\benchmark_cli.py run --limit-queries 5 --chunker entity_heuristic_w6 --embedding jina_v3 --vector-store Qdrant --index-type HNSW --retrieval-method "Cosine Similarity" --reranker none --output-dir data/modular_runs/windows_cmd_smoke
   if errorlevel 1 exit /b 1
   echo OK: Smoke benchmark completed.
 ) else (

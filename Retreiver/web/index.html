@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>WNS Benchmark Dashboard</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=20260525-path-scroll-fix" />
 </head>
 <body>
   <main class="shell">
@@ -31,28 +31,11 @@
       </div>
     </section>
 
-    <section class="panel modular-panel">
-      <div class="section-head">
-        <div>
-          <h2>Modular benchmark harness</h2>
-          <p>Config-driven registry with adapters, richer metrics, run manifest, confidence intervals, category analysis, and winner rationale.</p>
-        </div>
-        <span class="status-pill">Go-to system v1</span>
-      </div>
-      <div class="modular-grid">
-        <div><label>Experiment</label><strong id="experimentName">—</strong></div>
-        <div><label>Config hash</label><strong id="configHash">—</strong></div>
-        <div><label>Dataset hash</label><strong id="datasetHash">—</strong></div>
-        <div><label>Best config</label><strong id="bestConfigLabel">—</strong></div>
-      </div>
-      <div class="why-box"><h3>Why winner</h3><ul id="whyBest"></ul></div>
-    </section>
-
     <section class="panel controls sticky-panel">
       <div class="section-head">
         <div>
-          <h2>Customize benchmark view</h2>
-          <p>Filters update instantly. The benchmark runner still uses deterministic local adapters unless real providers are wired in.</p>
+          <h2>Select benchmark configuration</h2>
+          <p>Pick one combination first. Config options should appear here before you run anything.</p>
         </div>
         <div class="status-pill" id="statusPill">Ready</div>
       </div>
@@ -75,6 +58,23 @@
         <label class="check"><input id="includeMilvus" type="checkbox" /> Include Milvus baseline in legacy run</label>
       </div>
       <pre id="runLog" class="log">Ready.</pre>
+    </section>
+
+    <section class="panel modular-panel">
+      <div class="section-head">
+        <div>
+          <h2>Modular benchmark harness</h2>
+          <p>Config-driven registry with adapters, richer metrics, run manifest, confidence intervals, category analysis, and winner rationale.</p>
+        </div>
+        <span class="status-pill">Go-to system v1</span>
+      </div>
+      <div class="modular-grid">
+        <div><label>Experiment</label><strong id="experimentName">—</strong></div>
+        <div><label>Config hash</label><strong id="configHash">—</strong></div>
+        <div><label>Dataset hash</label><strong id="datasetHash">—</strong></div>
+        <div><label>Best config</label><strong id="bestConfigLabel">—</strong></div>
+      </div>
+      <div class="why-box"><h3>Why winner</h3><ul id="whyBest"></ul></div>
     </section>
 
     <section class="grid two">
@@ -126,6 +126,6 @@
       <ul id="files" class="files"></ul>
     </section>
   </main>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=20260525-path-scroll-fix"></script>
 </body>
 </html>

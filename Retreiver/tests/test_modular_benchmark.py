@@ -10,6 +10,26 @@ from benchmarking.adapters.local import LocalChunkWorkbookAdapter, LocalHashEmbe
 from benchmarking.core.runner import run_experiment
 
 
+def local_smoke_config(root: Path, target: Path) -> Path:
+    cfg = load_benchmark_config(root / "configs" / "benchmark.local.json")
+    cfg["experiment"]["mode"] = "unit_local_smoke"
+    cfg["matrix"] = {
+        "chunkers": ["entity_heuristic_w6"],
+        "embeddings": ["unit_local_hash"],
+        "vector_stores": ["unit_local_vector"],
+        "index_types": ["HNSW"],
+        "retrieval_methods": ["Cosine Similarity"],
+        "rerankers": ["unit_weighted_overlap"],
+        "evaluators": ["overlap_relevance"],
+    }
+    cfg["techniques"]["embeddings"]["unit_local_hash"] = {"adapter": "local_hash", "dimensions": 32}
+    cfg["techniques"]["vector_stores"]["unit_local_vector"] = {"adapter": "local_vector"}
+    cfg["techniques"]["rerankers"]["unit_weighted_overlap"] = {"adapter": "weighted_overlap"}
+    path = target / "unit.local.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    return path
+
+
 class ModularBenchmarkTests(unittest.TestCase):
     def test_config_load_and_matrix_generation(self):
         cfg = load_benchmark_config(Path("configs/benchmark.local.json"))
@@ -68,7 +88,9 @@ class ModularBenchmarkTests(unittest.TestCase):
     def test_modular_experiment_writes_outputs(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as td:
-            analysis = run_experiment(root / "configs" / "benchmark.local.json", root, Path(td), max_runs=2, limit_queries=5)
+            td_path = Path(td)
+            config_path = local_smoke_config(root, td_path)
+            analysis = run_experiment(config_path, root, td_path, max_runs=2, limit_queries=5)
             self.assertIn("best_config", analysis)
             self.assertTrue((Path(td) / "manifest.json").exists())
             self.assertTrue((Path(td) / "modular_summary.csv").exists())

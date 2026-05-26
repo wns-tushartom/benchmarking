@@ -3,12 +3,12 @@ setlocal EnableExtensions
 
 REM Run a selected benchmark combination from CMD.
 REM Usage:
-REM   scripts\windows\Run-SelectedBenchmark.cmd fixed_tok1200_ov150 jina_v3 Qdrant "bge-reranker-base" 20
+REM   scripts\windows\Run-SelectedBenchmark.cmd fixed_tok1200_ov150 jina_v3 Qdrant none 20
 REM Args:
 REM   1 chunker, default entity_heuristic_w6
 REM   2 embedding, default jina_v3
 REM   3 vector_store, default Qdrant
-REM   4 reranker, default bge-reranker-base
+REM   4 reranker, default none
 REM   5 limit_queries, default 20
 
 set "CHUNKER=%~1"
@@ -20,7 +20,7 @@ set "LIMIT=%~5"
 if "%CHUNKER%"=="" set "CHUNKER=entity_heuristic_w6"
 if "%EMBEDDING%"=="" set "EMBEDDING=jina_v3"
 if "%VECTOR_STORE%"=="" set "VECTOR_STORE=Qdrant"
-if "%RERANKER%"=="" set "RERANKER=bge-reranker-base"
+if "%RERANKER%"=="" set "RERANKER=none"
 if "%LIMIT%"=="" set "LIMIT=20"
 
 set "SCRIPT_DIR=%~dp0"

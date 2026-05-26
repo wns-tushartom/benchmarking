@@ -15,6 +15,21 @@ from benchmarking.core.metrics import bootstrap_ci, mean, mrr, ndcg_at_k, precis
 from benchmarking.core.registry import default_registry
 
 
+def load_env_file(root: Path) -> None:
+    env_path = root / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def run_experiment(
     config_path: Path,
     root: Path,
@@ -23,6 +38,7 @@ def run_experiment(
     limit_queries: int = 0,
     selections: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
+    load_env_file(root)
     cfg = load_benchmark_config(config_path)
     if selections:
         cfg = selected_config(cfg, selections)
@@ -183,6 +199,7 @@ def provider_readiness() -> Dict[str, bool]:
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
         "QWEN_RERANK_URL",
+        "BGE_RERANK_URL",
     ]
     return {k: bool(os.environ.get(k)) for k in keys}
 

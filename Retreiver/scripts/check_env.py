@@ -28,7 +28,8 @@ GROUPS = {
         "AWS_REGION": "Amazon Rerank v1 / Bedrock region",
         "AWS_DEFAULT_REGION": "Optional AWS region alias",
         "AMAZON_RERANK_MODEL_ID": "Exact Bedrock rerank model id",
-        "BGE_RERANKER_MODEL": "Local BGE reranker model name",
+        "BGE_RERANK_URL": "VM/remote BGE reranker endpoint",
+        "BGE_RERANKER_MODEL": "Optional BGE reranker model name on VM",
         "QWEN_RERANK_URL": "VM/remote Qwen reranker endpoint",
         "QWEN_API_KEY": "Optional, if Qwen endpoint requires auth",
     },
@@ -59,7 +60,7 @@ def main() -> None:
         print(f"\n{group}")
         for key, note in keys.items():
             mark = "OK" if is_set(key, values) else "MISSING"
-            optional = key in {"JINA_API_KEY", "HF_TOKEN", "QDRANT_API_KEY", "WEAVIATE_API_KEY", "AWS_DEFAULT_REGION", "QWEN_API_KEY"}
+            optional = key in {"JINA_API_KEY", "HF_TOKEN", "QDRANT_API_KEY", "WEAVIATE_API_KEY", "AWS_DEFAULT_REGION", "QWEN_API_KEY", "BGE_RERANKER_MODEL"}
             if optional and mark == "MISSING":
                 mark = "optional"
             print(f"- {key}: {mark} - {note}")
@@ -67,8 +68,8 @@ def main() -> None:
     print("\nRecommended first real slice needs:")
     for key in ["JINA_EMBEDDING_URL", "GTE_EMBEDDING_URL", "QDRANT_URL"]:
         print(f"- {key}: {'OK' if is_set(key, values) else 'MISSING'}")
-    print("\nEmbedding note: keep JINA_EMBEDDING_URL and GTE_EMBEDDING_URL as VM/remote endpoints. Do not load Jina/GTE locally on the WNS laptop CPU.")
-    print("Qwen note: keep QWEN_RERANK_URL as a VM/remote endpoint. Do not load Qwen3:4B locally on the work laptop unless intentionally provisioned.")
+    print("\nEmbedding note: OPENAI_API_KEY enables OpenAI text-embedding-3-large. Keep JINA_EMBEDDING_URL and GTE_EMBEDDING_URL as VM/remote endpoints. Do not load Jina/GTE locally on the WNS laptop CPU.")
+    print("Reranker note: Amazon uses AWS/Bedrock credentials. Qwen and BGE must use QWEN_RERANK_URL and BGE_RERANK_URL VM endpoints, not laptop-local models.")
 
 
 if __name__ == "__main__":

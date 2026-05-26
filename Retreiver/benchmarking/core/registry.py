@@ -25,7 +25,8 @@ class Registry:
 
 def default_registry() -> Registry:
     from benchmarking.adapters.local import LocalChunkWorkbookAdapter, LocalHashEmbeddingAdapter, LocalVectorStoreAdapter, WeightedOverlapReranker, OverlapEvaluator
-    from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
+    from benchmarking.adapters.remote_embeddings import OpenAIEmbeddingAdapter, RemoteHTTPEmbeddingAdapter
+    from benchmarking.adapters.remote_rerankers import AmazonBedrockRerankerAdapter, RemoteHTTPRerankerAdapter
     from benchmarking.adapters.vector_qdrant import QdrantVectorStoreAdapter
     from benchmarking.adapters.vector_pgvector import PGVectorStoreAdapter
     from benchmarking.adapters.vector_weaviate import WeaviateVectorStoreAdapter
@@ -33,11 +34,14 @@ def default_registry() -> Registry:
     r = Registry()
     r.register("chunker", "local_workbook", LocalChunkWorkbookAdapter)
     r.register("embedding", "local_hash", LocalHashEmbeddingAdapter)
-    r.register("vector_store", "local_vector", LocalVectorStoreAdapter)
-    r.register("reranker", "weighted_overlap", WeightedOverlapReranker)
+    r.register("embedding", "openai", OpenAIEmbeddingAdapter)
     r.register("embedding", "remote_http", RemoteHTTPEmbeddingAdapter)
+    r.register("vector_store", "local_vector", LocalVectorStoreAdapter)
     r.register("vector_store", "qdrant", QdrantVectorStoreAdapter)
     r.register("vector_store", "pgvector", PGVectorStoreAdapter)
     r.register("vector_store", "weaviate", WeaviateVectorStoreAdapter)
+    r.register("reranker", "weighted_overlap", WeightedOverlapReranker)
+    r.register("reranker", "amazon_bedrock", AmazonBedrockRerankerAdapter)
+    r.register("reranker", "remote_http", RemoteHTTPRerankerAdapter)
     r.register("evaluator", "overlap_relevance", OverlapEvaluator)
     return r

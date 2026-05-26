@@ -30,7 +30,7 @@ services:
     container_name: wns-weaviate
     ports:
       - "5004:8080"
-      - "5006:50051"
+      - "5005:50051"
     environment:
       QUERY_DEFAULTS_LIMIT: 25
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
