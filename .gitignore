@@ -4,8 +4,10 @@ Retreiver/data/full_benchmark/benchmark_details.csv
 Retreiver/data/chunking_recall_results.csv
 Retreiver/data/qa_text_test.csv
 Retreiver/data/query.csv
-Retreiver/data/pdfs/*.pdf
-Retreiver/tests/test.pdf
+
+# PDF files
+*.pdf
+Retreiver/data/pdfs/
 
 # Milvus database
 Retreiver/data/milvus_lite.db/
