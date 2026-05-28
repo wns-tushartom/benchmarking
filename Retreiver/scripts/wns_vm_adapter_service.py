@@ -59,7 +59,12 @@ def cross_encoder_model(key: str):
     if key == "bge":
         return CrossEncoder(BGE_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
     if key == "qwen":
-        return CrossEncoder(QWEN_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
+        model = CrossEncoder(QWEN_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
+        if getattr(model, "tokenizer", None) is not None and getattr(model.tokenizer, "pad_token", None) is None:
+            model.tokenizer.pad_token = model.tokenizer.eos_token
+        if getattr(model, "model", None) is not None and getattr(model.model, "config", None) is not None:
+            model.model.config.pad_token_id = getattr(model.tokenizer, "eos_token_id", None)
+        return model
     raise ValueError(f"unknown reranker key: {key}")
 
 
@@ -103,7 +108,10 @@ def rerank(key: str, req: RerankRequest):
         raise ValueError("rerank request needs documents, texts, or passages")
     model = cross_encoder_model(key)
     pairs = [(req.query, doc) for doc in docs]
-    raw_scores = model.predict(pairs)
+    if key == "qwen":
+        raw_scores = [model.predict([pair])[0] for pair in pairs]
+    else:
+        raw_scores = model.predict(pairs)
     scores = [float(s) for s in raw_scores]
     ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
     if req.top_k:

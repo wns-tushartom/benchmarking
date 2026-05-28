@@ -148,11 +148,17 @@ install_python_deps() {
   run python3 -m venv "$RETRIEVER_DIR/.venv-vm"
   # shellcheck source=/dev/null
   source "$RETRIEVER_DIR/.venv-vm/bin/activate"
-  run python -m pip install --upgrade pip setuptools wheel
+  run python -m pip install --upgrade pip wheel
+  run python -m pip install 'setuptools<82'
   if [[ -f "$RETRIEVER_DIR/requirements-benchmark.txt" ]]; then
     run python -m pip install -r "$RETRIEVER_DIR/requirements-benchmark.txt"
   fi
-  run python -m pip install fastapi 'uvicorn[standard]' sentence-transformers torch transformers numpy pydantic
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    # WNS A10G VM reports driver CUDA 12.8. Avoid PyTorch cu130, which fails with driver-too-old.
+    run python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+  else
+    run python -m pip install torch torchvision torchaudio
+  fi
 }
 
 start_vector_dbs() {

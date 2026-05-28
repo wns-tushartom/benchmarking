@@ -5,29 +5,16 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import subprocess
 import sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path(__file__).resolve().parents[1]
-
-def load_dotenv(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-load_dotenv(ROOT / ".env")
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import generate_matrix, load_benchmark_config
 
+ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 FULL_DIR = ROOT / "data" / "full_benchmark"
 MODULAR_DIR = ROOT / "data" / "modular_runs" / "latest"
@@ -87,17 +74,6 @@ def sort_summary(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=key)
 
 
-def modular_run_is_current_real_mode() -> bool:
-    manifest_path = MODULAR_DIR / "manifest.json"
-    if not manifest_path.exists():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return manifest.get("experiment", {}).get("mode") == benchmark_options().get("mode") == "vm_real_adapters"
-    except Exception:
-        return False
-
-
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
@@ -116,11 +92,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(benchmark_options())
             return
         if parsed.path == "/api/results":
-            options = benchmark_options()
-            real_mode = options.get("mode") == "vm_real_adapters"
-            has_current_real_run = modular_run_is_current_real_mode()
-            summary = [] if real_mode else sort_summary(read_csv(FULL_DIR / "benchmark_summary.csv"))
-            chunking = [] if real_mode else sort_summary(read_csv(ROOT / "data" / "chunking_recall_summary.csv"))
+            summary = sort_summary(read_csv(FULL_DIR / "benchmark_summary.csv"))
+            chunking = sort_summary(read_csv(ROOT / "data" / "chunking_recall_summary.csv"))
             best = summary[0].get("recall_at_5") if summary else None
             query_count = summary[0].get("query_count") if summary else None
             files = [
@@ -135,22 +108,23 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/modular_runs/latest/analysis.json",
                 "data/modular_runs/latest/manifest.json",
                 "data/modular_runs/latest/MODULAR_REPORT.md",
+                "WNS_VM_PROGRESS_20260528.md",
+                "WNS_PARALLEL_EXECUTION_PLAN.md",
                 "WNS_BENCHMARK_FINAL_REPORT.md",
                 "MODULAR_BENCHMARKING_ROADMAP.md",
             ]
-            modular_summary = sort_summary(read_csv(MODULAR_DIR / "modular_summary.csv")) if has_current_real_run else []
+            modular_summary = sort_summary(read_csv(MODULAR_DIR / "modular_summary.csv"))
             modular_analysis = {}
             modular_manifest = {}
-            if has_current_real_run:
-                for name, target in [("analysis", MODULAR_DIR / "analysis.json"), ("manifest", MODULAR_DIR / "manifest.json")]:
-                    if target.exists():
-                        try:
-                            if name == "analysis":
-                                modular_analysis = json.loads(target.read_text(encoding="utf-8"))
-                            else:
-                                modular_manifest = json.loads(target.read_text(encoding="utf-8"))
-                        except Exception:
-                            pass
+            for name, target in [("analysis", MODULAR_DIR / "analysis.json"), ("manifest", MODULAR_DIR / "manifest.json")]:
+                if target.exists():
+                    try:
+                        if name == "analysis":
+                            modular_analysis = json.loads(target.read_text(encoding="utf-8"))
+                        else:
+                            modular_manifest = json.loads(target.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
             self.send_json({
                 "summary_count": len(summary),
                 "query_count": query_count,
@@ -162,8 +136,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "analysis": modular_analysis,
                     "manifest": modular_manifest,
                 },
-                "files": [f for f in files if (ROOT / f).exists() and (not real_mode or f.startswith("data/modular_runs/latest") or f.startswith("data/chunking_methods") or f.startswith("MODULAR"))],
-                "options": options,
+                "files": [f for f in files if (ROOT / f).exists()],
+                "options": benchmark_options(),
             })
             return
         return super().do_GET()

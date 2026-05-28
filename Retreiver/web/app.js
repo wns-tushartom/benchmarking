@@ -1,13 +1,20 @@
 const $ = (id) => document.getElementById(id);
-let state = {summary: [], chunking: [], files: [], modular: {summary: [], analysis: {}, manifest: {}}, options: {}};
+const DEFAULT_OPTIONS = {
+  chunkers: ['entity_heuristic_w6', 'entity_heuristic_w5', 'entity_heuristic_w4', 'Heading_sections_l2', 'fixed_tok1200_ov150'],
+  embeddings: ['jina_v3', 'gte_multilingual_base', 'openai_text-embedding-3-large'],
+  vector_stores: ['Qdrant', 'PGVector', 'Weaviate'],
+  index_types: ['HNSW'],
+  retrieval_methods: ['Cosine Similarity'],
+  rerankers: ['Amazon Rerank v1', 'Qwen3:4B Rerank', 'bge-reranker-base'],
+  matrix_count: 135,
+  mode: 'vm_remote_required'
+};
+let state = {summary: [], chunking: [], files: [], modular: {summary: [], analysis: {}, manifest: {}}, options: {...DEFAULT_OPTIONS}};
 
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
-  const text = await res.text();
-  let data;
-  try { data = text ? JSON.parse(text) : {}; } catch { data = {error: text}; }
-  if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
-  return data;
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 const num = (v) => Number.parseFloat(v || 0) || 0;
 const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
@@ -82,17 +89,41 @@ function renderHeatmap(rows) {
   let html = `<div class="heat-row"><div class="heat-label">Chunking</div>${dbs.map(d => `<div class="heat-label">${escapeHtml(d)}</div>`).join('')}</div>`;
   chunks.forEach(ch => { html += `<div class="heat-row"><div class="heat-label">${escapeHtml(ch)}</div>`; dbs.forEach(db => { const cr = rows.filter(r => r.chunking_method === ch && r.vector_database === db); const avg = cr.length ? cr.reduce((a, r) => a+num(r.recall_at_5), 0)/cr.length : 0; html += `<div class="heat-cell" style="background:linear-gradient(135deg, rgba(167,243,208,${0.18+avg*.75}), rgba(125,211,252,${0.12+avg*.55}))">${avg.toFixed(3)}</div>`; }); html += '</div>'; }); el.innerHTML = html;
 }
+function renderRerankerCards() {
+  const el = $('rerankerCards'); if (!el) return;
+  const verified = new Map([
+    ['Amazon Rerank v1', ['Commercial', 'Needs AWS keys', 'adapter: amazon_bedrock']],
+    ['Qwen3:4B Rerank', ['Open source', 'Verified on GPU', 'endpoint: /rerank/qwen']],
+    ['bge-reranker-base', ['Open source', 'Verified on GPU', 'endpoint: /rerank/bge']]
+  ]);
+  const values = state.options.rerankers?.length ? state.options.rerankers : DEFAULT_OPTIONS.rerankers;
+  el.innerHTML = values.map(name => {
+    const meta = verified.get(name) || ['Configured', 'Check endpoint', ''];
+    return `<button class="model-card" type="button" data-reranker="${escapeHtml(name)}">
+      <strong>${escapeHtml(name)}</strong>
+      <span>${escapeHtml(meta[0])}</span>
+      <small>${escapeHtml(meta[1])}</small>
+      <code>${escapeHtml(meta[2])}</code>
+    </button>`;
+  }).join('');
+  el.querySelectorAll('[data-reranker]').forEach(btn => btn.addEventListener('click', () => {
+    const select = $('selectedReranker');
+    if (select) {
+      select.value = btn.dataset.reranker || 'all';
+      select.dispatchEvent(new Event('input'));
+    }
+  }));
+}
 function render() {
   const rows = filteredRows(), ranked = rankRows(rows), topN = Math.max(3, Math.min(50, Number($('topN').value) || 15)); const modularRows = state.modular.summary || [], bestMod = state.modular.analysis?.best_config || modularRows[0] || {};
-  const selectableCount = state.options.matrix_count || 0;
-  $('totalRuns').textContent = selectableCount || state.summary.length || '0'; $('queryCount').textContent = state.summary[0]?.query_count || state.modular.manifest?.query_count || '—'; $('bestRecall').textContent = state.summary.length ? Math.max(...state.summary.map(r => num(r.recall_at_5))).toFixed(3) : '—';
+  $('totalRuns').textContent = state.summary.length || '0'; $('queryCount').textContent = state.summary[0]?.query_count || state.modular.manifest?.query_count || '—'; $('bestRecall').textContent = state.summary.length ? Math.max(...state.summary.map(r => num(r.recall_at_5))).toFixed(3) : '—';
   const lat = state.summary.map(r => num(r.avg_query_latency_ms)).filter(Boolean); $('bestLatency').textContent = lat.length ? `${Math.min(...lat).toFixed(2)} ms` : '—'; $('modularRuns').textContent = modularRows.length || '0'; $('modularBest').textContent = bestMod.recall_at_5 ? num(bestMod.recall_at_5).toFixed(3) : '—';
   $('experimentName').textContent = state.modular.manifest?.experiment?.name || '—'; $('configHash').textContent = state.modular.manifest?.config_hash || '—'; $('datasetHash').textContent = state.modular.manifest?.dataset_hash || '—'; $('bestConfigLabel').textContent = bestMod.chunker ? `${bestMod.chunker} + ${bestMod.embedding} + ${bestMod.vector_store}` : '—';
   $('whyBest').innerHTML = (state.modular.analysis?.why_best || []).map(x => `<li>${escapeHtml(x)}</li>`).join('') || '<li>No modular analysis yet</li>'; $('rowCount').textContent = `${ranked.length} matching configs`; $('topHint').textContent = `ranked by ${$('rankMetric').value}`;
   table($('summaryTable'), ranked.slice(0, topN), [{key:'benchmark_run_id',label:'Run',render:r=>`<span class="badge">${escapeHtml(r.benchmark_run_id)}</span>`},{key:'chunking_method',label:'Chunking'},{key:'embedding_model',label:'Embedding'},{key:'vector_database',label:'DB'},{key:'reranking_model',label:'Rerank'},{key:'recall_at_5',label:'R@5'},{key:'recall_at_10',label:'R@10'},{key:'avg_query_latency_ms',label:'Avg ms'},{key:'chunk_count',label:'Chunks'}]);
   table($('chunkTable'), rankRows(state.chunking).slice(0, 12), [{key:'chunking_method',label:'Chunking'},{key:'recall_at_3',label:'R@3'},{key:'recall_at_5',label:'R@5'},{key:'recall_at_10',label:'R@10'},{key:'chunk_count',label:'Chunks'}]);
   table($('modularTable'), modularRows.slice(0, topN), [{key:'benchmark_run_id',label:'Run'},{key:'chunker',label:'Chunking'},{key:'embedding',label:'Embedding'},{key:'vector_store',label:'DB'},{key:'index_type',label:'Index'},{key:'retrieval_method',label:'Retrieval'},{key:'reranker',label:'Rerank'},{key:'recall_at_5',label:'R@5'},{key:'mrr',label:'MRR'},{key:'ndcg_at_10',label:'nDCG'},{key:'recall_at_5_ci_low',label:'CI low'},{key:'recall_at_5_ci_high',label:'CI high'}]);
-  $('files').innerHTML = state.files.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join(''); drawScatterLike('scatterChart', ranked, 'avg_query_latency_ms', 'recall_at_5'); drawBar(ranked); drawChunkChart(rows); renderHeatmap(rows); drawScatterLike('paretoChart', state.modular.analysis?.pareto || modularRows, 'avg_latency_ms', 'recall_at_5');
+  $('files').innerHTML = state.files.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join(''); renderRerankerCards(); drawScatterLike('scatterChart', ranked, 'avg_query_latency_ms', 'recall_at_5'); drawBar(ranked); drawChunkChart(rows); renderHeatmap(rows); drawScatterLike('paretoChart', state.modular.analysis?.pareto || modularRows, 'avg_latency_ms', 'recall_at_5');
 }
 function selectionParams() {
   const p = new URLSearchParams(); p.set('limit', $('limit').value || '50'); p.set('max_runs', $('maxRuns').value || '0');
@@ -101,29 +132,15 @@ function selectionParams() {
   if ($('includeCandidates').checked) p.set('include_candidates', '1'); if ($('includeMilvus').checked) p.set('include_milvus', '1'); return p;
 }
 async function refresh() {
-  $('statusPill').textContent = 'Loading'; const data = await api('/api/results'); state.summary = data.summary || []; state.chunking = data.chunking || []; state.modular = data.modular || {summary: [], analysis: {}, manifest: {}}; state.files = data.files || []; state.options = data.options || {};
+  $('statusPill').textContent = 'Loading'; const data = await api('/api/results'); state.summary = data.summary || []; state.chunking = data.chunking || []; state.modular = data.modular || {summary: [], analysis: {}, manifest: {}}; state.files = data.files || []; state.options = {...DEFAULT_OPTIONS, ...(data.options || {})};
   fillSelect('dbFilter', uniq(state.summary, 'vector_database')); fillSelect('embeddingFilter', uniq(state.summary, 'embedding_model')); fillSelect('chunkFilter', uniq(state.summary, 'chunking_method')); fillSelect('rerankFilter', uniq(state.summary, 'reranking_model'));
   fillSelect('selectedChunker', state.options.chunkers || []); fillSelect('selectedEmbedding', state.options.embeddings || []); fillSelect('selectedVectorStore', state.options.vector_stores || []); fillSelect('selectedIndexType', state.options.index_types || []); fillSelect('selectedRetrievalMethod', state.options.retrieval_methods || []); fillSelect('selectedReranker', state.options.rerankers || []);
-  $('statusPill').textContent = `Ready · ${state.options.matrix_count || '—'} selectable combos · ${state.options.mode || 'local'}`;
-  const realMode = state.options.mode === 'vm_real_adapters';
-  $('runBtn').disabled = realMode;
-  $('chunkBtn').disabled = realMode;
-  if (realMode) {
-    $('runBtn').title = 'Legacy dummy fallback matrix is disabled in VM real mode.';
-    $('chunkBtn').title = 'Chunk recall fallback is disabled in VM real mode.';
-  }
-  if (!state.summary.length && !(state.modular.summary || []).length) {
-    $('runLog').textContent = `Config loaded: ${state.options.matrix_count || 0} selectable combinations. Choose chunking, embedding, vector database, index, retrieval, reranker, then click Run selected combo.`;
-  }
-  render();
+  $('statusPill').textContent = `Ready · ${state.options.matrix_count || '—'} selectable combos · ${state.options.mode || 'local'}`; render();
 }
 async function run(kind) {
   $('runLog').textContent = 'Starting...'; $('statusPill').textContent = 'Running'; ['runBtn','modularBtn','selectedBtn','chunkBtn','refreshBtn'].forEach(id => $(id).disabled = true);
   try { const data = await api(`/api/run/${kind}?${selectionParams()}`, {method: 'POST'}); $('runLog').textContent = data.output || JSON.stringify(data, null, 2); await refresh(); }
-  finally {
-    ['runBtn','modularBtn','selectedBtn','chunkBtn','refreshBtn'].forEach(id => $(id).disabled = false);
-    if (state.options.mode === 'vm_real_adapters') { $('runBtn').disabled = true; $('chunkBtn').disabled = true; }
-  }
+  finally { ['runBtn','modularBtn','selectedBtn','chunkBtn','refreshBtn'].forEach(id => $(id).disabled = false); }
 }
 ['rankMetric','topN','dbFilter','embeddingFilter','chunkFilter','rerankFilter'].forEach(id => $(id).addEventListener('input', render));
 $('runBtn').addEventListener('click', () => run('matrix').catch(e => {$('statusPill').textContent='Error'; $('runLog').textContent=e.message;}));
