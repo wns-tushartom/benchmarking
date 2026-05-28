@@ -18,7 +18,7 @@ class QdrantVectorStoreAdapter:
         self.name = name
         self.url = os.environ.get(url_env, "http://127.0.0.1:5001")
         self.api_key = os.environ.get(api_key_env) or None
-        self.client = QdrantClient(url=self.url, api_key=self.api_key, timeout=60)
+        self.client = QdrantClient(url=self.url, api_key=self.api_key, timeout=300)
         self.collection = f"{collection_prefix}_{os.getpid()}_{int(time.time())}"
         self.chunks: Dict[str, Chunk] = {}
 
@@ -44,11 +44,16 @@ class QdrantVectorStoreAdapter:
         for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
             self.chunks[str(i)] = chunk
             points.append(self.models.PointStruct(id=i, vector=vector, payload={"chunk_key": str(i), "chunk_id": chunk.id, "pdf_name": chunk.pdf_name, "paragraph": chunk.paragraph}))
-        self.client.upsert(collection_name=self.collection, points=points, wait=True)
+        for batch_start in range(0, len(points), 256):
+            self.client.upsert(collection_name=self.collection, points=points[batch_start:batch_start + 256], wait=True)
         return {"upsert_latency_s": time.perf_counter() - start, "vector_count": len(vectors)}
 
     def search(self, query_vector: List[float], top_k: int) -> List[SearchHit]:
-        results = self.client.search(collection_name=self.collection, query_vector=query_vector, limit=top_k, with_payload=True)
+        if hasattr(self.client, "search"):
+            results = self.client.search(collection_name=self.collection, query_vector=query_vector, limit=top_k, with_payload=True)
+        else:
+            response = self.client.query_points(collection_name=self.collection, query=query_vector, limit=top_k, with_payload=True)
+            results = getattr(response, "points", response)
         hits: List[SearchHit] = []
         for item in results:
             payload = item.payload or {}
