@@ -261,6 +261,10 @@ async function loadOptions() {
   fillRunSelect('runSheet', benchmarkOptions.chunkers || []);
   fillRunSelect('runEmbedding', benchmarkOptions.embeddings || []);
   fillRunSelect('runStore', benchmarkOptions.vector_stores || []);
+  const mainReranker = $('runRerankerMain');
+  if (mainReranker) {
+    mainReranker.innerHTML = '<option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="all">Both OSS rerankers</option>';
+  }
 }
 
 function selectedParams() {
@@ -297,7 +301,15 @@ async function runAction(kind) {
   if (kind === 'rerank') {
     p.set('top_k', $('runTopK')?.value || '10');
     p.set('limit', $('rerankerLimit')?.value || '100');
-    const selected = [...($('runReranker')?.selectedOptions || [])].map(o=>o.value);
+    const mainChoice = $('runRerankerMain')?.value || 'qwen3_4b_rerank';
+    let selected = [];
+    if (mainChoice === 'all') {
+      selected = ['bge-reranker-base', 'qwen3_4b_rerank'];
+    } else if (mainChoice) {
+      selected = [mainChoice];
+    } else {
+      selected = [...($('runReranker')?.selectedOptions || [])].map(o=>o.value);
+    }
     selected.forEach(r => p.append('reranker', r));
   }
   $('runStatus').textContent = 'Running';
