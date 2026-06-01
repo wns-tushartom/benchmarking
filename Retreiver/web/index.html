@@ -3,172 +3,79 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WNS Benchmark Dashboard</title>
+  <title>WNS KnowRA VM Cockpit</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <main class="shell">
-    <section class="hero">
-      <div>
-        <p class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /> RAG Benchmarking</p>
-        <h1>Benchmark control room</h1>
-        <p class="sub">Track the VM-backed KnowRA pipeline: extraction, chunking, embeddings, vector DB ingestion, reranker smoke tests, and pending benchmark inputs.</p>
+    <section class="hero panel-soft">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="mark"></span> WNS KnowRA RAG Benchmark</p>
+        <h1>VM cockpit for live retrieval proof.</h1>
+        <p class="sub">Operational dashboard backed only by VM artifacts: DB ingestion summaries, retrieval smoke JSON, reranker smoke JSON, and service health snapshots. Quality metrics stay hidden until ground truth is available.</p>
         <div class="hero-actions">
-          <button id="runBtn">Run legacy matrix</button>
-          <button id="modularBtn">Run modular matrix</button>
-          <button id="selectedBtn">Run selected combo</button>
-          <button id="chunkBtn" class="secondary">Run chunk recall</button>
-          <button id="refreshBtn" class="secondary">Refresh</button>
+          <button id="refreshBtn" type="button">Refresh live data</button>
+          <span id="statusPill" class="status-pill muted-pill">Loading</span>
         </div>
       </div>
-      <div class="hero-card kpis">
-        <div class="metric"><span id="pdfStatus">—</span><label>PDFs extracted</label></div>
-        <div class="metric"><span id="ingestionCombos">—</span><label>DB ingestion combos</label></div>
-        <div class="metric"><span id="embeddingStatus">—</span><label>Embeddings proved</label></div>
-        <div class="metric"><span id="rerankerStatus">—</span><label>Rerankers proved</label></div>
-        <div class="metric"><span id="metricsStatus">Paused</span><label>Quality metrics</label></div>
-        <div class="metric"><span id="matrixStatus">—</span><label>Selectable matrix</label></div>
+      <div class="hero-panel">
+        <div class="signal-line"><span>Mode</span><strong id="modeLabel">VM live</strong></div>
+        <div class="signal-line"><span>Latest run</span><strong id="latestRun">—</strong></div>
+        <div class="signal-line"><span>Last snapshot</span><strong id="snapshotAt">—</strong></div>
+        <div class="signal-line"><span>Ground truth</span><strong>Pending</strong></div>
       </div>
     </section>
 
-    <section class="panel modular-panel">
-      <div class="section-head">
-        <div>
-          <h2>Modular benchmark harness</h2>
-          <p>Config-driven registry with adapters, richer metrics, run manifest, confidence intervals, category analysis, and winner rationale.</p>
-        </div>
-        <span class="status-pill">Go-to system v1</span>
-      </div>
-      <div class="modular-grid">
-        <div><label>Experiment</label><strong id="experimentName">—</strong></div>
-        <div><label>Config hash</label><strong id="configHash">—</strong></div>
-        <div><label>Dataset hash</label><strong id="datasetHash">—</strong></div>
-        <div><label>Best config</label><strong id="bestConfigLabel">—</strong></div>
-      </div>
-      <div class="why-box"><h3>Why winner</h3><ul id="whyBest"></ul></div>
+    <section class="metrics-grid" aria-label="Live KPI metrics">
+      <div class="metric-card"><span>Documents extracted</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></div>
+      <div class="metric-card"><span>DB ingestion combos</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></div>
+      <div class="metric-card"><span>Retrieval checks</span><strong id="retrievalStatus">—</strong><small id="retrievalNote">real top-k smoke artifacts</small></div>
+      <div class="metric-card"><span>Reranker checks</span><strong id="rerankerStatus">—</strong><small id="rerankerNote">BGE/Qwen artifacts</small></div>
+      <div class="metric-card"><span>Embeddings</span><strong id="embeddingStatus">—</strong><small>from successful ingestion rows</small></div>
+      <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate</small></div>
     </section>
 
-    <section class="panel operational-panel">
-      <div class="section-head">
-        <div>
-          <h2>Current VM proof status</h2>
-          <p>Live values come from <code>data/db_ingestion_runs/*/summary.csv</code>, reranker smoke JSON, and progress artifacts. Recall/MRR/nDCG stays paused until a query ground-truth CSV is provided.</p>
+    <section class="grid cockpit-grid">
+      <article class="panel coverage-panel">
+        <div class="section-head">
+          <div><h2>Operational coverage</h2><p>Live matrix coverage from successful ingestion rows only.</p></div>
+          <span class="mini-stat" id="coverageHint">—</span>
         </div>
-        <span class="status-pill" id="proofPill">Proof data loading</span>
-      </div>
-      <div class="proof-grid">
-        <div class="proof-card"><strong>Documents</strong><span id="docProof">—</span><small>3 PDFs still need OCR decision</small></div>
-        <div class="proof-card"><strong>Vector DBs</strong><span id="dbProof">—</span><small>Qdrant, PGVector, Weaviate</small></div>
-        <div class="proof-card"><strong>Embedding models</strong><span id="embedProof">—</span><small>GTE and Jina validated. OpenAI optional.</small></div>
-        <div class="proof-card"><strong>Rerankers</strong><span id="rerankProof">—</span><small>BGE and Qwen validated. Amazon optional.</small></div>
-      </div>
-      <div class="grid two compact-grid">
-        <div>
-          <div class="section-head compact"><h3>Latest ingestion rows</h3><span class="hint" id="ingestionHint">—</span></div>
-          <div class="table-wrap"><table id="ingestionTable"></table></div>
+        <div id="coverageMatrix" class="coverage-matrix"></div>
+      </article>
+      <article class="panel">
+        <div class="section-head">
+          <div><h2>VM services</h2><p>Health snapshot exported from the VM.</p></div>
+          <span class="mini-stat" id="healthHint">—</span>
         </div>
-        <div>
-          <div class="section-head compact"><h3>VM service health</h3><span class="hint">from exported snapshot</span></div>
-          <div class="table-wrap"><table id="healthTable"></table></div>
-        </div>
-      </div>
-      <div class="grid two compact-grid">
-        <div>
-          <div class="section-head compact"><h3>Live retrieval smoke tests</h3><span class="hint" id="retrievalHint">top-k proof from VM DBs</span></div>
-          <div class="table-wrap"><table id="retrievalSmokeTable"></table></div>
-        </div>
-        <div>
-          <div class="section-head compact"><h3>Reranker smoke tests</h3><span class="hint">manual query proof</span></div>
-          <div class="table-wrap"><table id="rerankerSmokeTable"></table></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel controls sticky-panel">
-      <div class="section-head">
-        <div>
-          <h2>Customize benchmark view</h2>
-          <p>Filters update instantly. The VM proof data is separate from Recall/MRR/nDCG until query ground truth is available.</p>
-        </div>
-        <div class="status-pill" id="statusPill">Ready</div>
-      </div>
-      <div class="form-grid wide">
-        <label>Query limit <input id="limit" type="number" value="50" min="1" /></label>
-        <label>Max runs <input id="maxRuns" type="number" value="0" min="0" /></label>
-        <label>Rank by <select id="rankMetric"><option value="recall_at_5">Recall@5</option><option value="recall_at_10">Recall@10</option><option value="recall_at_3">Recall@3</option><option value="avg_query_latency_ms">Latency</option><option value="chunk_count">Chunk count</option></select></label>
-        <label>Top N <input id="topN" type="number" value="15" min="3" max="50" /></label>
-        <label>Chunking <select id="selectedChunker"><option value="all">All</option></select></label>
-        <label>Embedding <select id="selectedEmbedding"><option value="all">All</option></select></label>
-        <label>Vector database <select id="selectedVectorStore"><option value="all">All</option></select></label>
-        <label>Index <select id="selectedIndexType"><option value="all">All</option></select></label>
-        <label>Retrieval <select id="selectedRetrievalMethod"><option value="all">All</option></select></label>
-        <label>Rerank <select id="selectedReranker"><option value="all">All</option></select></label>
-        <label>Filter DB <select id="dbFilter"><option value="all">All</option></select></label>
-        <label>Filter embedding <select id="embeddingFilter"><option value="all">All</option></select></label>
-        <label>Filter chunking <select id="chunkFilter"><option value="all">All</option></select></label>
-        <label>Filter reranker <select id="rerankFilter"><option value="all">All</option></select></label>
-        <label class="check"><input id="includeCandidates" type="checkbox" /> Include semantic/fixed candidates in legacy run</label>
-        <label class="check"><input id="includeMilvus" type="checkbox" /> Include Milvus baseline in legacy run</label>
-      </div>
-      <div class="reranker-panel">
-        <div class="section-head compact">
-          <div>
-            <h3>Reranker models</h3>
-            <p>Selectable rerankers from the VM/API matrix. Open-source rerankers are verified on GPU; Amazon needs AWS credentials.</p>
-          </div>
-          <span class="hint">Backend batch uses saved retrieval artifacts</span>
-        </div>
-        <div id="rerankerCards" class="model-cards"></div>
-      </div>
-      <pre id="runLog" class="log">Ready.</pre>
-    </section>
-
-    <section class="grid two">
-      <div class="panel chart-panel">
-        <div class="section-head"><h2>Recall vs latency</h2><span class="hint">pending query ground truth</span></div>
-        <canvas id="scatterChart" width="640" height="340"></canvas>
-      </div>
-      <div class="panel chart-panel">
-        <div class="section-head"><h2>Top configurations</h2><span class="hint" id="topHint">ranked</span></div>
-        <canvas id="barChart" width="640" height="340"></canvas>
-      </div>
-    </section>
-
-    <section class="grid two">
-      <div class="panel chart-panel">
-        <div class="section-head"><h2>Chunking comparison</h2><span class="hint">quality metrics pending</span></div>
-        <canvas id="chunkChart" width="640" height="340"></canvas>
-      </div>
-      <div class="panel chart-panel">
-        <div class="section-head"><h2>Chunking × DB heatmap</h2><span class="hint">avg Recall@5</span></div>
-        <div id="heatmap" class="heatmap"></div>
-      </div>
-    </section>
-
-    <section class="grid two">
-      <div class="panel">
-        <div class="section-head"><h2>Ranked configurations</h2><span id="rowCount" class="hint">—</span></div>
-        <div class="table-wrap"><table id="summaryTable"></table></div>
-      </div>
-      <div class="panel">
-        <div class="section-head"><h2>Chunk recall details</h2><span class="hint">candidate selection</span></div>
-        <div class="table-wrap"><table id="chunkTable"></table></div>
-      </div>
-    </section>
-
-    <section class="grid two">
-      <div class="panel chart-panel">
-        <div class="section-head"><h2>Modular Pareto frontier</h2><span class="hint">quality vs latency</span></div>
-        <canvas id="paretoChart" width="640" height="340"></canvas>
-      </div>
-      <div class="panel">
-        <div class="section-head"><h2>Modular leaderboard</h2><span class="hint">MRR, nDCG, CI</span></div>
-        <div class="table-wrap"><table id="modularTable"></table></div>
-      </div>
+        <div id="serviceCards" class="service-cards"></div>
+      </article>
     </section>
 
     <section class="panel">
-      <div class="section-head"><h2>Artifacts</h2><span class="hint">generated files</span></div>
+      <div class="section-head">
+        <div><h2>Live retrieval evidence</h2><p>Top-k searches against existing VM vector DB collections/tables/classes.</p></div>
+        <div class="filter-row">
+          <select id="retrievalDbFilter"><option value="all">All DBs</option></select>
+          <select id="retrievalEmbeddingFilter"><option value="all">All embeddings</option></select>
+        </div>
+      </div>
+      <div id="retrievalCards" class="retrieval-grid"></div>
+    </section>
+
+    <section class="grid two">
+      <article class="panel">
+        <div class="section-head"><div><h2>Vector DB ingestion</h2><p>Latest successful rows, with real collection/table names.</p></div><span class="mini-stat" id="ingestionHint">—</span></div>
+        <div class="table-wrap"><table id="ingestionTable"></table></div>
+      </article>
+      <article class="panel">
+        <div class="section-head"><div><h2>Reranker smoke</h2><p>Reranking over retrieved VM hits.</p></div><span class="mini-stat" id="rerankHint">—</span></div>
+        <div class="table-wrap"><table id="rerankerTable"></table></div>
+      </article>
+    </section>
+
+    <section class="panel artifact-panel">
+      <div class="section-head"><div><h2>Artifacts loaded</h2><p>Only files present on this VM/repo are shown.</p></div><span class="mini-stat" id="artifactHint">—</span></div>
       <ul id="files" class="files"></ul>
     </section>
   </main>

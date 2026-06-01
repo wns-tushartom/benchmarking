@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import socket
 import subprocess
 import sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -272,8 +273,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"WNS benchmark dashboard: http://127.0.0.1:{port}")
+    host = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
+    server = ThreadingHTTPServer((host, port), Handler)
+    shown_host = socket.gethostbyname(socket.gethostname()) if host == "0.0.0.0" else host
+    print(f"WNS benchmark dashboard: http://{shown_host}:{port} (bind={host})")
     server.serve_forever()
 
 

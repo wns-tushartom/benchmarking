@@ -62,9 +62,9 @@ def build_snapshot(root: Path) -> dict[str, Any]:
     ok_rows = [r for r in ingestion_rows if r.get("status") == "ok"]
     combos = {(r.get("sheet"), r.get("embedding"), r.get("store")) for r in ok_rows}
     service_urls = {
-        "model_adapter": os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000/health"),
-        "qdrant": os.getenv("QDRANT_URL", "http://127.0.0.1:5001") + "/healthz",
-        "weaviate": os.getenv("WEAVIATE_URL", "http://127.0.0.1:5004") + "/v1/.well-known/ready",
+        "model_adapter": os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000").rstrip("/") + "/health",
+        "qdrant": os.getenv("QDRANT_URL", "http://127.0.0.1:5001").rstrip("/") + "/healthz",
+        "weaviate": os.getenv("WEAVIATE_URL", "http://127.0.0.1:5004").rstrip("/") + "/v1/.well-known/ready",
     }
     health = [check_url(name, url) for name, url in service_urls.items()]
     return {

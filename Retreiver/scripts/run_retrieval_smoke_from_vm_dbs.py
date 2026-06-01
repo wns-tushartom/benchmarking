@@ -22,9 +22,37 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.run_long_db_ingestion import EMBEDDING_CONFIGS, safe_name, load_env  # type: ignore
 from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
 from benchmarking.adapters.vector_pgvector import _vec
+
+EMBEDDING_CONFIGS: dict[str, dict[str, Any]] = {
+    "gte_multilingual_base": {
+        "endpoint_env": "GTE_EMBEDDING_URL",
+        "dimensions": 768,
+        "default_batch_size": 1,
+    },
+    "jina_v3": {
+        "endpoint_env": "JINA_EMBEDDING_URL",
+        "dimensions": 1024,
+        "default_batch_size": 1,
+    },
+}
+
+
+def safe_name(value: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in value).strip("_")
+
+
+def load_env(root: Path) -> None:
+    env_path = root / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 DEFAULT_QUERIES = [
     "refund old ticket and issue new ticket",
