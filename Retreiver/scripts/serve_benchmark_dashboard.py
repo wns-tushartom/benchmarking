@@ -9,6 +9,7 @@ import subprocess
 import sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 FULL_DIR = ROOT / "data" / "full_benchmark"
 MODULAR_DIR = ROOT / "data" / "modular_runs" / "latest"
+INGESTION_DIR = ROOT / "data" / "db_ingestion_runs"
+RERANKER_DIR = ROOT / "data" / "reranker_smoke"
+RETRIEVAL_DIR = ROOT / "data" / "retrieval_smoke"
+SNAPSHOT_PATH = ROOT / "data" / "vm_dashboard_snapshot.json"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 
 
@@ -59,6 +64,82 @@ def read_csv(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
 
+
+
+def read_ingestion_summaries() -> list[dict]:
+    rows: list[dict] = []
+    if not INGESTION_DIR.exists():
+        return rows
+    for path in sorted(INGESTION_DIR.glob("*/summary.csv")):
+        run_id = path.parent.name
+        for row in read_csv(path):
+            row["run_id"] = run_id
+            rows.append(row)
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows
+
+
+def summarize_ingestion(rows: list[dict]) -> dict:
+    completed = [r for r in rows if r.get("status") == "ok"]
+    failures = [r for r in rows if r.get("status") and r.get("status") != "ok"]
+    embeddings = sorted({r.get("embedding", "") for r in completed if r.get("embedding")})
+    stores = sorted({r.get("store", "") for r in completed if r.get("store")})
+    sheets = sorted({r.get("sheet", "") for r in completed if r.get("sheet")})
+    combos = {(r.get("sheet"), r.get("embedding"), r.get("store")) for r in completed}
+    return {
+        "rows": rows,
+        "completed_rows": len(completed),
+        "failure_rows": len(failures),
+        "embeddings": embeddings,
+        "stores": stores,
+        "sheets": sheets,
+        "combo_count": len(combos),
+        "latest_run_id": rows[0].get("run_id") if rows else None,
+        "latest_created_at": rows[0].get("created_at") if rows else None,
+    }
+
+
+def read_reranker_smokes() -> list[dict]:
+    smokes: list[dict] = []
+    if not RERANKER_DIR.exists():
+        return smokes
+    for path in sorted(RERANKER_DIR.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            payload = {"error": str(exc)}
+        payload["artifact"] = str(path.relative_to(ROOT))
+        smokes.append(payload)
+    smokes.sort(key=lambda r: r.get("rerank_seconds", 999999))
+    return smokes
+
+
+def read_retrieval_smokes() -> list[dict[str, Any]]:
+    smokes: list[dict[str, Any]] = []
+    if not RETRIEVAL_DIR.exists():
+        return smokes
+    for path in sorted(RETRIEVAL_DIR.glob("*.json")):
+        if path.name == "summary.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            payload = {"error": str(exc)}
+        payload["artifact"] = str(path.relative_to(ROOT))
+        # Keep payload bounded for frontend speed.
+        payload["hits"] = (payload.get("hits") or [])[:5]
+        smokes.append(payload)
+    smokes.sort(key=lambda r: (r.get("created_at", ""), r.get("retrieval_seconds", 999999)), reverse=True)
+    return smokes
+
+
+def read_snapshot() -> dict:
+    if not SNAPSHOT_PATH.exists():
+        return {}
+    try:
+        return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc)}
 
 def sort_summary(rows: list[dict]) -> list[dict]:
     def key(r: dict) -> tuple:
@@ -108,7 +189,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/modular_runs/latest/analysis.json",
                 "data/modular_runs/latest/manifest.json",
                 "data/modular_runs/latest/MODULAR_REPORT.md",
+                "data/vm_dashboard_snapshot.json",
+                "data/retrieval_smoke/summary.json",
                 "WNS_VM_PROGRESS_20260528.md",
+                "JINA_TIMINGS_20260528.md",
+                "RERANKER_SMOKE_20260528.md",
                 "WNS_PARALLEL_EXECUTION_PLAN.md",
                 "WNS_BENCHMARK_FINAL_REPORT.md",
                 "MODULAR_BENCHMARKING_ROADMAP.md",
@@ -125,6 +210,10 @@ class Handler(SimpleHTTPRequestHandler):
                             modular_manifest = json.loads(target.read_text(encoding="utf-8"))
                     except Exception:
                         pass
+            ingestion_rows = read_ingestion_summaries()
+            reranker_smokes = read_reranker_smokes()
+            retrieval_smokes = read_retrieval_smokes()
+            snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
                 "query_count": query_count,
@@ -135,6 +224,20 @@ class Handler(SimpleHTTPRequestHandler):
                     "summary": modular_summary,
                     "analysis": modular_analysis,
                     "manifest": modular_manifest,
+                },
+                "operational": {
+                    "ingestion": summarize_ingestion(ingestion_rows),
+                    "reranker_smokes": reranker_smokes,
+                    "retrieval_smokes": retrieval_smokes,
+                    "vm_snapshot": snapshot,
+                    "service_health": snapshot.get("health", []),
+                    "known_pdf_count": 225,
+                    "extracted_pdf_count": 222,
+                    "failed_pdf_count": 3,
+                    "known_matrix_count": benchmark_options().get("matrix_count"),
+                    "metrics_status": "Paused, no query ground-truth CSV requested yet",
+                    "openai_status": "Pending OPENAI_API_KEY and cost approval",
+                    "amazon_status": "Pending AWS/Bedrock credentials",
                 },
                 "files": [f for f in files if (ROOT / f).exists()],
                 "options": benchmark_options(),

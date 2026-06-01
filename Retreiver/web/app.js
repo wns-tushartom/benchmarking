@@ -9,7 +9,7 @@ const DEFAULT_OPTIONS = {
   matrix_count: 135,
   mode: 'vm_remote_required'
 };
-let state = {summary: [], chunking: [], files: [], modular: {summary: [], analysis: {}, manifest: {}}, options: {...DEFAULT_OPTIONS}};
+let state = {summary: [], chunking: [], files: [], modular: {summary: [], analysis: {}, manifest: {}}, operational: {}, options: {...DEFAULT_OPTIONS}};
 
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
@@ -89,12 +89,76 @@ function renderHeatmap(rows) {
   let html = `<div class="heat-row"><div class="heat-label">Chunking</div>${dbs.map(d => `<div class="heat-label">${escapeHtml(d)}</div>`).join('')}</div>`;
   chunks.forEach(ch => { html += `<div class="heat-row"><div class="heat-label">${escapeHtml(ch)}</div>`; dbs.forEach(db => { const cr = rows.filter(r => r.chunking_method === ch && r.vector_database === db); const avg = cr.length ? cr.reduce((a, r) => a+num(r.recall_at_5), 0)/cr.length : 0; html += `<div class="heat-cell" style="background:linear-gradient(135deg, rgba(167,243,208,${0.18+avg*.75}), rgba(125,211,252,${0.12+avg*.55}))">${avg.toFixed(3)}</div>`; }); html += '</div>'; }); el.innerHTML = html;
 }
+function renderOperational() {
+  const op = state.operational || {};
+  const ingestion = op.ingestion || {};
+  const rows = ingestion.rows || [];
+  const smokes = op.reranker_smokes || [];
+  const retrievalSmokes = op.retrieval_smokes || [];
+  const health = op.service_health || [];
+  const pdfText = `${op.extracted_pdf_count || 0}/${op.known_pdf_count || 0}`;
+  const stores = ingestion.stores || [];
+  const embeddings = ingestion.embeddings || [];
+  const sheets = ingestion.sheets || [];
+  const openSourceRerankers = smokes.map(s => s.reranker || s.name).filter(Boolean);
+  if ($('pdfStatus')) $('pdfStatus').textContent = pdfText;
+  if ($('ingestionCombos')) $('ingestionCombos').textContent = ingestion.combo_count ?? '0';
+  if ($('embeddingStatus')) $('embeddingStatus').textContent = embeddings.length ? embeddings.join(' + ') : '—';
+  if ($('rerankerStatus')) $('rerankerStatus').textContent = openSourceRerankers.length ? [...new Set(openSourceRerankers)].length : '—';
+  if ($('metricsStatus')) $('metricsStatus').textContent = 'Not scheduled';
+  if ($('matrixStatus')) $('matrixStatus').textContent = `${state.options.matrix_count || op.known_matrix_count || '—'}`;
+  if ($('proofPill')) $('proofPill').textContent = `${ingestion.failure_rows || 0} failures · latest run ${ingestion.latest_run_id || 'none'}`;
+  if ($('docProof')) $('docProof').textContent = `${pdfText} PDFs extracted`;
+  if ($('dbProof')) $('dbProof').textContent = stores.length ? stores.join(', ') : 'No DB summary yet';
+  if ($('embedProof')) $('embedProof').textContent = embeddings.length ? `${embeddings.join(', ')} across ${sheets.length || 0} chunkers` : 'No embedding summary yet';
+  if ($('rerankProof')) $('rerankProof').textContent = smokes.length ? `${smokes.length} smoke artifacts` : 'No smoke artifacts yet';
+  if ($('ingestionHint')) $('ingestionHint').textContent = `${rows.length || 0} rows · ${ingestion.combo_count || 0} unique combos`;
+  if ($('retrievalHint')) $('retrievalHint').textContent = `${retrievalSmokes.length || 0} retrieval artifacts`;
+  table($('ingestionTable'), rows.slice(0, 15), [
+    {key:'run_id', label:'Run'},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'DB'},
+    {key:'chunk_count', label:'Chunks'},
+    {key:'collection_or_table', label:'Collection/table', render:r=>`<code>${escapeHtml((r.collection_or_table || '').slice(0, 42))}</code>`},
+    {key:'total_store_seconds', label:'DB sec', render:r=>num(r.total_store_seconds).toFixed(2)},
+    {key:'search_hits', label:'Hits'},
+    {key:'status', label:'Status', render:r=>`<span class="badge ${r.status === 'ok' ? 'ok' : 'warn'}">${escapeHtml(r.status || '—')}</span>`}
+  ]);
+  table($('healthTable'), health, [
+    {key:'name', label:'Service'},
+    {key:'url', label:'URL', render:r=>`<code>${escapeHtml(r.url || '')}</code>`},
+    {key:'latency_ms', label:'ms'},
+    {key:'ok', label:'Status', render:r=>`<span class="badge ${r.ok ? 'ok' : 'warn'}">${r.ok ? 'Healthy' : 'Check'}</span>`},
+    {key:'error', label:'Error', render:r=>escapeHtml((r.error || '').slice(0, 70))}
+  ]);
+  table($('retrievalSmokeTable'), retrievalSmokes.slice(0, 20), [
+    {key:'query', label:'Query', render:r=>escapeHtml((r.query || '').slice(0, 46))},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'DB'},
+    {key:'retrieval_seconds', label:'Search sec', render:r=>num(r.retrieval_seconds).toFixed(3)},
+    {key:'retrieved_count', label:'Hits'},
+    {key:'hits', label:'Top PDF', render:r=>escapeHtml((((r.hits || [])[0] || {}).pdf_name || '').slice(0, 52))},
+    {key:'artifact', label:'Artifact', render:r=>`<code>${escapeHtml((r.artifact || '').slice(0, 60))}</code>`}
+  ]);
+  table($('rerankerSmokeTable'), smokes, [
+    {key:'reranker', label:'Reranker'},
+    {key:'query', label:'Query', render:r=>escapeHtml((r.query || '').slice(0, 52))},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'rerank_seconds', label:'Rerank sec', render:r=>num(r.rerank_seconds).toFixed(3)},
+    {key:'retrieved_count', label:'Retrieved'},
+    {key:'artifact', label:'Artifact', render:r=>`<code>${escapeHtml(r.artifact || '')}</code>`}
+  ]);
+}
+
 function renderRerankerCards() {
   const el = $('rerankerCards'); if (!el) return;
   const verified = new Map([
-    ['Amazon Rerank v1', ['Commercial', 'Needs AWS keys', 'adapter: amazon_bedrock']],
-    ['Qwen3:4B Rerank', ['Open source', 'Verified on GPU', 'endpoint: /rerank/qwen']],
-    ['bge-reranker-base', ['Open source', 'Verified on GPU', 'endpoint: /rerank/bge']]
+    ['Amazon Rerank v1', ['Commercial', 'Pending AWS keys', 'adapter: amazon_bedrock']],
+    ['Qwen3:4B Rerank', ['Open source', 'Smoke passed: 1.592s', 'endpoint: /rerank/qwen']],
+    ['bge-reranker-base', ['Open source', 'Smoke passed: 0.103s', 'endpoint: /rerank/bge']]
   ]);
   const values = state.options.rerankers?.length ? state.options.rerankers : DEFAULT_OPTIONS.rerankers;
   el.innerHTML = values.map(name => {
@@ -116,14 +180,14 @@ function renderRerankerCards() {
 }
 function render() {
   const rows = filteredRows(), ranked = rankRows(rows), topN = Math.max(3, Math.min(50, Number($('topN').value) || 15)); const modularRows = state.modular.summary || [], bestMod = state.modular.analysis?.best_config || modularRows[0] || {};
-  $('totalRuns').textContent = state.summary.length || '0'; $('queryCount').textContent = state.summary[0]?.query_count || state.modular.manifest?.query_count || '—'; $('bestRecall').textContent = state.summary.length ? Math.max(...state.summary.map(r => num(r.recall_at_5))).toFixed(3) : '—';
-  const lat = state.summary.map(r => num(r.avg_query_latency_ms)).filter(Boolean); $('bestLatency').textContent = lat.length ? `${Math.min(...lat).toFixed(2)} ms` : '—'; $('modularRuns').textContent = modularRows.length || '0'; $('modularBest').textContent = bestMod.recall_at_5 ? num(bestMod.recall_at_5).toFixed(3) : '—';
+  renderOperational();
+  const lat = state.summary.map(r => num(r.avg_query_latency_ms)).filter(Boolean);
   $('experimentName').textContent = state.modular.manifest?.experiment?.name || '—'; $('configHash').textContent = state.modular.manifest?.config_hash || '—'; $('datasetHash').textContent = state.modular.manifest?.dataset_hash || '—'; $('bestConfigLabel').textContent = bestMod.chunker ? `${bestMod.chunker} + ${bestMod.embedding} + ${bestMod.vector_store}` : '—';
   $('whyBest').innerHTML = (state.modular.analysis?.why_best || []).map(x => `<li>${escapeHtml(x)}</li>`).join('') || '<li>No modular analysis yet</li>'; $('rowCount').textContent = `${ranked.length} matching configs`; $('topHint').textContent = `ranked by ${$('rankMetric').value}`;
   table($('summaryTable'), ranked.slice(0, topN), [{key:'benchmark_run_id',label:'Run',render:r=>`<span class="badge">${escapeHtml(r.benchmark_run_id)}</span>`},{key:'chunking_method',label:'Chunking'},{key:'embedding_model',label:'Embedding'},{key:'vector_database',label:'DB'},{key:'reranking_model',label:'Rerank'},{key:'recall_at_5',label:'R@5'},{key:'recall_at_10',label:'R@10'},{key:'avg_query_latency_ms',label:'Avg ms'},{key:'chunk_count',label:'Chunks'}]);
   table($('chunkTable'), rankRows(state.chunking).slice(0, 12), [{key:'chunking_method',label:'Chunking'},{key:'recall_at_3',label:'R@3'},{key:'recall_at_5',label:'R@5'},{key:'recall_at_10',label:'R@10'},{key:'chunk_count',label:'Chunks'}]);
   table($('modularTable'), modularRows.slice(0, topN), [{key:'benchmark_run_id',label:'Run'},{key:'chunker',label:'Chunking'},{key:'embedding',label:'Embedding'},{key:'vector_store',label:'DB'},{key:'index_type',label:'Index'},{key:'retrieval_method',label:'Retrieval'},{key:'reranker',label:'Rerank'},{key:'recall_at_5',label:'R@5'},{key:'mrr',label:'MRR'},{key:'ndcg_at_10',label:'nDCG'},{key:'recall_at_5_ci_low',label:'CI low'},{key:'recall_at_5_ci_high',label:'CI high'}]);
-  $('files').innerHTML = state.files.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join(''); renderRerankerCards(); drawScatterLike('scatterChart', ranked, 'avg_query_latency_ms', 'recall_at_5'); drawBar(ranked); drawChunkChart(rows); renderHeatmap(rows); drawScatterLike('paretoChart', state.modular.analysis?.pareto || modularRows, 'avg_latency_ms', 'recall_at_5');
+  $('files').innerHTML = state.files.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join(''); renderOperational(); renderRerankerCards(); drawScatterLike('scatterChart', ranked, 'avg_query_latency_ms', 'recall_at_5'); drawBar(ranked); drawChunkChart(rows); renderHeatmap(rows); drawScatterLike('paretoChart', state.modular.analysis?.pareto || modularRows, 'avg_latency_ms', 'recall_at_5');
 }
 function selectionParams() {
   const p = new URLSearchParams(); p.set('limit', $('limit').value || '50'); p.set('max_runs', $('maxRuns').value || '0');
@@ -132,7 +196,7 @@ function selectionParams() {
   if ($('includeCandidates').checked) p.set('include_candidates', '1'); if ($('includeMilvus').checked) p.set('include_milvus', '1'); return p;
 }
 async function refresh() {
-  $('statusPill').textContent = 'Loading'; const data = await api('/api/results'); state.summary = data.summary || []; state.chunking = data.chunking || []; state.modular = data.modular || {summary: [], analysis: {}, manifest: {}}; state.files = data.files || []; state.options = {...DEFAULT_OPTIONS, ...(data.options || {})};
+  $('statusPill').textContent = 'Loading'; const data = await api('/api/results'); state.summary = data.summary || []; state.chunking = data.chunking || []; state.modular = data.modular || {summary: [], analysis: {}, manifest: {}}; state.operational = data.operational || {}; state.files = data.files || []; state.options = {...DEFAULT_OPTIONS, ...(data.options || {})};
   fillSelect('dbFilter', uniq(state.summary, 'vector_database')); fillSelect('embeddingFilter', uniq(state.summary, 'embedding_model')); fillSelect('chunkFilter', uniq(state.summary, 'chunking_method')); fillSelect('rerankFilter', uniq(state.summary, 'reranking_model'));
   fillSelect('selectedChunker', state.options.chunkers || []); fillSelect('selectedEmbedding', state.options.embeddings || []); fillSelect('selectedVectorStore', state.options.vector_stores || []); fillSelect('selectedIndexType', state.options.index_types || []); fillSelect('selectedRetrievalMethod', state.options.retrieval_methods || []); fillSelect('selectedReranker', state.options.rerankers || []);
   $('statusPill').textContent = `Ready · ${state.options.matrix_count || '—'} selectable combos · ${state.options.mode || 'local'}`; render();

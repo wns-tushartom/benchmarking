@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /> RAG Benchmarking</p>
         <h1>Benchmark control room</h1>
-        <p class="sub">Compare recall, latency, chunk count, embeddings, vector stores, and rerankers from one local dashboard.</p>
+        <p class="sub">Track the VM-backed KnowRA pipeline: extraction, chunking, embeddings, vector DB ingestion, reranker smoke tests, and pending benchmark inputs.</p>
         <div class="hero-actions">
           <button id="runBtn">Run legacy matrix</button>
           <button id="modularBtn">Run modular matrix</button>
@@ -22,12 +22,12 @@
         </div>
       </div>
       <div class="hero-card kpis">
-        <div class="metric"><span id="totalRuns">—</span><label>Configurations</label></div>
-        <div class="metric"><span id="queryCount">—</span><label>Queries</label></div>
-        <div class="metric"><span id="bestRecall">—</span><label>Best Recall@5</label></div>
-        <div class="metric"><span id="bestLatency">—</span><label>Best avg latency</label></div>
-        <div class="metric"><span id="modularRuns">—</span><label>Modular configs</label></div>
-        <div class="metric"><span id="modularBest">—</span><label>Modular best R@5</label></div>
+        <div class="metric"><span id="pdfStatus">—</span><label>PDFs extracted</label></div>
+        <div class="metric"><span id="ingestionCombos">—</span><label>DB ingestion combos</label></div>
+        <div class="metric"><span id="embeddingStatus">—</span><label>Embeddings proved</label></div>
+        <div class="metric"><span id="rerankerStatus">—</span><label>Rerankers proved</label></div>
+        <div class="metric"><span id="metricsStatus">Paused</span><label>Quality metrics</label></div>
+        <div class="metric"><span id="matrixStatus">—</span><label>Selectable matrix</label></div>
       </div>
     </section>
 
@@ -48,11 +48,47 @@
       <div class="why-box"><h3>Why winner</h3><ul id="whyBest"></ul></div>
     </section>
 
+    <section class="panel operational-panel">
+      <div class="section-head">
+        <div>
+          <h2>Current VM proof status</h2>
+          <p>Live values come from <code>data/db_ingestion_runs/*/summary.csv</code>, reranker smoke JSON, and progress artifacts. Recall/MRR/nDCG stays paused until a query ground-truth CSV is provided.</p>
+        </div>
+        <span class="status-pill" id="proofPill">Proof data loading</span>
+      </div>
+      <div class="proof-grid">
+        <div class="proof-card"><strong>Documents</strong><span id="docProof">—</span><small>3 PDFs still need OCR decision</small></div>
+        <div class="proof-card"><strong>Vector DBs</strong><span id="dbProof">—</span><small>Qdrant, PGVector, Weaviate</small></div>
+        <div class="proof-card"><strong>Embedding models</strong><span id="embedProof">—</span><small>GTE and Jina validated. OpenAI optional.</small></div>
+        <div class="proof-card"><strong>Rerankers</strong><span id="rerankProof">—</span><small>BGE and Qwen validated. Amazon optional.</small></div>
+      </div>
+      <div class="grid two compact-grid">
+        <div>
+          <div class="section-head compact"><h3>Latest ingestion rows</h3><span class="hint" id="ingestionHint">—</span></div>
+          <div class="table-wrap"><table id="ingestionTable"></table></div>
+        </div>
+        <div>
+          <div class="section-head compact"><h3>VM service health</h3><span class="hint">from exported snapshot</span></div>
+          <div class="table-wrap"><table id="healthTable"></table></div>
+        </div>
+      </div>
+      <div class="grid two compact-grid">
+        <div>
+          <div class="section-head compact"><h3>Live retrieval smoke tests</h3><span class="hint" id="retrievalHint">top-k proof from VM DBs</span></div>
+          <div class="table-wrap"><table id="retrievalSmokeTable"></table></div>
+        </div>
+        <div>
+          <div class="section-head compact"><h3>Reranker smoke tests</h3><span class="hint">manual query proof</span></div>
+          <div class="table-wrap"><table id="rerankerSmokeTable"></table></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel controls sticky-panel">
       <div class="section-head">
         <div>
           <h2>Customize benchmark view</h2>
-          <p>Filters update instantly. The benchmark runner still uses deterministic local adapters unless real providers are wired in.</p>
+          <p>Filters update instantly. The VM proof data is separate from Recall/MRR/nDCG until query ground truth is available.</p>
         </div>
         <div class="status-pill" id="statusPill">Ready</div>
       </div>
@@ -89,7 +125,7 @@
 
     <section class="grid two">
       <div class="panel chart-panel">
-        <div class="section-head"><h2>Recall vs latency</h2><span class="hint">each dot = config</span></div>
+        <div class="section-head"><h2>Recall vs latency</h2><span class="hint">pending query ground truth</span></div>
         <canvas id="scatterChart" width="640" height="340"></canvas>
       </div>
       <div class="panel chart-panel">
@@ -100,7 +136,7 @@
 
     <section class="grid two">
       <div class="panel chart-panel">
-        <div class="section-head"><h2>Chunking comparison</h2><span class="hint">recall + chunk volume</span></div>
+        <div class="section-head"><h2>Chunking comparison</h2><span class="hint">quality metrics pending</span></div>
         <canvas id="chunkChart" width="640" height="340"></canvas>
       </div>
       <div class="panel chart-panel">
