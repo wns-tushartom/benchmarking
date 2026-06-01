@@ -137,6 +137,7 @@ def evaluate_case(case: dict[str, str], smoke: dict[str, Any], threshold: float)
         "sheet": smoke.get("sheet", ""),
         "embedding": smoke.get("embedding", ""),
         "store": smoke.get("store", ""),
+        "reranker": smoke.get("reranker", "none"),
         "top_k": smoke.get("top_k", len(hits)),
         "retrieved_count": len(hits),
         "latency_seconds": smoke.get("retrieval_seconds", ""),
@@ -192,11 +193,11 @@ def main() -> int:
         for smoke in matched:
             detail.append(evaluate_case(case, smoke, args.text_threshold))
 
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for r in detail:
-        groups[(r["sheet"], r["embedding"], r["store"])].append(r)
+        groups[(r["sheet"], r["embedding"], r["store"], r.get("reranker", "none"))].append(r)
     summary = []
-    for (sheet, embedding, store), rows in sorted(groups.items()):
+    for (sheet, embedding, store, reranker), rows in sorted(groups.items()):
         hit_ranks = [int(r["first_relevant_rank"]) for r in rows if int(r["first_relevant_rank"]) > 0]
         recall5 = avg([float(r["hit_at_5"]) for r in rows])
         mrr_score = avg([float(r["mrr"]) for r in rows])
@@ -207,6 +208,7 @@ def main() -> int:
             "sheet": sheet,
             "embedding": embedding,
             "store": store,
+            "reranker": reranker,
             "evaluated_queries": len(rows),
             "recall_at_1": avg([float(r["hit_at_1"]) for r in rows]),
             "recall_at_3": avg([float(r["hit_at_3"]) for r in rows]),

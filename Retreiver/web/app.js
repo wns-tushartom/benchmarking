@@ -108,18 +108,27 @@ function renderRetrieval(smokes) {
   ]);
 }
 
+function displayScore(r) {
+  const score = r.winner_score || ((0.45*num(r.recall_at_5)) + (0.30*num(r.mrr)) + (0.20*num(r.ndcg_at_5)) + (0.05*(1/(1+num(r.avg_latency_seconds)))));
+  return fmt(score, 3);
+}
+
 function renderEvaluation(evaluation) {
   const rows = evaluation?.summary || [];
   const section = $('qualitySection');
   if (!section) return;
-  section.classList.toggle('hidden', rows.length === 0);
   const report = evaluation?.report || {};
-  $('qualityHint').textContent = rows.length ? `${rows.length} configs · ${report.groundtruth_rows || '—'} GT rows · ${report.missing_query_count || 0} missing queries` : 'No ground truth yet';
-  table($('qualityTable'), rows.slice(0, 40), [
-    {key:'winner_score', label:'Score'},
+  const baseRows = rows;
+  const rerankedRows = evaluation?.reranked?.summary || [];
+  const displayRows = [...baseRows, ...rerankedRows].sort((a,b)=>num(b.winner_score)-num(a.winner_score) || num(b.recall_at_5)-num(a.recall_at_5));
+  section.classList.toggle('hidden', displayRows.length === 0);
+  $('qualityHint').textContent = displayRows.length ? `${displayRows.length} configs · ${report.groundtruth_rows || evaluation?.reranked?.report?.groundtruth_rows || '—'} GT rows · ${report.missing_query_count || 0} missing queries` : 'No ground truth yet';
+  table($('qualityTable'), displayRows.slice(0, 60), [
+    {key:'winner_score', label:'Score', render:displayScore},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
     {key:'store', label:'DB'},
+    {key:'reranker', label:'Reranker', render:r=>esc(r.reranker || 'none')},
     {key:'evaluated_queries', label:'Queries'},
     {key:'recall_at_1', label:'R@1'},
     {key:'recall_at_3', label:'R@3'},
@@ -132,7 +141,7 @@ function renderEvaluation(evaluation) {
     {key:'no_hit_queries', label:'No hit'},
     {key:'avg_latency_seconds', label:'Avg sec'},
   ]);
-  renderBestMethods(rows);
+  renderBestMethods(displayRows.length ? displayRows : rows);
 }
 
 function groupWinner(rows, key) {
@@ -163,11 +172,12 @@ function renderBestMethods(rows) {
   const fastest = [...rows].sort((a,b)=>num(a.avg_latency_seconds)-num(b.avg_latency_seconds))[0];
   const bestR1 = [...rows].sort((a,b)=>num(b.recall_at_1)-num(a.recall_at_1) || num(b.mrr)-num(a.mrr))[0];
   const cards = [
-    {step:'Overall best combination', value:`${overall.sheet} · ${overall.embedding} · ${overall.store}`, note:`Score ${fmt(overall.winner_score,3)} · R@5 ${(num(overall.recall_at_5)*100).toFixed(1)}% · ${fmt(overall.avg_latency_seconds,3)}s`, accent:'gold'},
+    {step:'Overall best combination', value:`${overall.sheet} · ${overall.embedding} · ${overall.store}${overall.reranker && overall.reranker !== 'none' ? ' · ' + overall.reranker : ''}`, note:`Score ${displayScore(overall)} · R@5 ${(num(overall.recall_at_5)*100).toFixed(1)}% · ${fmt(overall.avg_latency_seconds,3)}s`, accent:'gold'},
     {step:'Best chunking method', value:groupWinner(rows,'sheet').name, note:`Average score ${fmt(groupWinner(rows,'sheet').score,3)} across ${groupWinner(rows,'sheet').configs} configs`, accent:'cyan'},
     {step:'Best embedding model', value:groupWinner(rows,'embedding').name, note:`R@5 ${(groupWinner(rows,'embedding').r5*100).toFixed(1)}% · MRR ${fmt(groupWinner(rows,'embedding').mrr,3)}`, accent:'mint'},
     {step:'Best vector database', value:groupWinner(rows,'store').name, note:`Avg latency ${fmt(groupWinner(rows,'store').latency,3)}s · score ${fmt(groupWinner(rows,'store').score,3)}`, accent:'rose'},
-    {step:'Fastest evaluated config', value:`${fastest.store}`, note:`${fastest.sheet} · ${fastest.embedding} · ${fmt(fastest.avg_latency_seconds,3)}s`, accent:'speed'},
+    {step:'Best reranker', value:groupWinner(rows,'reranker').name || 'none', note:`Average score ${fmt(groupWinner(rows,'reranker').score,3)} across ${groupWinner(rows,'reranker').configs} configs`, accent:'rank'},
+    {step:'Fastest evaluated config', value:`${fastest.store}`, note:`${fastest.sheet} · ${fastest.embedding}${fastest.reranker && fastest.reranker !== 'none' ? ' · ' + fastest.reranker : ''} · ${fmt(fastest.avg_latency_seconds,3)}s`, accent:'speed'},
     {step:'Best first-answer accuracy', value:`${bestR1.sheet}`, note:`${bestR1.embedding} · ${bestR1.store} · R@1 ${(num(bestR1.recall_at_1)*100).toFixed(1)}%`, accent:'rank'},
   ];
   $('bestMethodHint').textContent = `${rows.length} configs ranked`;
@@ -260,6 +270,7 @@ function selectedParams() {
   if ($('runStore')?.value) p.append('store', $('runStore').value);
   const limit = $('runLimit')?.value || '0';
   p.set('limit', limit);
+  p.set('top_k', $('runTopK')?.value || '10');
   p.set('max_runs', '1');
   return p;
 }
@@ -270,6 +281,8 @@ async function runAction(kind) {
     smoke: '/api/run/retrieval-smoke',
     eval: '/api/run/evaluate-groundtruth',
     full: '/api/run/full-gt-retrieval',
+    rerank: '/api/run/reranker-smoke',
+    rerankEval: '/api/run/evaluate-reranked-groundtruth',
   };
   const p = selectedParams();
   if (kind === 'smoke') {
@@ -278,8 +291,14 @@ async function runAction(kind) {
     ($('runQueries')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean).forEach(q => p.append('query', q));
   }
   if (kind === 'full') {
-    p.set('top_k', '10');
+    p.set('top_k', $('runTopK')?.value || '10');
     p.set('max_runs', '36');
+  }
+  if (kind === 'rerank') {
+    p.set('top_k', $('runTopK')?.value || '10');
+    p.set('limit', $('rerankerLimit')?.value || '100');
+    const selected = [...($('runReranker')?.selectedOptions || [])].map(o=>o.value);
+    selected.forEach(r => p.append('reranker', r));
   }
   $('runStatus').textContent = 'Running';
   $('runOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
@@ -295,5 +314,8 @@ $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('status
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runRerankerBtn')?.addEventListener('click', () => runAction('rerank').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('openTestOptionsBtn')?.addEventListener('click', () => $('testOptionsDialog')?.showModal());
 loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

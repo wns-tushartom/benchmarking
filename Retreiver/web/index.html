@@ -46,17 +46,35 @@
         <label>Embedding<select id="runEmbedding"></select></label>
         <label>Vector DB<select id="runStore"></select></label>
         <label>Chunk limit<input id="runLimit" value="0" /></label>
-        <label class="queries-label">Test queries<textarea id="runQueries">refund old ticket and issue new ticket
-schedule change alternate option
-NACO refund process</textarea></label>
+        <label>Top K<input id="runTopK" value="10" /></label>
+        <button id="openTestOptionsBtn" type="button">Test options</button>
       </div>
       <div class="run-actions">
         <button id="runIngestBtn" type="button">Run selected ingestion</button>
         <button id="runSmokeBtn" type="button">Test selected queries</button>
         <button id="runFullGtBtn" type="button">Run full GT retrieval</button>
+        <button id="runRerankerBtn" type="button">Run reranker test</button>
+        <button id="runRerankedEvalBtn" type="button">Evaluate reranked results</button>
         <button id="runEvalBtn" type="button">Evaluate ground truth</button>
       </div>
       <pre id="runOutput" class="run-output"></pre>
+      <dialog id="testOptionsDialog" class="test-options-dialog">
+        <form method="dialog" class="dialog-card">
+          <div class="section-head"><div><h2>Pipeline test options</h2><p>Select how to test retrieval and reranking.</p></div><button value="cancel" type="submit">Close</button></div>
+          <div class="dialog-grid">
+            <label>Custom test queries<textarea id="runQueries">refund old ticket and issue new ticket
+schedule change alternate option
+NACO refund process</textarea></label>
+            <label>Rerankers
+              <select id="runReranker" multiple>
+                <option value="bge-reranker-base" selected>bge-reranker-base</option>
+                <option value="qwen3_4b_rerank" selected>qwen3_4b_rerank</option>
+              </select>
+            </label>
+            <label>Reranker artifact limit<input id="rerankerLimit" value="100" /></label>
+          </div>
+        </form>
+      </dialog>
     </section>
 
     <section id="qualitySection" class="panel quality-panel hidden">

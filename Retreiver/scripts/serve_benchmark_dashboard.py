@@ -151,18 +151,25 @@ def read_snapshot() -> dict:
         return {"error": str(exc)}
 
 
-def read_evaluation() -> dict:
-    summary = sort_summary(read_csv(EVAL_DIR / "groundtruth_eval_summary.csv")) if EVAL_DIR.exists() else []
-    details = read_csv(EVAL_DIR / "groundtruth_eval_details.csv") if EVAL_DIR.exists() else []
-    report_path = EVAL_DIR / "groundtruth_eval_report.json"
+def read_evaluation_dir(path: Path) -> dict:
+    summary = sort_summary(read_csv(path / "groundtruth_eval_summary.csv")) if path.exists() else []
+    details = read_csv(path / "groundtruth_eval_details.csv") if path.exists() else []
+    report_path = path / "groundtruth_eval_report.json"
     report = {}
     if report_path.exists():
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception as exc:
             report = {"error": str(exc)}
+    return {"summary": summary, "details": details[:500], "report": report}
+
+
+def read_evaluation() -> dict:
+    base = read_evaluation_dir(EVAL_DIR)
+    base["reranked"] = read_evaluation_dir(ROOT / "data" / "evaluation_reranked")
     gt_files = sorted([str(p.relative_to(ROOT)) for p in GROUNDTRUTH_DIR.glob("*")]) if GROUNDTRUTH_DIR.exists() else []
-    return {"summary": summary, "details": details[:500], "report": report, "groundtruth_files": gt_files}
+    base["groundtruth_files"] = gt_files
+    return base
 
 
 def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
@@ -341,6 +348,22 @@ class Handler(SimpleHTTPRequestHandler):
                 add_multi(cmd, "--embeddings", [e for e in benchmark_options().get("embeddings", []) if e in {"gte_multilingual_base", "jina_v3"}])
                 add_multi(cmd, "--stores", benchmark_options().get("vector_stores", []))
                 cmd += ["--max-combos", qs.get("max_runs", ["36"])[0] or "36"]
+            elif parsed.path == "/api/run/reranker-smoke":
+                cmd = [sys.executable, "scripts/run_reranker_smoke_from_retrieval.py", "--top-k", qs.get("top_k", ["10"])[0]]
+                rerankers = qs.get("reranker", []) or benchmark_options().get("rerankers", [])
+                rerankers = [r for r in rerankers if r not in {"Amazon Rerank v1", "amazon_bedrock"}]
+                add_multi(cmd, "--rerankers", rerankers or ["bge-reranker-base", "qwen3_4b_rerank"])
+                if limit and limit != "0":
+                    cmd += ["--limit-artifacts", limit]
+            elif parsed.path == "/api/run/evaluate-reranked-groundtruth":
+                gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
+                if not gt:
+                    candidates = sorted(GROUNDTRUTH_DIR.glob("*.csv")) + sorted(GROUNDTRUTH_DIR.glob("*.xlsx"))
+                    gt = str(candidates[-1]) if candidates else ""
+                if not gt:
+                    self.send_json({"error": "No groundtruth file found. Put CSV/XLSX under data/groundtruth/."}, 400)
+                    return
+                cmd = [sys.executable, "scripts/evaluate_retrieval_groundtruth.py", "--groundtruth", gt, "--smoke-dir", "data/reranker_smoke", "--out-dir", "data/evaluation_reranked"]
             elif parsed.path == "/api/run/evaluate-groundtruth":
                 gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
                 if not gt:
