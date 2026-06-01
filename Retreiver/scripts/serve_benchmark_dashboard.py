@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -24,6 +25,8 @@ INGESTION_DIR = ROOT / "data" / "db_ingestion_runs"
 RERANKER_DIR = ROOT / "data" / "reranker_smoke"
 RETRIEVAL_DIR = ROOT / "data" / "retrieval_smoke"
 SNAPSHOT_PATH = ROOT / "data" / "vm_dashboard_snapshot.json"
+EVAL_DIR = ROOT / "data" / "evaluation"
+GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 
 
@@ -142,6 +145,27 @@ def read_snapshot() -> dict:
     except Exception as exc:
         return {"error": str(exc)}
 
+
+def read_evaluation() -> dict:
+    summary = sort_summary(read_csv(EVAL_DIR / "groundtruth_eval_summary.csv")) if EVAL_DIR.exists() else []
+    details = read_csv(EVAL_DIR / "groundtruth_eval_details.csv") if EVAL_DIR.exists() else []
+    report_path = EVAL_DIR / "groundtruth_eval_report.json"
+    report = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            report = {"error": str(exc)}
+    gt_files = sorted([str(p.relative_to(ROOT)) for p in GROUNDTRUTH_DIR.glob("*")]) if GROUNDTRUTH_DIR.exists() else []
+    return {"summary": summary, "details": details[:500], "report": report, "groundtruth_files": gt_files}
+
+
+def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
+    vals = [v for v in values if v and v != "all"]
+    if vals:
+        cmd.append(flag)
+        cmd.extend(vals)
+
 def sort_summary(rows: list[dict]) -> list[dict]:
     def key(r: dict) -> tuple:
         try:
@@ -192,6 +216,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/modular_runs/latest/MODULAR_REPORT.md",
                 "data/vm_dashboard_snapshot.json",
                 "data/retrieval_smoke/summary.json",
+                "data/evaluation/groundtruth_eval_summary.csv",
+                "data/evaluation/groundtruth_eval_details.csv",
+                "data/evaluation/groundtruth_eval_report.json",
                 "WNS_VM_PROGRESS_20260528.md",
                 "JINA_TIMINGS_20260528.md",
                 "RERANKER_SMOKE_20260528.md",
@@ -214,6 +241,7 @@ class Handler(SimpleHTTPRequestHandler):
             ingestion_rows = read_ingestion_summaries()
             reranker_smokes = read_reranker_smokes()
             retrieval_smokes = read_retrieval_smokes()
+            evaluation = read_evaluation()
             snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
@@ -230,6 +258,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "ingestion": summarize_ingestion(ingestion_rows),
                     "reranker_smokes": reranker_smokes,
                     "retrieval_smokes": retrieval_smokes,
+                    "evaluation": evaluation,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
                     "known_pdf_count": 225,
@@ -262,10 +291,39 @@ class Handler(SimpleHTTPRequestHandler):
                 cmd = [sys.executable, "scripts/compare_chunking_recall.py", "--limit", limit]
             elif parsed.path in {"/api/run/modular", "/api/run/selected"}:
                 cmd = [sys.executable, "scripts/benchmark_cli.py", "run", "--limit-queries", limit, "--max-runs", max_runs, "--output-dir", "data/modular_runs/latest"] + selected_cli_args(qs)
+            elif parsed.path == "/api/run/ingest-selected":
+                cmd = [sys.executable, "scripts/run_long_db_ingestion.py", "--skip-existing-store-success"]
+                add_multi(cmd, "--sheets", qs.get("sheet", []))
+                add_multi(cmd, "--embeddings", qs.get("embedding", []))
+                add_multi(cmd, "--stores", qs.get("store", []))
+                if limit and limit != "0":
+                    cmd += ["--limit", limit]
+            elif parsed.path == "/api/run/retrieval-smoke":
+                cmd = [sys.executable, "scripts/run_retrieval_smoke_from_vm_dbs.py", "--top-k", qs.get("top_k", ["5"])[0]]
+                add_multi(cmd, "--sheets", qs.get("sheet", []))
+                add_multi(cmd, "--embeddings", qs.get("embedding", []))
+                add_multi(cmd, "--stores", qs.get("store", []))
+                queries = [q.strip() for raw in qs.get("query", []) for q in raw.split("\n") if q.strip()]
+                if queries:
+                    cmd.append("--queries")
+                    cmd.extend(queries)
+                elif qs.get("groundtruth", [""])[0]:
+                    cmd += ["--queries-file", qs.get("groundtruth", [""])[0]]
+                if max_runs and max_runs != "0":
+                    cmd += ["--max-combos", max_runs]
+            elif parsed.path == "/api/run/evaluate-groundtruth":
+                gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
+                if not gt:
+                    candidates = sorted(GROUNDTRUTH_DIR.glob("*.csv")) + sorted(GROUNDTRUTH_DIR.glob("*.xlsx"))
+                    gt = str(candidates[-1]) if candidates else ""
+                if not gt:
+                    self.send_json({"error": "No groundtruth file found. Put CSV/XLSX under data/groundtruth/ or pass ?groundtruth=/path/file.csv"}, 400)
+                    return
+                cmd = [sys.executable, "scripts/evaluate_retrieval_groundtruth.py", "--groundtruth", gt]
             else:
                 self.send_json({"error": "unknown endpoint"}, 404)
                 return
-            proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=600)
+            proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=3600)
             self.send_json({"exit_code": proc.returncode, "output": proc.stdout + proc.stderr})
         except Exception as exc:
             self.send_json({"error": str(exc)}, 500)

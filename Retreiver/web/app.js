@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 let state = { operational: {}, files: [], options: {} };
+let benchmarkOptions = {};
 
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num = (v) => Number.parseFloat(v || 0) || 0;
@@ -29,6 +30,13 @@ function fillSelect(id, values, label) {
   el.value = values.includes(cur) ? cur : 'all';
 }
 
+function fillRunSelect(id, values) {
+  const el = $(id); if (!el) return;
+  const cur = el.value || (values[0] || 'all');
+  el.innerHTML = values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  el.value = values.includes(cur) ? cur : (values[0] || 'all');
+}
+
 function latestRows(rows) {
   const ok = rows.filter(r => r.status === 'ok' && r.store && r.embedding && r.sheet);
   const map = new Map();
@@ -55,30 +63,25 @@ function renderServices(health) {
 
 function renderCoverage(rows) {
   const latest = latestRows(rows);
-  const chunkers = uniq(latest, 'sheet');
-  const embeddings = uniq(latest, 'embedding');
   const stores = uniq(latest, 'store');
-  const el = $('coverageMatrix');
-  $('coverageHint').textContent = `${latest.length} live combos`;
-  if (!latest.length) {
-    el.innerHTML = '<div class="empty-state">No successful DB ingestion rows found.</div>';
-    return;
-  }
-  const byKey = new Map(latest.map(r => [`${r.sheet}|${r.embedding}|${r.store}`, r]));
-  el.style.setProperty('--cols', String(Math.max(1, stores.length + 1)));
-  let html = `<div class="matrix-head">Chunker / embedding</div>${stores.map(s => `<div class="matrix-head">${esc(s)}</div>`).join('')}`;
-  chunkers.forEach(ch => {
-    embeddings.forEach(em => {
-      const hasAny = stores.some(st => byKey.has(`${ch}|${em}|${st}`));
-      if (!hasAny) return;
-      html += `<div class="matrix-label"><strong>${esc(ch)}</strong><span>${esc(em)}</span></div>`;
-      stores.forEach(st => {
-        const r = byKey.get(`${ch}|${em}|${st}`);
-        html += r ? `<div class="matrix-cell ok"><strong>${esc(r.search_hits || '5')} hits</strong><span>${fmt(r.total_store_seconds, 2)}s</span></div>` : '<div class="matrix-cell missing">—</div>';
-      });
-    });
+  $('coverageHint').textContent = `${latest.length} successful combos`;
+  const grouped = new Map();
+  latest.forEach(r => {
+    const key = `${r.sheet}|${r.embedding}`;
+    if (!grouped.has(key)) grouped.set(key, { sheet: r.sheet, embedding: r.embedding, stores: {} });
+    grouped.get(key).stores[r.store] = r;
   });
-  el.innerHTML = html;
+  const coverageRows = [...grouped.values()].sort((a,b) => `${a.sheet}${a.embedding}`.localeCompare(`${b.sheet}${b.embedding}`));
+  const cols = [
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    ...stores.map(st => ({key:st, label:st, render:r => {
+      const v = r.stores[st];
+      return v ? `<span class="coverage-ok">ok</span> <code>${fmt(v.total_store_seconds, 2)}s</code>` : '<span class="coverage-miss">not run</span>';
+    }})),
+    {key:'total', label:'DBs ready', render:r => `${Object.keys(r.stores).length}/${stores.length}`}
+  ];
+  table($('coverageTable'), coverageRows, cols);
 }
 
 function filteredRetrieval(smokes) {
@@ -90,21 +93,39 @@ function filteredRetrieval(smokes) {
 function renderRetrieval(smokes) {
   fillSelect('retrievalDbFilter', uniq(smokes, 'store'), 'All DBs');
   fillSelect('retrievalEmbeddingFilter', uniq(smokes, 'embedding'), 'All embeddings');
-  const rows = filteredRetrieval(smokes).slice(0, 18);
-  const el = $('retrievalCards');
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty-state">No retrieval smoke JSON yet. Run run_retrieval_smoke_from_vm_dbs.py on the VM.</div>';
-    return;
-  }
-  el.innerHTML = rows.map(r => {
-    const top = (r.hits || [])[0] || {};
-    return `<article class="retrieval-card">
-      <div class="card-top"><span>${esc(r.store)}</span><code>${fmt(r.retrieval_seconds, 3)}s</code></div>
-      <h3>${esc(r.query || 'query')}</h3>
-      <p>${esc(top.pdf_name || 'No top PDF captured')}</p>
-      <div class="meta-row"><span>${esc(r.sheet)}</span><span>${esc(r.embedding)}</span><span>${esc(r.retrieved_count || 0)} hits</span></div>
-    </article>`;
-  }).join('');
+  const rows = filteredRetrieval(smokes).slice(0, 100).map(r => ({
+    ...r,
+    top_pdf: ((r.hits || [])[0] || {}).pdf_name || '—',
+  }));
+  table($('retrievalTable'), rows, [
+    {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 64))},
+    {key:'store', label:'DB'},
+    {key:'embedding', label:'Embedding'},
+    {key:'sheet', label:'Chunker'},
+    {key:'top_pdf', label:'Top PDF', render:r=>esc((r.top_pdf || '').slice(0, 70))},
+    {key:'retrieved_count', label:'Hits'},
+    {key:'retrieval_seconds', label:'Latency', render:r=>`${fmt(r.retrieval_seconds, 3)}s`},
+  ]);
+}
+
+function renderEvaluation(evaluation) {
+  const rows = evaluation?.summary || [];
+  const section = $('qualitySection');
+  if (!section) return;
+  section.classList.toggle('hidden', rows.length === 0);
+  $('qualityHint').textContent = rows.length ? `${rows.length} evaluated configs` : 'No ground truth yet';
+  table($('qualityTable'), rows.slice(0, 40), [
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'DB'},
+    {key:'evaluated_queries', label:'Queries'},
+    {key:'recall_at_1', label:'R@1'},
+    {key:'recall_at_3', label:'R@3'},
+    {key:'recall_at_5', label:'R@5'},
+    {key:'mrr', label:'MRR'},
+    {key:'ndcg_at_5', label:'nDCG@5'},
+    {key:'avg_latency_seconds', label:'Avg sec'},
+  ]);
 }
 
 function renderOperational() {
@@ -119,7 +140,7 @@ function renderOperational() {
   const embeddings = uniq(latest, 'embedding');
   const stores = uniq(latest, 'store');
 
-  $('modeLabel').textContent = state.options?.mode || 'vm_remote_required';
+  $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   $('pdfStatus').textContent = `${op.extracted_pdf_count || 0}/${op.known_pdf_count || 0}`;
@@ -137,6 +158,7 @@ function renderOperational() {
   renderCoverage(rows);
   renderServices(health);
   renderRetrieval(retrieval);
+  renderEvaluation(op.evaluation);
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -169,6 +191,48 @@ async function refresh() {
   $('statusPill').textContent = 'Live';
 }
 
+async function loadOptions() {
+  benchmarkOptions = await api('/api/options');
+  fillRunSelect('runSheet', benchmarkOptions.chunkers || []);
+  fillRunSelect('runEmbedding', benchmarkOptions.embeddings || []);
+  fillRunSelect('runStore', benchmarkOptions.vector_stores || []);
+}
+
+function selectedParams() {
+  const p = new URLSearchParams();
+  if ($('runSheet')?.value) p.append('sheet', $('runSheet').value);
+  if ($('runEmbedding')?.value) p.append('embedding', $('runEmbedding').value);
+  if ($('runStore')?.value) p.append('store', $('runStore').value);
+  const limit = $('runLimit')?.value || '0';
+  p.set('limit', limit);
+  p.set('max_runs', '1');
+  return p;
+}
+
+async function runAction(kind) {
+  const endpoints = {
+    ingest: '/api/run/ingest-selected',
+    smoke: '/api/run/retrieval-smoke',
+    eval: '/api/run/evaluate-groundtruth',
+  };
+  const p = selectedParams();
+  if (kind === 'smoke') {
+    p.delete('limit');
+    p.set('max_runs', '1');
+    ($('runQueries')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean).forEach(q => p.append('query', q));
+  }
+  $('runStatus').textContent = 'Running';
+  $('runOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
+  const res = await fetch(`${endpoints[kind]}?${p.toString()}`, {method:'POST'});
+  const payload = await res.json();
+  $('runOutput').textContent += JSON.stringify(payload, null, 2).slice(0, 8000);
+  $('runStatus').textContent = payload.exit_code === 0 ? 'Done' : 'Check output';
+  await refresh();
+}
+
 ['retrievalDbFilter','retrievalEmbeddingFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [])));
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
-refresh().catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });
+$('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

@@ -61,6 +61,35 @@ DEFAULT_QUERIES = [
     "EMD refund after reissue",
     "Farelogix refund scenario",
 ]
+QUERY_COLS = ["query", "question", "user_query", "prompt"]
+
+
+def load_queries_file(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if path.suffix.lower() in {".xlsx", ".xlsm"}:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            return []
+        headers = [str(h or "").strip().lower() for h in rows[0]]
+        idx = next((i for i, h in enumerate(headers) if h in QUERY_COLS), 0)
+        return [str(r[idx]).strip() for r in rows[1:] if len(r) > idx and r[idx] and str(r[idx]).strip()]
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        sample = f.read(4096); f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",|\t;")
+            reader = csv.DictReader(f, dialect=dialect)
+            rows = list(reader)
+            if reader.fieldnames:
+                fields = [x.lower().strip() for x in reader.fieldnames]
+                col = next((reader.fieldnames[i] for i, h in enumerate(fields) if h in QUERY_COLS), reader.fieldnames[0])
+                return [str(r.get(col, "")).strip() for r in rows if str(r.get(col, "")).strip()]
+        except Exception:
+            f.seek(0)
+        return [line.strip() for line in f if line.strip()]
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -175,7 +204,8 @@ def run_one(row: dict[str, str], query: str, top_k: int) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--queries", nargs="*", default=DEFAULT_QUERIES)
+    parser.add_argument("--queries", nargs="*", default=None)
+    parser.add_argument("--queries-file", default="", help="CSV/XLSX/TXT query list; uses query/question column when present")
     parser.add_argument("--sheets", nargs="*", default=["fixed_tok1200_ov150", "Heading_sections_l2", "semantic_split"])
     parser.add_argument("--embeddings", nargs="*", default=["gte_multilingual_base", "jina_v3"])
     parser.add_argument("--stores", nargs="*", default=["Qdrant", "PGVector", "Weaviate"])
@@ -189,10 +219,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = [r for r in latest_ok_rows() if r.get("sheet") in args.sheets and r.get("embedding") in args.embeddings and r.get("store") in args.stores]
     rows = rows[: args.max_combos]
+    queries = load_queries_file(Path(args.queries_file)) if args.queries_file else (args.queries or DEFAULT_QUERIES)
     all_results = []
     errors = []
     for row in rows:
-        for query in args.queries:
+        for query in queries:
             try:
                 result = run_one(row, query, args.top_k)
                 name = f"{safe_name(row['sheet'])}_{safe_name(row['embedding'])}_{safe_name(row['store'])}_{safe_name(query)[:40]}.json"

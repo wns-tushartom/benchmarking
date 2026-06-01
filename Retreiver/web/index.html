@@ -10,16 +10,16 @@
   <main class="shell">
     <section class="hero panel-soft">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="mark"></span> WNS KnowRA RAG Benchmark</p>
-        <h1>VM cockpit for live retrieval proof.</h1>
-        <p class="sub">Operational dashboard backed only by VM artifacts: DB ingestion summaries, retrieval smoke JSON, reranker smoke JSON, and service health snapshots. Quality metrics stay hidden until ground truth is available.</p>
+        <p class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /> <span>KnowRA</span></p>
+        <h1>RAG Benchmarking</h1>
+        <p class="sub">Live benchmark dashboard backed by real artifacts: ingestion summaries, retrieval smoke results, reranker smoke results, and service health. Accuracy/Recall/MRR/nDCG will appear after the ground-truth dataset is loaded.</p>
         <div class="hero-actions">
           <button id="refreshBtn" type="button">Refresh live data</button>
           <span id="statusPill" class="status-pill muted-pill">Loading</span>
         </div>
       </div>
       <div class="hero-panel">
-        <div class="signal-line"><span>Mode</span><strong id="modeLabel">VM live</strong></div>
+        <div class="signal-line"><span>Mode</span><strong id="modeLabel">Live artifacts</strong></div>
         <div class="signal-line"><span>Latest run</span><strong id="latestRun">—</strong></div>
         <div class="signal-line"><span>Last snapshot</span><strong id="snapshotAt">—</strong></div>
         <div class="signal-line"><span>Ground truth</span><strong>Pending</strong></div>
@@ -35,17 +35,44 @@
       <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate</small></div>
     </section>
 
+    <section class="panel run-panel">
+      <div class="section-head">
+        <div><h2>Run benchmark actions</h2><p>Run a selected combination, smoke-test custom queries, or evaluate ground truth after the 500-row dataset is uploaded.</p></div>
+        <span id="runStatus" class="mini-stat">Idle</span>
+      </div>
+      <div class="run-grid">
+        <label>Chunker<select id="runSheet"></select></label>
+        <label>Embedding<select id="runEmbedding"></select></label>
+        <label>Vector DB<select id="runStore"></select></label>
+        <label>Chunk limit<input id="runLimit" value="0" /></label>
+        <label class="queries-label">Test queries<textarea id="runQueries">refund old ticket and issue new ticket
+schedule change alternate option
+NACO refund process</textarea></label>
+      </div>
+      <div class="run-actions">
+        <button id="runIngestBtn" type="button">Run selected ingestion</button>
+        <button id="runSmokeBtn" type="button">Test selected queries</button>
+        <button id="runEvalBtn" type="button">Evaluate ground truth</button>
+      </div>
+      <pre id="runOutput" class="run-output"></pre>
+    </section>
+
+    <section id="qualitySection" class="panel quality-panel hidden">
+      <div class="section-head"><div><h2>Ground-truth quality metrics</h2><p>Visible only after evaluation runs against the uploaded 500-row dataset.</p></div><span class="mini-stat" id="qualityHint">—</span></div>
+      <div class="table-wrap"><table id="qualityTable"></table></div>
+    </section>
+
     <section class="grid cockpit-grid">
       <article class="panel coverage-panel">
         <div class="section-head">
-          <div><h2>Operational coverage</h2><p>Live matrix coverage from successful ingestion rows only.</p></div>
+          <div><h2>Benchmark coverage</h2><p>Successful ingestion coverage by chunker, embedding model, and vector database.</p></div>
           <span class="mini-stat" id="coverageHint">—</span>
         </div>
-        <div id="coverageMatrix" class="coverage-matrix"></div>
+        <div class="table-wrap compact"><table id="coverageTable"></table></div>
       </article>
       <article class="panel">
         <div class="section-head">
-          <div><h2>VM services</h2><p>Health snapshot exported from the VM.</p></div>
+          <div><h2>Runtime services</h2><p>Health snapshot from model adapter and vector databases.</p></div>
           <span class="mini-stat" id="healthHint">—</span>
         </div>
         <div id="serviceCards" class="service-cards"></div>
@@ -54,13 +81,13 @@
 
     <section class="panel">
       <div class="section-head">
-        <div><h2>Live retrieval evidence</h2><p>Top-k searches against existing VM vector DB collections/tables/classes.</p></div>
+        <div><h2>Retrieval smoke results</h2><p>Compact evidence table: query, DB, model, chunker, top PDF, hits, latency.</p></div>
         <div class="filter-row">
           <select id="retrievalDbFilter"><option value="all">All DBs</option></select>
           <select id="retrievalEmbeddingFilter"><option value="all">All embeddings</option></select>
         </div>
       </div>
-      <div id="retrievalCards" class="retrieval-grid"></div>
+      <div class="table-wrap retrieval-table-wrap"><table id="retrievalTable"></table></div>
     </section>
 
     <section class="grid two">
