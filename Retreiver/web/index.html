@@ -22,7 +22,7 @@
         <div class="signal-line"><span>Mode</span><strong id="modeLabel">Live artifacts</strong></div>
         <div class="signal-line"><span>Latest run</span><strong id="latestRun">—</strong></div>
         <div class="signal-line"><span>Last snapshot</span><strong id="snapshotAt">—</strong></div>
-        <div class="signal-line"><span>Ground truth</span><strong>Pending</strong></div>
+        <div class="signal-line"><span>Ground truth</span><strong id="groundTruthStatus">Pending</strong></div>
       </div>
     </section>
 
@@ -30,7 +30,8 @@
       <div class="metric-card"><span>Documents extracted</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></div>
       <div class="metric-card"><span>DB ingestion combos</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></div>
       <div class="metric-card"><span>Retrieval checks</span><strong id="retrievalStatus">—</strong><small id="retrievalNote">real top-k smoke artifacts</small></div>
-      <div class="metric-card"><span>Reranker checks</span><strong id="rerankerStatus">—</strong><small id="rerankerNote">BGE/Qwen artifacts</small></div>
+      <div class="metric-card"><span>Best R@5</span><strong id="bestR5Status">—</strong><small id="bestConfigNote">ground-truth winner</small></div>
+      <div class="metric-card"><span>Best latency</span><strong id="bestLatencyStatus">—</strong><small id="bestLatencyNote">fastest evaluated config</small></div>
       <div class="metric-card"><span>Embeddings</span><strong id="embeddingStatus">—</strong><small>from successful ingestion rows</small></div>
       <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate</small></div>
     </section>
@@ -52,6 +53,7 @@ NACO refund process</textarea></label>
       <div class="run-actions">
         <button id="runIngestBtn" type="button">Run selected ingestion</button>
         <button id="runSmokeBtn" type="button">Test selected queries</button>
+        <button id="runFullGtBtn" type="button">Run full GT retrieval</button>
         <button id="runEvalBtn" type="button">Evaluate ground truth</button>
       </div>
       <pre id="runOutput" class="run-output"></pre>
@@ -60,6 +62,14 @@ NACO refund process</textarea></label>
     <section id="qualitySection" class="panel quality-panel hidden">
       <div class="section-head"><div><h2>Ground-truth quality metrics</h2><p>Visible only after evaluation runs against the uploaded 500-row dataset.</p></div><span class="mini-stat" id="qualityHint">—</span></div>
       <div class="table-wrap"><table id="qualityTable"></table></div>
+    </section>
+
+    <section id="bestMethodSection" class="panel best-method-panel hidden">
+      <div class="section-head">
+        <div><h2>Best method by pipeline step</h2><p>Clear winners for each RAG pipeline choice, calculated from ground-truth evaluation.</p></div>
+        <span class="mini-stat" id="bestMethodHint">Waiting for evaluation</span>
+      </div>
+      <div id="bestMethodGrid" class="best-method-grid"></div>
     </section>
 
     <section class="grid cockpit-grid">

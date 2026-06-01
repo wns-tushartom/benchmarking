@@ -118,6 +118,15 @@ def dcg(flags: list[bool], k: int) -> float:
     return sum((1.0 if flag else 0.0) / math.log2(i + 2) for i, flag in enumerate(flags[:k]))
 
 
+def ndcg(flags: list[bool], k: int) -> float:
+    actual = dcg(flags, k)
+    ideal_flags = sorted(flags[:k], reverse=True)
+    ideal = dcg(ideal_flags, k)
+    if ideal <= 0:
+        return 0.0
+    return actual / ideal
+
+
 def evaluate_case(case: dict[str, str], smoke: dict[str, Any], threshold: float) -> dict[str, Any]:
     hits = smoke.get("hits") or []
     flags = relevance_flags(case, hits, threshold)
@@ -139,7 +148,8 @@ def evaluate_case(case: dict[str, str], smoke: dict[str, Any], threshold: float)
         "hit_at_5": int(any(flags[:5])),
         "hit_at_10": int(any(flags[:10])),
         "mrr": round(1.0 / first_rank, 6) if first_rank else 0.0,
-        "ndcg_at_5": round(dcg(flags, 5), 6),
+        "precision_at_5": round(sum(1 for x in flags[:5] if x) / max(1, min(5, len(hits))), 6),
+        "ndcg_at_5": round(ndcg(flags, 5), 6),
         "artifact": smoke.get("artifact", ""),
     }
 
@@ -187,6 +197,12 @@ def main() -> int:
         groups[(r["sheet"], r["embedding"], r["store"])].append(r)
     summary = []
     for (sheet, embedding, store), rows in sorted(groups.items()):
+        hit_ranks = [int(r["first_relevant_rank"]) for r in rows if int(r["first_relevant_rank"]) > 0]
+        recall5 = avg([float(r["hit_at_5"]) for r in rows])
+        mrr_score = avg([float(r["mrr"]) for r in rows])
+        ndcg5 = avg([float(r["ndcg_at_5"]) for r in rows])
+        latency = avg([float(r["latency_seconds"] or 0) for r in rows])
+        winner_score = round((0.45 * recall5) + (0.30 * mrr_score) + (0.20 * ndcg5) + (0.05 * (1 / (1 + latency))), 6)
         summary.append({
             "sheet": sheet,
             "embedding": embedding,
@@ -194,13 +210,17 @@ def main() -> int:
             "evaluated_queries": len(rows),
             "recall_at_1": avg([float(r["hit_at_1"]) for r in rows]),
             "recall_at_3": avg([float(r["hit_at_3"]) for r in rows]),
-            "recall_at_5": avg([float(r["hit_at_5"]) for r in rows]),
+            "recall_at_5": recall5,
             "recall_at_10": avg([float(r["hit_at_10"]) for r in rows]),
-            "mrr": avg([float(r["mrr"]) for r in rows]),
-            "ndcg_at_5": avg([float(r["ndcg_at_5"]) for r in rows]),
-            "avg_latency_seconds": avg([float(r["latency_seconds"] or 0) for r in rows]),
+            "mrr": mrr_score,
+            "precision_at_5": avg([float(r["precision_at_5"]) for r in rows]),
+            "ndcg_at_5": ndcg5,
+            "avg_first_relevant_rank": avg([float(x) for x in hit_ranks]),
+            "no_hit_queries": sum(1 for r in rows if int(r["first_relevant_rank"]) == 0),
+            "avg_latency_seconds": latency,
+            "winner_score": winner_score,
         })
-    summary.sort(key=lambda r: (-float(r["recall_at_5"]), -float(r["mrr"]), float(r["avg_latency_seconds"])))
+    summary.sort(key=lambda r: (-float(r["winner_score"]), -float(r["recall_at_5"]), -float(r["mrr"]), float(r["avg_latency_seconds"])))
 
     out = ROOT / args.out_dir
     write_csv(out / "groundtruth_eval_details.csv", detail)

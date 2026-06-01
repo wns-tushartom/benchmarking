@@ -118,23 +118,28 @@ def read_reranker_smokes() -> list[dict]:
     return smokes
 
 
-def read_retrieval_smokes() -> list[dict[str, Any]]:
+def read_retrieval_smokes(limit: int = 250) -> list[dict[str, Any]]:
     smokes: list[dict[str, Any]] = []
     if not RETRIEVAL_DIR.exists():
         return smokes
-    for path in sorted(RETRIEVAL_DIR.glob("*.json")):
-        if path.name == "summary.json":
-            continue
+    paths = [p for p in RETRIEVAL_DIR.glob("*.json") if p.name != "summary.json"]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in paths[:limit]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             payload = {"error": str(exc)}
         payload["artifact"] = str(path.relative_to(ROOT))
-        # Keep payload bounded for frontend speed.
-        payload["hits"] = (payload.get("hits") or [])[:5]
+        payload["hits"] = (payload.get("hits") or [])[:3]
         smokes.append(payload)
     smokes.sort(key=lambda r: (r.get("created_at", ""), r.get("retrieval_seconds", 999999)), reverse=True)
     return smokes
+
+
+def retrieval_smoke_count() -> int:
+    if not RETRIEVAL_DIR.exists():
+        return 0
+    return sum(1 for p in RETRIEVAL_DIR.glob("*.json") if p.name != "summary.json")
 
 
 def read_snapshot() -> dict:
@@ -169,14 +174,22 @@ def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
 def sort_summary(rows: list[dict]) -> list[dict]:
     def key(r: dict) -> tuple:
         try:
+            winner = float(r.get("winner_score") or 0)
+        except ValueError:
+            winner = 0.0
+        try:
             recall = float(r.get("recall_at_5") or 0)
         except ValueError:
             recall = 0.0
         try:
-            latency = float(r.get("avg_query_latency_ms") or r.get("avg_latency_ms") or 999999)
+            mrr = float(r.get("mrr") or 0)
+        except ValueError:
+            mrr = 0.0
+        try:
+            latency = float(r.get("avg_query_latency_ms") or r.get("avg_latency_ms") or r.get("avg_latency_seconds") or 999999)
         except ValueError:
             latency = 999999.0
-        return (-recall, latency)
+        return (-winner, -recall, -mrr, latency)
     return sorted(rows, key=key)
 
 
@@ -240,7 +253,9 @@ class Handler(SimpleHTTPRequestHandler):
                         pass
             ingestion_rows = read_ingestion_summaries()
             reranker_smokes = read_reranker_smokes()
-            retrieval_smokes = read_retrieval_smokes()
+            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["250"])[0])
+            retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
+            retrieval_total = retrieval_smoke_count()
             evaluation = read_evaluation()
             snapshot = read_snapshot()
             self.send_json({
@@ -258,6 +273,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "ingestion": summarize_ingestion(ingestion_rows),
                     "reranker_smokes": reranker_smokes,
                     "retrieval_smokes": retrieval_smokes,
+                    "retrieval_smoke_total": retrieval_total,
+                    "retrieval_smoke_loaded": len(retrieval_smokes),
                     "evaluation": evaluation,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
@@ -311,6 +328,19 @@ class Handler(SimpleHTTPRequestHandler):
                     cmd += ["--queries-file", qs.get("groundtruth", [""])[0]]
                 if max_runs and max_runs != "0":
                     cmd += ["--max-combos", max_runs]
+            elif parsed.path == "/api/run/full-gt-retrieval":
+                gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
+                if not gt:
+                    candidates = sorted(GROUNDTRUTH_DIR.glob("*.csv")) + sorted(GROUNDTRUTH_DIR.glob("*.xlsx"))
+                    gt = str(candidates[-1]) if candidates else ""
+                if not gt:
+                    self.send_json({"error": "No groundtruth file found. Put CSV/XLSX under data/groundtruth/."}, 400)
+                    return
+                cmd = [sys.executable, "scripts/run_retrieval_smoke_from_vm_dbs.py", "--queries-file", gt, "--top-k", qs.get("top_k", ["10"])[0]]
+                add_multi(cmd, "--sheets", benchmark_options().get("chunkers", []))
+                add_multi(cmd, "--embeddings", [e for e in benchmark_options().get("embeddings", []) if e in {"gte_multilingual_base", "jina_v3"}])
+                add_multi(cmd, "--stores", benchmark_options().get("vector_stores", []))
+                cmd += ["--max-combos", qs.get("max_runs", ["36"])[0] or "36"]
             elif parsed.path == "/api/run/evaluate-groundtruth":
                 gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
                 if not gt:

@@ -113,8 +113,10 @@ function renderEvaluation(evaluation) {
   const section = $('qualitySection');
   if (!section) return;
   section.classList.toggle('hidden', rows.length === 0);
-  $('qualityHint').textContent = rows.length ? `${rows.length} evaluated configs` : 'No ground truth yet';
+  const report = evaluation?.report || {};
+  $('qualityHint').textContent = rows.length ? `${rows.length} configs · ${report.groundtruth_rows || '—'} GT rows · ${report.missing_query_count || 0} missing queries` : 'No ground truth yet';
   table($('qualityTable'), rows.slice(0, 40), [
+    {key:'winner_score', label:'Score'},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
     {key:'store', label:'DB'},
@@ -122,10 +124,54 @@ function renderEvaluation(evaluation) {
     {key:'recall_at_1', label:'R@1'},
     {key:'recall_at_3', label:'R@3'},
     {key:'recall_at_5', label:'R@5'},
+    {key:'recall_at_10', label:'R@10'},
     {key:'mrr', label:'MRR'},
+    {key:'precision_at_5', label:'P@5'},
     {key:'ndcg_at_5', label:'nDCG@5'},
+    {key:'avg_first_relevant_rank', label:'Avg rank'},
+    {key:'no_hit_queries', label:'No hit'},
     {key:'avg_latency_seconds', label:'Avg sec'},
   ]);
+  renderBestMethods(rows);
+}
+
+function groupWinner(rows, key) {
+  const grouped = new Map();
+  rows.forEach(r => {
+    const name = r[key] || '—';
+    if (!grouped.has(name)) grouped.set(name, []);
+    grouped.get(name).push(r);
+  });
+  const scored = [...grouped.entries()].map(([name, rs]) => ({
+    name,
+    configs: rs.length,
+    score: rs.reduce((a,r)=>a+num(r.winner_score),0)/rs.length,
+    r5: rs.reduce((a,r)=>a+num(r.recall_at_5),0)/rs.length,
+    mrr: rs.reduce((a,r)=>a+num(r.mrr),0)/rs.length,
+    ndcg: rs.reduce((a,r)=>a+num(r.ndcg_at_5),0)/rs.length,
+    latency: rs.reduce((a,r)=>a+num(r.avg_latency_seconds),0)/rs.length,
+  })).sort((a,b)=>b.score-a.score || b.r5-a.r5 || a.latency-b.latency);
+  return scored[0];
+}
+
+function renderBestMethods(rows) {
+  const section = $('bestMethodSection');
+  if (!section) return;
+  section.classList.toggle('hidden', !rows.length);
+  if (!rows.length) return;
+  const overall = [...rows].sort((a,b)=>num(b.winner_score)-num(a.winner_score) || num(b.recall_at_5)-num(a.recall_at_5))[0];
+  const fastest = [...rows].sort((a,b)=>num(a.avg_latency_seconds)-num(b.avg_latency_seconds))[0];
+  const bestR1 = [...rows].sort((a,b)=>num(b.recall_at_1)-num(a.recall_at_1) || num(b.mrr)-num(a.mrr))[0];
+  const cards = [
+    {step:'Overall best combination', value:`${overall.sheet} · ${overall.embedding} · ${overall.store}`, note:`Score ${fmt(overall.winner_score,3)} · R@5 ${(num(overall.recall_at_5)*100).toFixed(1)}% · ${fmt(overall.avg_latency_seconds,3)}s`, accent:'gold'},
+    {step:'Best chunking method', value:groupWinner(rows,'sheet').name, note:`Average score ${fmt(groupWinner(rows,'sheet').score,3)} across ${groupWinner(rows,'sheet').configs} configs`, accent:'cyan'},
+    {step:'Best embedding model', value:groupWinner(rows,'embedding').name, note:`R@5 ${(groupWinner(rows,'embedding').r5*100).toFixed(1)}% · MRR ${fmt(groupWinner(rows,'embedding').mrr,3)}`, accent:'mint'},
+    {step:'Best vector database', value:groupWinner(rows,'store').name, note:`Avg latency ${fmt(groupWinner(rows,'store').latency,3)}s · score ${fmt(groupWinner(rows,'store').score,3)}`, accent:'rose'},
+    {step:'Fastest evaluated config', value:`${fastest.store}`, note:`${fastest.sheet} · ${fastest.embedding} · ${fmt(fastest.avg_latency_seconds,3)}s`, accent:'speed'},
+    {step:'Best first-answer accuracy', value:`${bestR1.sheet}`, note:`${bestR1.embedding} · ${bestR1.store} · R@1 ${(num(bestR1.recall_at_1)*100).toFixed(1)}%`, accent:'rank'},
+  ];
+  $('bestMethodHint').textContent = `${rows.length} configs ranked`;
+  $('bestMethodGrid').innerHTML = cards.map(c => `<article class="best-method-card ${c.accent}"><span>${esc(c.step)}</span><strong>${esc(c.value)}</strong><small>${esc(c.note)}</small></article>`).join('');
 }
 
 function renderOperational() {
@@ -139,15 +185,24 @@ function renderOperational() {
   const snapshot = op.vm_snapshot || {};
   const embeddings = uniq(latest, 'embedding');
   const stores = uniq(latest, 'store');
+  const evaluation = op.evaluation || {};
+  const evalRows = evaluation.summary || [];
+  const best = evalRows[0] || null;
+  const fastest = [...evalRows].sort((a,b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null;
 
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
+  $('groundTruthStatus').textContent = evaluation?.report?.groundtruth_rows ? `${evaluation.report.groundtruth_rows} rows evaluated` : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending');
   $('pdfStatus').textContent = `${op.extracted_pdf_count || 0}/${op.known_pdf_count || 0}`;
   $('pdfNote').textContent = `${op.failed_pdf_count || 0} PDFs need OCR decision`;
   $('comboStatus').textContent = String(ingestion.combo_count ?? latest.length ?? 0);
-  $('retrievalStatus').textContent = String(retrieval.length || 0);
-  $('rerankerStatus').textContent = String(rerank.length || 0);
+  $('retrievalStatus').textContent = String(op.retrieval_smoke_total || retrieval.length || 0);
+  $('retrievalNote').textContent = `${op.retrieval_smoke_loaded || retrieval.length || 0} loaded for preview`;
+  $('bestR5Status').textContent = best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—';
+  $('bestConfigNote').textContent = best ? `${best.sheet} · ${best.embedding} · ${best.store}` : 'ground-truth winner';
+  $('bestLatencyStatus').textContent = fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—';
+  $('bestLatencyNote').textContent = fastest ? `${fastest.sheet} · ${fastest.embedding} · ${fastest.store}` : 'fastest evaluated config';
   $('embeddingStatus').textContent = embeddings.length ? embeddings.join(' + ') : '—';
   $('dbStatus').textContent = stores.length ? stores.join(' + ') : '—';
   $('ingestionHint').textContent = `${latest.length} latest successful rows`;
@@ -214,12 +269,17 @@ async function runAction(kind) {
     ingest: '/api/run/ingest-selected',
     smoke: '/api/run/retrieval-smoke',
     eval: '/api/run/evaluate-groundtruth',
+    full: '/api/run/full-gt-retrieval',
   };
   const p = selectedParams();
   if (kind === 'smoke') {
     p.delete('limit');
     p.set('max_runs', '1');
     ($('runQueries')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean).forEach(q => p.append('query', q));
+  }
+  if (kind === 'full') {
+    p.set('top_k', '10');
+    p.set('max_runs', '36');
   }
   $('runStatus').textContent = 'Running';
   $('runOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
@@ -234,5 +294,6 @@ async function runAction(kind) {
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });
