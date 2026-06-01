@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 QUERY_COLS = ["query", "question", "user_query", "prompt"]
 PDF_COLS = ["pdf_name", "expected_pdf", "relevant_pdf", "document", "file", "filename"]
-TEXT_COLS = ["paragraph", "expected_text", "context", "ground_truth", "answer", "relevant_text"]
+TEXT_COLS = ["paragraph", "expected_text", "context", "ground_truth", "ground truth", "answer", "relevant_text"]
 ID_COLS = ["id", "query_id", "qid"]
 
 
@@ -56,10 +56,7 @@ def first(row: dict[str, Any], names: list[str]) -> str:
 
 def load_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters=",|\t;") if sample.strip() else csv.excel
-        return list(csv.DictReader(f, dialect=dialect))
+        return list(csv.DictReader(f))
 
 
 def load_xlsx(path: Path) -> list[dict[str, Any]]:

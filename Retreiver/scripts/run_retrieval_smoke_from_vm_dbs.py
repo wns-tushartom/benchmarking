@@ -78,17 +78,13 @@ def load_queries_file(path: Path) -> list[str]:
         idx = next((i for i, h in enumerate(headers) if h in QUERY_COLS), 0)
         return [str(r[idx]).strip() for r in rows[1:] if len(r) > idx and r[idx] and str(r[idx]).strip()]
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        sample = f.read(4096); f.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",|\t;")
-            reader = csv.DictReader(f, dialect=dialect)
-            rows = list(reader)
-            if reader.fieldnames:
-                fields = [x.lower().strip() for x in reader.fieldnames]
-                col = next((reader.fieldnames[i] for i, h in enumerate(fields) if h in QUERY_COLS), reader.fieldnames[0])
-                return [str(r.get(col, "")).strip() for r in rows if str(r.get(col, "")).strip()]
-        except Exception:
-            f.seek(0)
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        if reader.fieldnames:
+            fields = [x.lower().strip() for x in reader.fieldnames]
+            col = next((reader.fieldnames[i] for i, h in enumerate(fields) if h in QUERY_COLS), reader.fieldnames[0])
+            return [str(r.get(col, "")).strip() for r in rows if str(r.get(col, "")).strip()]
+        f.seek(0)
         return [line.strip() for line in f if line.strip()]
 
 
