@@ -93,6 +93,16 @@
     <section class="page" data-page-panel="compare">
       <section class="panel">
         <div class="section-head">
+          <div><h2>Top 10 pipeline visualization</h2><p>Graphical comparison of the best complete pipelines by score, Recall@5, MRR, and latency. Built only from real evaluation rows.</p></div>
+          <span class="mini-stat" id="top10Hint">Waiting for evaluation</span>
+        </div>
+        <div class="viz-grid">
+          <div id="top10ScoreChart" class="svg-chart"></div>
+          <div id="qualityLatencyChart" class="svg-chart"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="section-head">
           <div><h2>Complete pipeline comparison</h2><p>Visual comparison of the best evaluated pipelines by quality and latency. Built only from real ground-truth summary rows.</p></div>
           <span class="mini-stat" id="comparisonHint">Waiting for evaluation</span>
         </div>

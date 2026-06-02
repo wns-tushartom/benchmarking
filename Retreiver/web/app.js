@@ -241,12 +241,75 @@ function metricBar(label, value, maxValue, detail) {
   return `<div class="bar-row"><div class="bar-meta"><strong>${esc(label)}</strong><span>${esc(detail)}</span></div><div class="bar-track"><i style="width:${pct.toFixed(1)}%"></i></div></div>`;
 }
 
+function shortPipeline(r, index) {
+  const parts = [r.sheet, r.embedding, r.store, r.reranker || 'none'].filter(Boolean);
+  return `P${index + 1} ${parts.join(' · ')}`;
+}
+
+function renderTop10Visualizations(rows) {
+  const hint = $('top10Hint');
+  const scoreEl = $('top10ScoreChart');
+  const scatterEl = $('qualityLatencyChart');
+  if (!hint || !scoreEl || !scatterEl) return;
+  const top = rows.slice(0, 10);
+  if (!top.length) {
+    hint.textContent = 'Waiting for evaluation';
+    scoreEl.innerHTML = '<div class="empty-state">No top 10 pipeline data yet.</div>';
+    scatterEl.innerHTML = '<div class="empty-state">No quality-latency plot yet.</div>';
+    return;
+  }
+  hint.textContent = `${top.length} best pipelines`;
+  const maxScore = Math.max(...top.map(metricScore), 0.001);
+  const maxR5 = Math.max(...top.map(r => num(r.recall_at_5)), 0.001);
+  const maxMrr = Math.max(...top.map(r => num(r.mrr)), 0.001);
+  const bars = top.map((r, i) => {
+    const y = 46 + i * 30;
+    const label = esc(shortPipeline(r, i)).slice(0, 78);
+    return `<g>
+      <text x="12" y="${y + 6}" class="svg-label">${label}</text>
+      <rect x="255" y="${y - 10}" width="${(metricScore(r)/maxScore*230).toFixed(1)}" height="8" rx="4" class="svg-score" />
+      <rect x="255" y="${y}" width="${(num(r.recall_at_5)/maxR5*230).toFixed(1)}" height="8" rx="4" class="svg-r5" />
+      <rect x="255" y="${y + 10}" width="${(num(r.mrr)/maxMrr*230).toFixed(1)}" height="8" rx="4" class="svg-mrr" />
+      <text x="500" y="${y + 6}" class="svg-value">${displayScore(r)} · R@5 ${(num(r.recall_at_5)*100).toFixed(1)}%</text>
+    </g>`;
+  }).join('');
+  scoreEl.innerHTML = `<svg viewBox="0 0 720 370" role="img" aria-label="Top 10 pipeline metric bars">
+    <text x="12" y="24" class="svg-title">Top 10 metric bars</text>
+    <text x="255" y="24" class="svg-legend"><tspan class="legend-score">Score</tspan>   <tspan class="legend-r5">Recall@5</tspan>   <tspan class="legend-mrr">MRR</tspan></text>
+    ${bars}
+  </svg>`;
+
+  const latencies = top.map(r => num(r.avg_latency_seconds));
+  const minLat = Math.min(...latencies, 0);
+  const maxLat = Math.max(...latencies, 0.001);
+  const points = top.map((r, i) => {
+    const x = 62 + ((num(r.avg_latency_seconds) - minLat) / (maxLat - minLat || 1)) * 560;
+    const y = 304 - (num(r.recall_at_5) / maxR5) * 235;
+    const radius = 8 + (metricScore(r) / maxScore) * 12;
+    return `<g>
+      <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" class="svg-dot" />
+      <text x="${(x + 15).toFixed(1)}" y="${(y + 4).toFixed(1)}" class="svg-value">P${i + 1}</text>
+    </g>`;
+  }).join('');
+  scatterEl.innerHTML = `<svg viewBox="0 0 720 370" role="img" aria-label="Recall versus latency plot">
+    <text x="12" y="24" class="svg-title">Quality vs latency</text>
+    <line x1="62" y1="304" x2="650" y2="304" class="svg-axis" />
+    <line x1="62" y1="58" x2="62" y2="304" class="svg-axis" />
+    <text x="560" y="335" class="svg-label">Latency seconds</text>
+    <text x="12" y="54" class="svg-label">Recall@5</text>
+    ${points}
+    <text x="62" y="335" class="svg-value">${fmt(minLat,3)}s</text>
+    <text x="610" y="335" class="svg-value">${fmt(maxLat,3)}s</text>
+  </svg>`;
+}
+
 function renderPipelineComparison(evaluation) {
   const rows = evaluatedRows(evaluation);
   const grid = $('comparisonGrid');
   const hint = $('comparisonHint');
   if (!grid || !hint) return;
   if (!rows.length) {
+    renderTop10Visualizations(rows);
     hint.textContent = 'Waiting for evaluation';
     grid.innerHTML = '<div class="empty-state">Run ground-truth evaluation to compare complete pipelines.</div>';
     $('rerankerLiftChart').innerHTML = '<div class="empty-state">No reranker comparison yet.</div>';
@@ -254,6 +317,7 @@ function renderPipelineComparison(evaluation) {
     return;
   }
   const top = rows.slice(0, 8);
+  renderTop10Visualizations(rows);
   const maxScore = Math.max(...top.map(metricScore));
   const maxR5 = Math.max(...top.map(r => num(r.recall_at_5)));
   const maxMrr = Math.max(...top.map(r => num(r.mrr)));
