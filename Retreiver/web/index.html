@@ -32,6 +32,7 @@
       <button class="tab-btn" data-page="compare" type="button">Pipeline comparison</button>
       <button class="tab-btn" data-page="run" type="button">Run tests</button>
       <button class="tab-btn" data-page="evidence" type="button">Retrieval evidence</button>
+      <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
       <button class="tab-btn" data-page="upload" type="button">Upload dataset</button>
       <button class="tab-btn" data-page="ops" type="button">Operations</button>
     </nav>
@@ -142,7 +143,11 @@
           <button id="runRerankerBtn" type="button">Run reranker test</button>
           <button id="runRerankedEvalBtn" type="button">Evaluate reranked results</button>
           <button id="runEvalBtn" type="button">Evaluate ground truth</button>
+          <button id="runHallucinationBtn" type="button">Evaluate grounding risk</button>
+          <button id="runHallucinationLlmBtn" type="button">LLM grounding audit</button>
         </div>
+        <div id="runResultCards" class="run-result-cards"></div>
+        <div class="table-wrap"><table id="runResultTable"></table></div>
         <pre id="runOutput" class="run-output"></pre>
         <dialog id="testOptionsDialog" class="test-options-dialog">
           <form method="dialog" class="dialog-card">
@@ -176,6 +181,17 @@ Passenger wants return refund due to illness</textarea></label>
           </div>
         </div>
         <div class="table-wrap retrieval-table-wrap"><table id="retrievalTable"></table></div>
+      </section>
+    </section>
+
+    <section class="page" data-page-panel="hallucination">
+      <section class="panel">
+        <div class="section-head">
+          <div><h2>Grounding and hallucination audit</h2><p>Checks whether retrieved evidence is enough to support the expected answer. Optional LLM judge can be run from the test page when an API key is configured.</p></div>
+          <span class="mini-stat" id="hallucinationHint">Waiting for audit</span>
+        </div>
+        <div id="hallucinationSummary" class="comparison-grid"></div>
+        <div class="table-wrap"><table id="hallucinationTable"></table></div>
       </section>
     </section>
 

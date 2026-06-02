@@ -30,6 +30,7 @@ RERANKER_DIR = ROOT / "data" / "reranker_smoke"
 RETRIEVAL_DIR = ROOT / "data" / "retrieval_smoke"
 SNAPSHOT_PATH = ROOT / "data" / "vm_dashboard_snapshot.json"
 EVAL_DIR = ROOT / "data" / "evaluation"
+HALLUCINATION_DIR = ROOT / "data" / "hallucination"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 
@@ -185,6 +186,19 @@ def read_evaluation() -> dict:
     return base
 
 
+def read_hallucination() -> dict:
+    summary = sort_summary(read_csv(HALLUCINATION_DIR / "hallucination_summary.csv")) if HALLUCINATION_DIR.exists() else []
+    details = read_csv(HALLUCINATION_DIR / "hallucination_details.csv") if HALLUCINATION_DIR.exists() else []
+    report_path = HALLUCINATION_DIR / "hallucination_report.json"
+    report = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            report = {"error": str(exc)}
+    return {"summary": summary, "details": details[:500], "report": report}
+
+
 def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
     vals = [v for v in values if v and v != "all"]
     if vals:
@@ -317,6 +331,7 @@ class Handler(SimpleHTTPRequestHandler):
             retrieval_total = retrieval_smoke_count()
             reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
+            hallucination = read_hallucination()
             snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
@@ -338,6 +353,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "retrieval_smoke_total": retrieval_total,
                     "retrieval_smoke_loaded": len(retrieval_smokes),
                     "evaluation": evaluation,
+                    "hallucination": hallucination,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
                     "known_pdf_count": 225,
@@ -460,6 +476,18 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"error": "No groundtruth file found. Put CSV/XLSX under data/groundtruth/ or pass ?groundtruth=/path/file.csv"}, 400)
                     return
                 cmd = [sys.executable, "scripts/evaluate_retrieval_groundtruth.py", "--groundtruth", gt]
+            elif parsed.path == "/api/run/evaluate-hallucination":
+                gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
+                if not gt:
+                    candidates = sorted(GROUNDTRUTH_DIR.glob("*.csv")) + sorted(GROUNDTRUTH_DIR.glob("*.xlsx"))
+                    gt = str(candidates[-1]) if candidates else ""
+                if not gt:
+                    self.send_json({"error": "No groundtruth file found. Put CSV/XLSX under data/groundtruth/ or pass ?groundtruth=/path/file.csv"}, 400)
+                    return
+                artifact_dir = "data/reranker_smoke" if RERANKER_DIR.exists() else "data/retrieval_smoke"
+                cmd = [sys.executable, "scripts/evaluate_hallucination_grounding.py", "--groundtruth", gt, "--artifact-dir", artifact_dir, "--limit", qs.get("limit", ["120"])[0] or "120"]
+                if qs.get("use_llm", ["0"])[0] == "1":
+                    cmd.append("--use-llm")
             else:
                 self.send_json({"error": "unknown endpoint"}, 404)
                 return

@@ -91,7 +91,14 @@ function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
     ...r,
     reranker: r.reranker || 'none',
     top_pdf: ((r.hits || [])[0] || {}).pdf_name || '—',
+    evidence_snippet: bestEvidenceSnippet(r),
   }));
+}
+
+function bestEvidenceSnippet(row) {
+  const hit = (row.hits || [])[0] || {};
+  const text = hit.paragraph || hit.text || hit.chunk || '';
+  return String(text).replace(/\s+/g, ' ').trim();
 }
 
 function filteredRetrieval(rows) {
@@ -117,11 +124,77 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'store', label:'DB'},
     {key:'reranker', label:'Reranker'},
     {key:'top_pdf', label:'Top PDF', render:r=>esc((r.top_pdf || '').slice(0, 58))},
+    {key:'evidence_snippet', label:'Exact retrieved evidence', render:r=>`<details class="snippet"><summary>${esc((r.evidence_snippet || 'Open evidence').slice(0, 90))}</summary><p>${esc(r.evidence_snippet || 'No paragraph returned in artifact')}</p></details>`},
     {key:'retrieved_count', label:'Hits'},
     {key:'evidence_type', label:'Type'},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
   ]);
+}
+
+function renderHallucination(audit) {
+  const summary = audit?.summary || [];
+  const details = audit?.details || [];
+  const report = audit?.report || {};
+  const hint = $('hallucinationHint');
+  if (!hint) return;
+  hint.textContent = summary.length ? `${report.evaluated_rows || details.length} rows · judge ${report.judge || 'unknown'}` : 'Waiting for audit';
+  const cards = $('hallucinationSummary');
+  if (cards) {
+    if (!summary.length) {
+      cards.innerHTML = '<div class="empty-state">Run Evaluate grounding risk or LLM grounding audit after retrieval/reranker results exist.</div>';
+    } else {
+      cards.innerHTML = summary.slice(0, 6).map(r => `<article class="pipeline-card">
+        <div class="rank-label">${esc(r.reranker || 'none')}</div>
+        <h3>${esc(pipelineLabel(r))}</h3>
+        ${metricBar('Grounded rate', num(r.grounded_rate), 1, `${(num(r.grounded_rate)*100).toFixed(1)}%`)}
+        ${metricBar('Hallucination risk', 1 - num(r.hallucination_risk_rate), 1, `${(num(r.hallucination_risk_rate)*100).toFixed(1)}% high risk`)}
+        ${metricBar('Support score', num(r.avg_support_score), 1, fmt(r.avg_support_score,3))}
+      </article>`).join('');
+    }
+  }
+  table($('hallucinationTable'), details.slice(0, 80), [
+    {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 72))},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'DB'},
+    {key:'reranker', label:'Reranker'},
+    {key:'verdict', label:'Verdict', render:r=>`<span class="risk ${esc(r.risk || '')}">${esc(r.verdict || '')}</span>`},
+    {key:'support_score', label:'Support'},
+    {key:'risk', label:'Risk'},
+    {key:'reason', label:'Reason', render:r=>esc((r.reason || '').slice(0, 180))},
+  ]);
+}
+
+function renderRunResult(kind, payload) {
+  const cards = $('runResultCards');
+  const tbl = $('runResultTable');
+  const output = payload.output || '';
+  if (!cards || !tbl) return;
+  const ok = payload.exit_code === 0;
+  const lines = output.split('\n').filter(Boolean);
+  const retrievalLines = lines.filter(l => l.includes('query=') && l.includes('hits='));
+  const extracted = retrievalLines.map(line => {
+    const get = (rx) => (line.match(rx) || [,''])[1];
+    return {combo:get(/^([^q]+?)\s+query=/), query:get(/query="([^"]+)"/), hits:get(/hits=(\d+)/), seconds:get(/seconds=([0-9.]+)/), raw:line};
+  });
+  cards.innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Status</span><strong>${ok ? 'Passed' : 'Needs attention'}</strong><small>${esc(kind)} · exit code ${esc(payload.exit_code ?? '—')}</small></article>
+    <article class="run-result-card"><span>Result rows</span><strong>${extracted.length || lines.length}</strong><small>${extracted.length ? 'retrieval checks parsed' : 'output lines'}</small></article>
+    <article class="run-result-card"><span>Next useful view</span><strong>${kind.includes('hallucination') ? 'Grounding audit' : kind.includes('eval') ? 'Quality decision' : 'Retrieval evidence'}</strong><small>Refresh already completed</small></article>`;
+  if (extracted.length) {
+    table(tbl, extracted, [
+      {key:'query', label:'Query'},
+      {key:'combo', label:'Pipeline'},
+      {key:'hits', label:'Hits'},
+      {key:'seconds', label:'Seconds'},
+    ]);
+  } else {
+    table(tbl, lines.slice(0, 20).map((line, i) => ({i:i+1, line})), [
+      {key:'i', label:'#'},
+      {key:'line', label:'Output', render:r=>esc(r.line).slice(0, 220)},
+    ]);
+  }
+  $('runOutput').textContent = output.slice(0, 8000);
 }
 
 function pipelineLabel(r) {
@@ -416,6 +489,7 @@ function renderOperational() {
   renderRetrieval(retrieval, rerank);
   renderEvaluation(op.evaluation);
   renderPipelineComparison(op.evaluation);
+  renderHallucination(op.hallucination || {});
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -479,6 +553,8 @@ async function runAction(kind) {
     full: '/api/run/full-gt-retrieval',
     rerank: '/api/run/reranker-smoke',
     rerankEval: '/api/run/evaluate-reranked-groundtruth',
+    hallucination: '/api/run/evaluate-hallucination',
+    hallucinationLlm: '/api/run/evaluate-hallucination',
   };
   const p = selectedParams();
   if (kind === 'smoke') {
@@ -504,11 +580,15 @@ async function runAction(kind) {
     }
     selected.forEach(r => p.append('reranker', r));
   }
+  if (kind === 'hallucination' || kind === 'hallucinationLlm') {
+    p.set('limit', $('rerankerLimit')?.value || '120');
+    if (kind === 'hallucinationLlm') p.set('use_llm', '1');
+  }
   $('runStatus').textContent = 'Running';
   $('runOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
   const res = await fetch(`${endpoints[kind]}?${p.toString()}`, {method:'POST'});
   const payload = await res.json();
-  $('runOutput').textContent += JSON.stringify(payload, null, 2).slice(0, 8000);
+  renderRunResult(kind, payload);
   $('runStatus').textContent = payload.exit_code === 0 ? 'Done' : 'Check output';
   await refresh();
 }
@@ -522,6 +602,8 @@ $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => 
 $('runRerankerBtn')?.addEventListener('click', () => runAction('rerank').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runHallucinationBtn')?.addEventListener('click', () => runAction('hallucination').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runHallucinationLlmBtn')?.addEventListener('click', () => runAction('hallucinationLlm').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
