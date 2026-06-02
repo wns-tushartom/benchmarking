@@ -79,7 +79,18 @@ NACO refund process</textarea></label>
     </section>
 
     <section id="qualitySection" class="panel quality-panel hidden">
-      <div class="section-head"><div><h2>Ground-truth quality metrics</h2><p>Visible only after evaluation runs against the uploaded 500-row dataset.</p></div><span class="mini-stat" id="qualityHint">—</span></div>
+      <div class="section-head">
+        <div><h2>Ground-truth quality metrics</h2><p>Decision table for complete pipeline combinations: chunker, embedding, vector DB, and reranker.</p></div>
+        <span class="mini-stat" id="qualityHint">—</span>
+      </div>
+      <div class="filter-row quality-filters">
+        <select id="qualityComboFilter"><option value="all">All pipeline combinations</option></select>
+        <select id="qualityChunkerFilter"><option value="all">All chunkers</option></select>
+        <select id="qualityEmbeddingFilter"><option value="all">All embeddings</option></select>
+        <select id="qualityDbFilter"><option value="all">All DBs</option></select>
+        <select id="qualityRerankerFilter"><option value="all">All rerankers</option></select>
+      </div>
+      <div id="qualityInsight" class="insight-strip"></div>
       <div class="table-wrap"><table id="qualityTable"></table></div>
     </section>
 
@@ -110,22 +121,26 @@ NACO refund process</textarea></label>
 
     <section class="panel">
       <div class="section-head">
-        <div><h2>Retrieval smoke results</h2><p>Compact evidence table: query, DB, model, chunker, top PDF, hits, latency.</p></div>
+        <div><h2>Retrieval evidence</h2><p>Latest query-level evidence across full pipeline choices. Use filters to inspect one combination without noise.</p></div>
         <div class="filter-row">
-          <select id="retrievalDbFilter"><option value="all">All DBs</option></select>
+          <select id="retrievalChunkerFilter"><option value="all">All chunkers</option></select>
           <select id="retrievalEmbeddingFilter"><option value="all">All embeddings</option></select>
+          <select id="retrievalDbFilter"><option value="all">All DBs</option></select>
+          <select id="retrievalRerankerFilter"><option value="all">All rerankers</option></select>
         </div>
       </div>
       <div class="table-wrap retrieval-table-wrap"><table id="retrievalTable"></table></div>
     </section>
 
-    <section class="grid two">
+    <details class="operational-details">
+      <summary>Operational details: ingestion, reranker artifacts, loaded files</summary>
+      <section class="grid two">
       <article class="panel">
         <div class="section-head"><div><h2>Vector DB ingestion</h2><p>Latest successful rows, with real collection/table names.</p></div><span class="mini-stat" id="ingestionHint">—</span></div>
         <div class="table-wrap"><table id="ingestionTable"></table></div>
       </article>
       <article class="panel">
-        <div class="section-head"><div><h2>Reranker smoke</h2><p>Reranking over retrieved VM hits.</p></div><span class="mini-stat" id="rerankHint">—</span></div>
+        <div class="section-head"><div><h2>Reranker artifacts</h2><p>Real reranker outputs over retrieved VM hits.</p></div><span class="mini-stat" id="rerankHint">—</span></div>
         <div class="table-wrap"><table id="rerankerTable"></table></div>
       </article>
     </section>
@@ -134,6 +149,7 @@ NACO refund process</textarea></label>
       <div class="section-head"><div><h2>Artifacts loaded</h2><p>Only files present on this VM/repo are shown.</p></div><span class="mini-stat" id="artifactHint">—</span></div>
       <ul id="files" class="files"></ul>
     </section>
+    </details>
   </main>
   <script src="/app.js"></script>
 </body>
