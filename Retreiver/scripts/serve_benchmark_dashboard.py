@@ -103,18 +103,21 @@ def summarize_ingestion(rows: list[dict]) -> dict:
     }
 
 
-def read_reranker_smokes() -> list[dict]:
+def read_reranker_smokes(limit: int = 250) -> list[dict]:
     smokes: list[dict] = []
     if not RERANKER_DIR.exists():
         return smokes
-    for path in sorted(RERANKER_DIR.glob("*.json")):
+    paths = [p for p in RERANKER_DIR.glob("*.json") if p.name != "summary.json"]
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in paths[:limit]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             payload = {"error": str(exc)}
         payload["artifact"] = str(path.relative_to(ROOT))
+        payload["hits"] = (payload.get("hits") or [])[:3]
         smokes.append(payload)
-    smokes.sort(key=lambda r: r.get("rerank_seconds", 999999))
+    smokes.sort(key=lambda r: (r.get("created_at", ""), r.get("rerank_seconds", 999999)), reverse=True)
     return smokes
 
 
@@ -140,6 +143,12 @@ def retrieval_smoke_count() -> int:
     if not RETRIEVAL_DIR.exists():
         return 0
     return sum(1 for p in RETRIEVAL_DIR.glob("*.json") if p.name != "summary.json")
+
+
+def reranker_smoke_count() -> int:
+    if not RERANKER_DIR.exists():
+        return 0
+    return sum(1 for p in RERANKER_DIR.glob("*.json") if p.name != "summary.json")
 
 
 def read_snapshot() -> dict:
@@ -205,7 +214,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
     def send_json(self, payload: dict, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -259,10 +268,12 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:
                         pass
             ingestion_rows = read_ingestion_summaries()
-            reranker_smokes = read_reranker_smokes()
-            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["250"])[0])
+            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["120"])[0])
+            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["120"])[0])
             retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
+            reranker_smokes = read_reranker_smokes(limit=reranker_limit)
             retrieval_total = retrieval_smoke_count()
+            reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
             snapshot = read_snapshot()
             self.send_json({
@@ -279,6 +290,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "operational": {
                     "ingestion": summarize_ingestion(ingestion_rows),
                     "reranker_smokes": reranker_smokes,
+                    "reranker_smoke_total": reranker_total,
+                    "reranker_smoke_loaded": len(reranker_smokes),
                     "retrieval_smokes": retrieval_smokes,
                     "retrieval_smoke_total": retrieval_total,
                     "retrieval_smoke_loaded": len(retrieval_smokes),
