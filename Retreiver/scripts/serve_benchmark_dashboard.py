@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import csv
+import cgi
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
+import zipfile
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -209,6 +213,44 @@ def sort_summary(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=key)
 
 
+def safe_label(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return value.strip(".-_")[:80] or "dataset"
+
+
+def safe_extract_zip(zip_path: Path, target_dir: Path) -> list[str]:
+    extracted: list[str] = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = Path(info.filename)
+            if name.is_absolute() or ".." in name.parts:
+                continue
+            suffix = name.suffix.lower()
+            if suffix not in {".pdf", ".csv", ".xlsx", ".txt", ".md"}:
+                continue
+            dest = target_dir / "extracted" / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out)
+            extracted.append(str(dest.relative_to(ROOT)))
+    return extracted
+
+
+def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str]) -> list[str]:
+    rel_dir = str(dataset_dir.relative_to(ROOT))
+    steps = [
+        f"Review uploaded files under {rel_dir}",
+        "If this is a new corpus, copy PDFs into data/pdfs or update the extraction script to read this upload folder.",
+        "Prepare/attach a ground-truth CSV with id, query, expected_pdf or expected text span before claiming quality metrics.",
+        "Run ingestion and retrieval only after ground truth and chunking inputs are ready.",
+    ]
+    if saved_path.suffix.lower() == ".zip":
+        steps.insert(1, f"ZIP extracted {len(extracted)} supported files under {rel_dir}/extracted")
+    return steps
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
@@ -314,6 +356,38 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/upload-dataset":
+            try:
+                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")})
+                file_item = form["file"] if "file" in form else None
+                if file_item is None or not getattr(file_item, "filename", ""):
+                    self.send_json({"error": "No file uploaded"}, 400)
+                    return
+                original = Path(file_item.filename).name
+                suffix = Path(original).suffix.lower()
+                if suffix not in {".pdf", ".zip", ".csv", ".xlsx"}:
+                    self.send_json({"error": "Supported uploads: .pdf, .zip, .csv, .xlsx"}, 400)
+                    return
+                label_field = form.getfirst("label", Path(original).stem)
+                label = safe_label(str(label_field))
+                dataset_dir = ROOT / "data" / "uploads" / label
+                dataset_dir.mkdir(parents=True, exist_ok=True)
+                saved_path = dataset_dir / original
+                with saved_path.open("wb") as out:
+                    shutil.copyfileobj(file_item.file, out)
+                extracted = safe_extract_zip(saved_path, dataset_dir) if suffix == ".zip" else []
+                self.send_json({
+                    "ok": True,
+                    "dataset": label,
+                    "saved_path": str(saved_path.relative_to(ROOT)),
+                    "bytes": saved_path.stat().st_size,
+                    "extracted_files": extracted[:200],
+                    "extracted_count": len(extracted),
+                    "next_steps": upload_next_steps(saved_path, dataset_dir, extracted),
+                })
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 500)
+            return
         qs = parse_qs(parsed.query)
         limit = qs.get("limit", ["50"])[0]
         max_runs = qs.get("max_runs", ["0"])[0]

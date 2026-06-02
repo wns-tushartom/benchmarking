@@ -230,6 +230,87 @@ function renderBestMethods(rows) {
   $('bestMethodGrid').innerHTML = cards.map(c => `<article class="best-method-card ${c.accent}"><span>${esc(c.step)}</span><strong>${esc(c.value)}</strong><small>${esc(c.note)}</small></article>`).join('');
 }
 
+function evaluatedRows(evaluation) {
+  return [...(evaluation?.summary || []), ...(evaluation?.reranked?.summary || [])]
+    .map(r => ({...r, reranker: r.reranker || 'none'}))
+    .sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
+}
+
+function metricBar(label, value, maxValue, detail) {
+  const pct = maxValue > 0 ? Math.max(2, Math.min(100, (value / maxValue) * 100)) : 0;
+  return `<div class="bar-row"><div class="bar-meta"><strong>${esc(label)}</strong><span>${esc(detail)}</span></div><div class="bar-track"><i style="width:${pct.toFixed(1)}%"></i></div></div>`;
+}
+
+function renderPipelineComparison(evaluation) {
+  const rows = evaluatedRows(evaluation);
+  const grid = $('comparisonGrid');
+  const hint = $('comparisonHint');
+  if (!grid || !hint) return;
+  if (!rows.length) {
+    hint.textContent = 'Waiting for evaluation';
+    grid.innerHTML = '<div class="empty-state">Run ground-truth evaluation to compare complete pipelines.</div>';
+    $('rerankerLiftChart').innerHTML = '<div class="empty-state">No reranker comparison yet.</div>';
+    $('stageComparisonChart').innerHTML = '<div class="empty-state">No stage comparison yet.</div>';
+    return;
+  }
+  const top = rows.slice(0, 8);
+  const maxScore = Math.max(...top.map(metricScore));
+  const maxR5 = Math.max(...top.map(r => num(r.recall_at_5)));
+  const maxMrr = Math.max(...top.map(r => num(r.mrr)));
+  const maxLatency = Math.max(...top.map(r => num(r.avg_latency_seconds)));
+  hint.textContent = `${rows.length} evaluated configs`;
+  grid.innerHTML = top.map((r, i) => `
+    <article class="pipeline-card">
+      <div class="rank-label">Rank ${i + 1}</div>
+      <h3>${esc(pipelineLabel(r))}</h3>
+      ${metricBar('Score', metricScore(r), maxScore, displayScore(r))}
+      ${metricBar('Recall@5', num(r.recall_at_5), maxR5, `${(num(r.recall_at_5)*100).toFixed(1)}%`)}
+      ${metricBar('MRR', num(r.mrr), maxMrr, fmt(r.mrr,3))}
+      ${metricBar('Latency', maxLatency - num(r.avg_latency_seconds) + 0.0001, maxLatency, `${fmt(r.avg_latency_seconds,3)}s avg`)}
+    </article>`).join('');
+
+  const byReranker = ['none', ...uniq(rows, 'reranker').filter(r => r !== 'none')].filter(Boolean).map(name => {
+    const rs = rows.filter(r => (r.reranker || 'none') === name);
+    return {name, score: rs.reduce((a,r)=>a+metricScore(r),0)/(rs.length||1), r5: rs.reduce((a,r)=>a+num(r.recall_at_5),0)/(rs.length||1), latency: rs.reduce((a,r)=>a+num(r.avg_latency_seconds),0)/(rs.length||1), configs: rs.length};
+  }).filter(r => r.configs).sort((a,b)=>b.score-a.score);
+  const maxLift = Math.max(...byReranker.map(r => r.score), 0);
+  $('rerankerLiftChart').innerHTML = byReranker.map(r => metricBar(r.name, r.score, maxLift, `Score ${fmt(r.score,3)} · R@5 ${(r.r5*100).toFixed(1)}% · ${fmt(r.latency,3)}s · ${r.configs} configs`)).join('') || '<div class="empty-state">No reranker comparison yet.</div>';
+
+  const stageWinners = [
+    ['Chunker', groupWinner(rows, 'sheet')],
+    ['Embedding', groupWinner(rows, 'embedding')],
+    ['Vector DB', groupWinner(rows, 'store')],
+    ['Reranker', groupWinner(rows, 'reranker')],
+  ].filter(([,v]) => v);
+  const maxStage = Math.max(...stageWinners.map(([,v]) => v.score), 0);
+  $('stageComparisonChart').innerHTML = stageWinners.map(([label, v]) => metricBar(`${label}: ${v.name}`, v.score, maxStage, `Avg score ${fmt(v.score,3)} · R@5 ${(v.r5*100).toFixed(1)}% · ${v.configs} configs`)).join('');
+}
+
+function showPage(page) {
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.page === page));
+  document.querySelectorAll('[data-page-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.pagePanel === page));
+  history.replaceState(null, '', `#${page}`);
+}
+
+async function uploadDataset(ev) {
+  ev.preventDefault();
+  const file = $('datasetFile')?.files?.[0];
+  if (!file) {
+    $('uploadStatus').textContent = 'Choose file';
+    $('uploadOutput').textContent = 'Select a PDF, ZIP, CSV, or XLSX first.';
+    return;
+  }
+  const form = new FormData();
+  form.append('file', file);
+  form.append('label', $('datasetLabel')?.value || file.name.replace(/\.[^.]+$/, ''));
+  $('uploadStatus').textContent = 'Uploading';
+  $('uploadOutput').textContent = `Uploading ${file.name}...`;
+  const res = await fetch('/api/upload-dataset', {method: 'POST', body: form});
+  const payload = await res.json();
+  $('uploadStatus').textContent = res.ok ? 'Uploaded' : 'Error';
+  $('uploadOutput').textContent = JSON.stringify(payload, null, 2);
+}
+
 function renderOperational() {
   const op = state.operational || {};
   const ingestion = op.ingestion || {};
@@ -270,6 +351,7 @@ function renderOperational() {
   renderServices(health);
   renderRetrieval(retrieval, rerank);
   renderEvaluation(op.evaluation);
+  renderPipelineComparison(op.evaluation);
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -376,5 +458,8 @@ $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => 
 $('runRerankerBtn')?.addEventListener('click', () => runAction('rerank').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
+showPage((location.hash || '#overview').slice(1));
+$('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
 $('openTestOptionsBtn')?.addEventListener('click', () => $('testOptionsDialog')?.showModal());
 loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });
