@@ -1,0 +1,9 @@
+# MinerU / Shubham parser dependencies.
+# Install only on the VM where PDF extraction is needed. This is heavier than the
+# benchmark runtime dependencies because MinerU downloads layout/OCR models.
+
+PyYAML>=6.0
+PyPDF2>=3.0.1
+# Full MinerU install. The extra index is commonly needed for prebuilt wheels.
+--extra-index-url https://wheels.myhloli.com
+magic-pdf[full]

@@ -32,6 +32,7 @@ SNAPSHOT_PATH = ROOT / "data" / "vm_dashboard_snapshot.json"
 EVAL_DIR = ROOT / "data" / "evaluation"
 HALLUCINATION_DIR = ROOT / "data" / "hallucination"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
+PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 
 
@@ -199,6 +200,19 @@ def read_hallucination() -> dict:
     return {"summary": summary, "details": details[:500], "report": report}
 
 
+def read_pdf_audit() -> dict:
+    rows = read_csv(PDF_AUDIT_PATH)
+    needs = [r for r in rows if str(r.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or r.get("status") in {"needs_ocr", "partial_ocr_review", "failed"}]
+    ok = [r for r in rows if r not in needs]
+    return {
+        "rows": rows[:500],
+        "total": len(rows),
+        "ok_count": len(ok),
+        "needs_ocr_count": len(needs),
+        "needs_ocr": needs[:100],
+    }
+
+
 def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
     vals = [v for v in values if v and v != "all"]
     if vals:
@@ -332,6 +346,7 @@ class Handler(SimpleHTTPRequestHandler):
             reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
             hallucination = read_hallucination()
+            pdf_audit = read_pdf_audit()
             snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
@@ -356,9 +371,10 @@ class Handler(SimpleHTTPRequestHandler):
                     "hallucination": hallucination,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
-                    "known_pdf_count": 225,
-                    "extracted_pdf_count": 222,
-                    "failed_pdf_count": 3,
+                    "known_pdf_count": pdf_audit.get("total") or 225,
+                    "extracted_pdf_count": pdf_audit.get("ok_count") or 222,
+                    "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 3,
+                    "pdf_audit": pdf_audit,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
                     "metrics_status": "Paused, no query ground-truth CSV requested yet",
                     "openai_status": "Pending OPENAI_API_KEY and cost approval",
@@ -418,6 +434,10 @@ class Handler(SimpleHTTPRequestHandler):
                 cmd = [sys.executable, "scripts/compare_chunking_recall.py", "--limit", limit]
             elif parsed.path in {"/api/run/modular", "/api/run/selected"}:
                 cmd = [sys.executable, "scripts/benchmark_cli.py", "run", "--limit-queries", limit, "--max-runs", max_runs, "--output-dir", "data/modular_runs/latest"] + selected_cli_args(qs)
+            elif parsed.path == "/api/run/parse-pdfs-mineru":
+                cmd = [sys.executable, "scripts/prepare_benchmark_input_mineru.py"]
+                if qs.get("include_image_markers", ["0"])[0] == "1":
+                    cmd.append("--include-image-markers")
             elif parsed.path == "/api/run/ingest-selected":
                 cmd = [sys.executable, "scripts/run_long_db_ingestion.py", "--skip-existing-store-success"]
                 add_multi(cmd, "--sheets", qs.get("sheet", []))

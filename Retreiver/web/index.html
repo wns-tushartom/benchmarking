@@ -3,16 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WNS RAG Benchmarking</title>
+  <title>WNS Smiley Benchmarking</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <main class="shell">
     <section class="hero panel-soft">
       <div class="hero-copy">
-        <p class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /> <span>KnowRA</span></p>
-        <h1>RAG Benchmarking</h1>
-        <p class="sub">Evidence-led benchmark workspace for complete RAG pipelines: chunking, embedding, vector database, reranking, quality, and latency.</p>
+        <h1><span>WNS</span><small>Smiley Benchmarking</small></h1>
+        <p class="sub">Evidence-led benchmark workspace for complete Smiley retrieval pipelines: chunking, embedding, vector database, reranking, quality, and latency.</p>
         <div class="hero-actions">
           <button id="refreshBtn" type="button">Refresh live data</button>
           <span id="statusPill" class="status-pill muted-pill">Loading</span>
@@ -47,6 +46,27 @@
       <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate</small></div>
     </section>
 
+    <section class="panel glossary-panel">
+      <details>
+        <summary>Open metric glossary and term explanations</summary>
+        <div class="glossary-grid">
+          <article><strong>Score</strong><p>Weighted winner score used for ranking: Recall@5, MRR, nDCG@5, and a small latency component.</p></article>
+          <article><strong>Recall@K / R@K</strong><p>Whether at least one relevant chunk appears within the top K retrieved results. R@5 uses the top 5.</p></article>
+          <article><strong>MRR</strong><p>Mean Reciprocal Rank. Measures how early the first relevant result appears. Rank 1 scores 1.0, rank 2 scores 0.5.</p></article>
+          <article><strong>nDCG@5</strong><p>Normalized Discounted Cumulative Gain at 5. Rewards relevant chunks in the top 5, with higher ranks worth more.</p></article>
+          <article><strong>P@5</strong><p>Precision at 5. Share of the top 5 retrieved chunks that are relevant.</p></article>
+          <article><strong>Avg rank</strong><p>Average rank position of the first relevant chunk, calculated only when a hit exists.</p></article>
+          <article><strong>No hit</strong><p>Number of evaluated queries where no relevant chunk was found in the retrieval window.</p></article>
+          <article><strong>Avg sec/query</strong><p>Average retrieval latency per query for that one pipeline configuration. It is not the total time for all 500 rows. If the table says 120 queries, this value is averaged across those 120 query runs.</p></article>
+          <article><strong>Chunker</strong><p>The document splitting method used before embedding, for example heading sections or fixed-token chunks.</p></article>
+          <article><strong>Embedding</strong><p>The model that converts each text chunk and query into vectors for similarity search.</p></article>
+          <article><strong>Vector DB</strong><p>The database used to store and search vectors, currently Qdrant, PGVector, and Weaviate.</p></article>
+          <article><strong>Reranker</strong><p>Second-stage model that reorders retrieved chunks after vector search to improve relevance.</p></article>
+          <article><strong>Ground truth</strong><p>The reference evaluation set used to decide whether retrieved chunks match the expected answer/evidence.</p></article>
+        </div>
+      </details>
+    </section>
+
     <section class="page active" data-page-panel="overview">
       <section id="bestMethodSection" class="panel best-method-panel hidden">
         <div class="section-head">
@@ -76,7 +96,7 @@
     <section class="page" data-page-panel="quality">
       <section id="qualitySection" class="panel quality-panel hidden">
         <div class="section-head">
-          <div><h2>Ground-truth quality metrics</h2><p>Decision table for complete pipeline combinations: chunker, embedding, vector DB, and reranker.</p></div>
+          <div><h2>Ground-truth quality metrics</h2><p>Decision table for complete pipeline combinations: chunker, embedding, vector DB, and reranker. Avg sec/query is the average latency for a single query within that evaluated configuration, averaged over the row's query count.</p></div>
           <span class="mini-stat" id="qualityHint">—</span>
         </div>
         <div class="filter-row quality-filters">
@@ -137,6 +157,7 @@
           <button id="openTestOptionsBtn" type="button">Test options</button>
         </div>
         <div class="run-actions">
+          <button id="runParseMineruBtn" type="button">Parse PDFs with MinerU</button>
           <button id="runIngestBtn" type="button">Run selected ingestion</button>
           <button id="runSmokeBtn" type="button">Test selected queries</button>
           <button id="runFullGtBtn" type="button">Run full GT retrieval</button>
@@ -231,6 +252,10 @@ Passenger wants return refund due to illness</textarea></label>
             <div class="section-head"><div><h2>Reranker artifacts</h2><p>Real reranker outputs over retrieved VM hits.</p></div><span class="mini-stat" id="rerankHint">—</span></div>
             <div class="table-wrap"><table id="rerankerTable"></table></div>
           </article>
+        </section>
+        <section class="panel artifact-panel">
+          <div class="section-head"><div><h2>PDF extraction audit</h2><p>MinerU/PyPDF2 parser status, image/table/formula counts, and the exact PDFs that need OCR review.</p></div><span class="mini-stat" id="pdfAuditHint">Run parser audit</span></div>
+          <div class="table-wrap"><table id="pdfAuditTable"></table></div>
         </section>
         <section class="panel artifact-panel">
           <div class="section-head"><div><h2>Artifacts loaded</h2><p>Only files present on this VM/repo are shown.</p></div><span class="mini-stat" id="artifactHint">—</span></div>

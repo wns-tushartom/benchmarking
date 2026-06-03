@@ -5,19 +5,26 @@
     "dataset": "data/qa_text_test.csv",
     "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
     "top_k": 10,
-    "mode": "vm_real_adapters",
+    "mode": "vm_remote_required",
     "random_seed": 42,
     "repetitions": 1,
-    "selection": {}
+    "selection": {
+      "chunker": "entity_heuristic_w6",
+      "embedding": "jina_v3",
+      "vector_store": "Qdrant",
+      "index_type": "HNSW",
+      "retrieval_method": "Cosine Similarity",
+      "reranker": "bge-reranker-base"
+    }
   },
   "config_path": "C:\\Users\\U481019\\OneDrive - WNS\\Documents\\wns-oneclick-vm-package\\Retreiver\\configs\\benchmark.local.json",
-  "config_hash": "f9d6356bfd813f75",
+  "config_hash": "0f519481ab8c4bdf",
   "dataset_hash": "779d9cb749a09bbb",
   "query_count": 50,
-  "matrix_count": 30,
-  "git_sha": "f2caae3",
+  "matrix_count": 1,
+  "git_sha": "a0558a5",
   "python": "3.13.1",
-  "created_at": "2026-05-25T16:29:42+0530",
+  "created_at": "2026-05-28T18:20:20+0530",
   "provider_readiness": {
     "OPENAI_API_KEY": false,
     "JINA_EMBEDDING_URL": true,
@@ -30,6 +37,7 @@
     "WEAVIATE_URL": true,
     "AWS_REGION": false,
     "AWS_DEFAULT_REGION": false,
-    "QWEN_RERANK_URL": false
+    "QWEN_RERANK_URL": false,
+    "BGE_RERANK_URL": false
   }
 }

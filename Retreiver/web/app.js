@@ -241,8 +241,9 @@ function renderEvaluation(evaluation) {
   const bestRow = filteredRows[0];
   section.classList.toggle('hidden', displayRows.length === 0);
   $('qualityHint').textContent = filteredRows.length ? `${filteredRows.length}/${displayRows.length} configs · ${report.groundtruth_rows || evaluation?.reranked?.report?.groundtruth_rows || '—'} GT rows` : 'No matching configs';
-  $('qualityInsight').innerHTML = bestRow ? `<strong>Current winner:</strong> ${esc(pipelineLabel(bestRow))} <span>Score ${displayScore(bestRow)} · R@5 ${(num(bestRow.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestRow.mrr,3)} · ${fmt(bestRow.avg_latency_seconds,3)}s avg</span>` : '<span>No evaluated combination matches these filters.</span>';
+  $('qualityInsight').innerHTML = bestRow ? `<strong>Current winner:</strong> ${esc(pipelineLabel(bestRow))} <span>Score ${displayScore(bestRow)} · R@5 ${(num(bestRow.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestRow.mrr,3)} · ${fmt(bestRow.avg_latency_seconds,3)}s avg/query across ${esc(bestRow.evaluated_queries || '—')} queries</span>` : '<span>No evaluated combination matches these filters.</span>';
   table($('qualityTable'), filteredRows.slice(0, 60), [
+    {key:'serial', label:'S/No.', render:(r,i)=>String(i + 1)},
     {key:'winner_score', label:'Score', render:displayScore},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
@@ -258,7 +259,7 @@ function renderEvaluation(evaluation) {
     {key:'ndcg_at_5', label:'nDCG@5'},
     {key:'avg_first_relevant_rank', label:'Avg rank'},
     {key:'no_hit_queries', label:'No hit'},
-    {key:'avg_latency_seconds', label:'Avg sec'},
+    {key:'avg_latency_seconds', label:'Avg sec/query'},
   ]);
   renderBestMethods(filteredRows.length ? filteredRows : displayRows);
 }
@@ -476,13 +477,15 @@ function renderOperational() {
   $('bestR5Status').textContent = best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—';
   $('bestConfigNote').textContent = best ? pipelineLabel(best) : 'ground-truth winner';
   $('bestLatencyStatus').textContent = fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—';
-  $('bestLatencyNote').textContent = fastest ? pipelineLabel(fastest) : 'fastest evaluated config';
+  $('bestLatencyNote').textContent = fastest ? `${pipelineLabel(fastest)} · avg/query` : 'fastest evaluated config';
   $('embeddingStatus').textContent = embeddings.length ? embeddings.join(' + ') : '—';
   $('dbStatus').textContent = stores.length ? stores.join(' + ') : '—';
   $('ingestionHint').textContent = `${latest.length} latest successful rows`;
   $('rerankHint').textContent = `${rerank.length} artifacts`;
   $('artifactHint').textContent = `${state.files.length} files`;
   $('healthHint').textContent = `${health.filter(h => h.ok).length}/${health.length || 0} healthy`;
+  const pdfAudit = op.pdf_audit || {};
+  $('pdfAuditHint') && ($('pdfAuditHint').textContent = pdfAudit.total ? `${pdfAudit.needs_ocr_count || 0}/${pdfAudit.total} need OCR/review` : 'No audit file yet');
 
   renderCoverage(rows);
   renderServices(health);
@@ -510,6 +513,18 @@ function renderOperational() {
     {key:'rerank_seconds', label:'Sec', render:r=>fmt(r.rerank_seconds, 3)},
     {key:'retrieved_count', label:'Retrieved'},
     {key:'artifact', label:'Artifact', render:r=>`<code>${esc((r.artifact || '').slice(0, 56))}</code>`}
+  ]);
+  table($('pdfAuditTable'), (pdfAudit.rows || []).slice(0, 80), [
+    {key:'pdf_name', label:'PDF', render:r=>esc((r.pdf_name || '').slice(0, 72))},
+    {key:'status', label:'Status'},
+    {key:'parser_method', label:'Parser'},
+    {key:'total_pages', label:'Pages'},
+    {key:'text_chars', label:'Text chars'},
+    {key:'image_count', label:'Images'},
+    {key:'table_count', label:'Tables'},
+    {key:'formula_count', label:'Formulas'},
+    {key:'row_count', label:'Rows'},
+    {key:'error', label:'Error', render:r=>esc((r.error || '').slice(0, 120))},
   ]);
   $('files').innerHTML = state.files.length ? state.files.map(f => `<li><code>${esc(f)}</code></li>`).join('') : '<li>No artifact files listed yet</li>';
 }
@@ -548,6 +563,7 @@ function selectedParams() {
 async function runAction(kind) {
   const endpoints = {
     ingest: '/api/run/ingest-selected',
+    parseMineru: '/api/run/parse-pdfs-mineru',
     smoke: '/api/run/retrieval-smoke',
     eval: '/api/run/evaluate-groundtruth',
     full: '/api/run/full-gt-retrieval',
@@ -596,6 +612,7 @@ async function runAction(kind) {
 ['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], state.operational?.reranker_smokes || [])));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
+$('runParseMineruBtn')?.addEventListener('click', () => runAction('parseMineru').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
