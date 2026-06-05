@@ -87,18 +87,42 @@ function renderCoverage(rows) {
 function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
   const base = (retrievalSmokes || []).map(r => ({...r, reranker: 'none', evidence_type: 'retrieval'}));
   const reranked = (rerankerSmokes || []).map(r => ({...r, evidence_type: 'reranked'}));
-  return [...reranked, ...base].map(r => ({
-    ...r,
-    reranker: r.reranker || 'none',
-    top_pdf: ((r.hits || [])[0] || {}).pdf_name || '—',
-    evidence_snippet: bestEvidenceSnippet(r),
-  }));
+  return [...reranked, ...base].map(r => {
+    const hits = (r.hits || []).map((hit, i) => ({
+      rank: hit.rank || i + 1,
+      pdf_name: hit.pdf_name || hit.pdf || hit.source || '—',
+      score: hit.score ?? hit.relevance_score ?? hit.relevanceScore ?? hit.similarity ?? '',
+      text: evidenceTextFromHit(hit),
+    }));
+    return {
+      ...r,
+      reranker: r.reranker || 'none',
+      top_pdf: (hits[0] || {}).pdf_name || '—',
+      evidence_snippet: hits[0]?.text || '',
+      evidence_hits: hits,
+    };
+  });
 }
 
-function bestEvidenceSnippet(row) {
-  const hit = (row.hits || [])[0] || {};
-  const text = hit.paragraph || hit.text || hit.chunk || '';
-  return String(text).replace(/\s+/g, ' ').trim();
+function evidenceTextFromHit(hit) {
+  return String(hit?.paragraph || hit?.text || hit?.chunk || hit?.content || hit?.page_content || '').replace(/\s+/g, ' ').trim();
+}
+
+function shortEvidenceLabel(row) {
+  const hit = (row.evidence_hits || [])[0] || {};
+  const text = hit.text || 'Open retrieved evidence';
+  const pdf = hit.pdf_name && hit.pdf_name !== '—' ? `${hit.pdf_name}: ` : '';
+  return `${pdf}${text}`.slice(0, 110);
+}
+
+function renderEvidenceDetails(row) {
+  const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, 5);
+  if (!hits.length) return '<span class="muted-text">No paragraph returned in artifact</span>';
+  const body = hits.map(h => `<article class="evidence-hit">
+    <div><strong>Rank ${esc(h.rank)}</strong><span>${esc(h.pdf_name || '—')}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
+    <p>${esc(h.text)}</p>
+  </article>`).join('');
+  return `<div class="evidence-hit-list">${body}</div>`;
 }
 
 function filteredRetrieval(rows) {
@@ -124,7 +148,7 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'store', label:'DB'},
     {key:'reranker', label:'Reranker'},
     {key:'top_pdf', label:'Top PDF', render:r=>esc((r.top_pdf || '').slice(0, 58))},
-    {key:'evidence_snippet', label:'Exact retrieved evidence', render:r=>`<details class="snippet"><summary>${esc((r.evidence_snippet || 'Open evidence').slice(0, 90))}</summary><p>${esc(r.evidence_snippet || 'No paragraph returned in artifact')}</p></details>`},
+    {key:'evidence_snippet', label:'Exact retrieved evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieved_count', label:'Hits'},
     {key:'evidence_type', label:'Type'},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
