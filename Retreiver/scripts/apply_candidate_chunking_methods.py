@@ -232,8 +232,13 @@ def main() -> None:
 
     df = pd.read_csv(input_path)
     expected = ["id", "pdf_name", "paragraph"]
-    if list(df.columns) != expected:
-        raise SystemExit(f"Input columns must be {expected}, got {list(df.columns)}")
+    missing = [col for col in expected if col not in df.columns]
+    if missing:
+        raise SystemExit(f"Input is missing required columns {missing}; available columns: {list(df.columns)}")
+    # Keep the canonical benchmark columns for the Excel sheets. Source/page/parser
+    # metadata may be present in benchmark_input.csv after MinerU extraction, but
+    # downstream chunking workbooks intentionally remain id,pdf_name,paragraph.
+    df = df[expected].copy()
 
     sheets: Dict[str, pd.DataFrame] = {}
 

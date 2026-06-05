@@ -162,25 +162,6 @@ async def main_async(args: argparse.Namespace) -> int:
     pdf_dir = Path(args.pdf_dir)
     if not pdf_dir.is_absolute():
         pdf_dir = ROOT / pdf_dir
-    pdfs = sorted(pdf_dir.glob("*.pdf"))
-    if not pdfs:
-        print(f"No PDFs found in {pdf_dir}")
-        return 2
-
-    print(f"MinerU available: {MINERU_AVAILABLE}; PyPDF2 available: {PYPDF2_AVAILABLE}")
-    print(f"Processing {len(pdfs)} PDFs from {pdf_dir}")
-
-    all_rows: list[dict[str, Any]] = []
-    audits: list[dict[str, Any]] = []
-    for pdf in pdfs:
-        rows, audit = await parse_one(pdf, include_image_markers=args.include_image_markers)
-        audits.append(audit)
-        all_rows.extend(rows)
-        print(f"{audit['status']}\t{pdf.name}\tmethod={audit['parser_method']}\trows={audit['row_count']}\timages={audit['image_count']}\ttables={audit['table_count']}")
-
-    for idx, row in enumerate(all_rows, 1):
-        row["id"] = idx
-
     output = Path(args.output)
     if not output.is_absolute():
         output = ROOT / output
@@ -188,8 +169,50 @@ async def main_async(args: argparse.Namespace) -> int:
     if not audit_path.is_absolute():
         audit_path = ROOT / audit_path
 
-    write_csv(output, all_rows, ["id", "pdf_name", "paragraph", "page_number", "source_type", "parser_method", "image_count", "table_count", "formula_count"])
-    write_csv(audit_path, audits, ["pdf_name", "status", "parser_method", "total_pages", "parsed_pages", "text_chars", "image_count", "table_count", "formula_count", "row_count", "needs_ocr_review", "error"])
+    pdfs = sorted(pdf_dir.glob("*.pdf"))
+    if not pdfs:
+        print(f"No PDFs found in {pdf_dir}")
+        return 2
+
+    row_fields = ["id", "pdf_name", "paragraph", "page_number", "source_type", "parser_method", "image_count", "table_count", "formula_count"]
+    audit_fields = ["pdf_name", "status", "parser_method", "total_pages", "parsed_pages", "text_chars", "image_count", "table_count", "formula_count", "row_count", "needs_ocr_review", "error"]
+    existing_rows: list[dict[str, Any]] = []
+    existing_audits: list[dict[str, Any]] = []
+    existing_pdf_names: set[str] = set()
+    if args.only_missing and output.exists():
+        with output.open("r", encoding="utf-8-sig", newline="") as f:
+            existing_rows = list(csv.DictReader(f))
+        existing_pdf_names = {str(r.get("pdf_name", "")).strip() for r in existing_rows if str(r.get("pdf_name", "")).strip()}
+        if audit_path.exists():
+            with audit_path.open("r", encoding="utf-8-sig", newline="") as f:
+                existing_audits = list(csv.DictReader(f))
+        pdfs = [pdf for pdf in pdfs if pdf.name not in existing_pdf_names]
+
+    print(f"MinerU available: {MINERU_AVAILABLE}; PyPDF2 available: {PYPDF2_AVAILABLE}")
+    if args.only_missing:
+        print(f"Existing benchmark rows: {len(existing_rows)} across {len(existing_pdf_names)} PDFs")
+        print(f"Missing PDFs to process: {len(pdfs)}")
+    else:
+        print(f"Processing {len(pdfs)} PDFs from {pdf_dir}")
+    if not pdfs and args.only_missing:
+        print("No missing PDFs found. Existing benchmark_input.csv was left unchanged.")
+        return 0
+
+    parsed_rows: list[dict[str, Any]] = []
+    audits: list[dict[str, Any]] = []
+    for pdf in pdfs:
+        rows, audit = await parse_one(pdf, include_image_markers=args.include_image_markers)
+        audits.append(audit)
+        parsed_rows.extend(rows)
+        print(f"{audit['status']}\t{pdf.name}\tmethod={audit['parser_method']}\trows={audit['row_count']}\timages={audit['image_count']}\ttables={audit['table_count']}")
+
+    all_rows = existing_rows + parsed_rows if args.only_missing else parsed_rows
+    for idx, row in enumerate(all_rows, 1):
+        row["id"] = idx
+    audits_out = existing_audits + audits if args.only_missing else audits
+
+    write_csv(output, [{field: row.get(field, "") for field in row_fields} for row in all_rows], row_fields)
+    write_csv(audit_path, [{field: row.get(field, "") for field in audit_fields} for row in audits_out], audit_fields)
 
     needs = [a for a in audits if str(a.get("needs_ocr_review")) == "1"]
     print(f"Wrote {len(all_rows)} rows to {output.relative_to(ROOT)}")
@@ -206,6 +229,7 @@ def main() -> int:
     parser.add_argument("--output", default="data/benchmark_input.csv")
     parser.add_argument("--audit-output", default="data/pdf_extraction_audit.csv")
     parser.add_argument("--include-image-markers", action="store_true", help="Add image-reference rows when MinerU emits image paths. OCR text is still taken from MinerU text/table output.")
+    parser.add_argument("--only-missing", action="store_true", help="Append only PDFs not already present in the output CSV; use this for newly added PDFs.")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
 

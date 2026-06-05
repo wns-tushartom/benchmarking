@@ -219,50 +219,75 @@ Passenger wants return refund due to illness</textarea></label>
     </section>
 
     <section class="page" data-page-panel="nvidia">
-      <section class="grid two">
+      <section class="panel nvidia-brief">
+        <div>
+          <span class="rank-label">NVIDIA RAG Blueprint</span>
+          <h2>Current-data retrieval and benchmark lane</h2>
+          <p>Use the same Project Smiley PDFs and ground-truth file against NVIDIA rag-server. This lane stays separate from the modular Qdrant/PGVector/Weaviate matrix, but it produces comparable Recall, MRR, nDCG, latency, and evidence rows.</p>
+        </div>
+        <div class="nvidia-flow">
+          <article><strong>1</strong><span>Health</span><small>Confirm rag-server and ingestor ports.</small></article>
+          <article><strong>2</strong><span>Ingest current PDFs</span><small>Upload <code>data/pdfs</code> into the selected collection.</small></article>
+          <article><strong>3</strong><span>Benchmark</span><small>Run <code>groundtruth_500.csv</code> queries through NVIDIA search.</small></article>
+        </div>
+      </section>
+
+      <section class="grid two nvidia-top-grid">
         <article class="panel">
           <div class="section-head">
-            <div><h2>NVIDIA RAG Blueprint lane</h2><p>End-to-end NVIDIA ingestion, retrieval, reranking, generation, citations, and agentic RAG as a separate evidence lane for Project Smiley.</p></div>
+            <div><h2>NVIDIA readiness</h2><p>Real health, ingestion, smoke, and benchmark artifacts. No synthetic NVIDIA results are shown.</p></div>
             <span class="mini-stat" id="nvidiaStatus">Not checked</span>
           </div>
-          <div id="nvidiaCards" class="comparison-grid"></div>
-          <div class="run-actions">
-            <button id="runNvidiaHealthBtn" type="button">Check NVIDIA health</button>
-            <button id="runNvidiaSmokeBtn" type="button">Run NVIDIA retrieval smoke</button>
-            <button id="runNvidiaIngestBtn" type="button">Upload sample PDFs to NVIDIA</button>
+          <div id="nvidiaCards" class="nvidia-card-grid"></div>
+          <div class="run-actions nvidia-actions">
+            <button id="runNvidiaHealthBtn" type="button">Check health</button>
+            <button id="runNvidiaIngestBtn" type="button">Ingest current data</button>
+            <button id="runNvidiaSmokeBtn" type="button">Test one query</button>
+            <button id="runNvidiaBenchmarkBtn" type="button">Run NVIDIA benchmark</button>
           </div>
         </article>
         <article class="panel">
-          <div class="section-head"><div><h2>Run settings</h2><p>Keep demos narrow. Use ingestion limit 5 first, then scale once services are healthy.</p></div></div>
+          <div class="section-head"><div><h2>Run settings</h2><p>Start small: 5 PDFs, 25 benchmark queries. Set file/query limit to 0 only when the stack is healthy.</p></div></div>
           <div class="run-grid nvidia-run-grid">
             <label>NVIDIA query<textarea id="nvidiaQuery">refund old ticket and issue new ticket</textarea></label>
             <label>Collection<input id="nvidiaCollection" value="multimodal_data" /></label>
+            <label>Current data path<input id="nvidiaDataPath" value="data/pdfs" /></label>
+            <label>Ground truth file<input id="nvidiaGroundtruth" value="data/groundtruth/groundtruth_500.csv" /></label>
             <label>Smoke mode<select id="nvidiaMode"><option value="search">Search / rerank</option><option value="generate">Generate answer</option></select></label>
             <label>Top K<input id="nvidiaTopK" value="10" /></label>
             <label>Reranker top K<input id="nvidiaRerankerTopK" value="5" /></label>
-            <label>Ingestion file limit<input id="nvidiaLimit" value="5" /></label>
+            <label>File/query limit<input id="nvidiaLimit" value="25" /></label>
             <label>Batch size<input id="nvidiaBatchSize" value="2" /></label>
             <label class="check-row"><input id="nvidiaDisableReranker" type="checkbox" /> Disable reranker</label>
             <label class="check-row"><input id="nvidiaAgentic" type="checkbox" /> Agentic generate</label>
             <label class="check-row"><input id="nvidiaCreateCollection" type="checkbox" checked /> Create collection before ingest</label>
             <label class="check-row"><input id="nvidiaPoll" type="checkbox" /> Poll ingestion tasks</label>
           </div>
-          <pre id="nvidiaOutput" class="run-output"></pre>
+          <details class="run-log"><summary>Execution output</summary><pre id="nvidiaOutput" class="run-output"></pre></details>
         </article>
       </section>
+
       <section class="grid two">
         <article class="panel">
-          <div class="section-head"><div><h2>Latest NVIDIA smoke result</h2><p>Search/generation evidence from the last real rag-server call. Empty until a smoke JSON artifact exists.</p></div><span class="mini-stat" id="nvidiaSmokeHint">—</span></div>
-          <div class="table-wrap"><table id="nvidiaSmokeTable"></table></div>
+          <div class="section-head"><div><h2>NVIDIA benchmark results</h2><p>Comparable quality metrics from current ground truth after running the NVIDIA benchmark action.</p></div><span class="mini-stat" id="nvidiaBenchmarkHint">—</span></div>
+          <div id="nvidiaBenchmarkCards" class="run-result-cards"></div>
+          <div class="table-wrap"><table id="nvidiaBenchmarkTable"></table></div>
         </article>
         <article class="panel">
-          <div class="section-head"><div><h2>Latest NVIDIA ingestion batches</h2><p>Uploaded file batches and task state from the last real ingestor call.</p></div><span class="mini-stat" id="nvidiaIngestHint">—</span></div>
-          <div class="table-wrap"><table id="nvidiaIngestTable"></table></div>
+          <div class="section-head"><div><h2>Latest NVIDIA smoke result</h2><p>One-query retrieval/generation evidence from rag-server. Use it to verify collection and citations before a full benchmark.</p></div><span class="mini-stat" id="nvidiaSmokeHint">—</span></div>
+          <div class="table-wrap"><table id="nvidiaSmokeTable"></table></div>
         </article>
       </section>
-      <section class="panel">
-        <div class="section-head"><div><h2>NVIDIA artifacts and service checks</h2><p>Health, smoke, and ingestion JSON written by real service calls. No synthetic benchmark rows are shown here.</p></div><span class="mini-stat" id="nvidiaArtifactHint">—</span></div>
-        <div class="table-wrap"><table id="nvidiaTable"></table></div>
+
+      <section class="grid two">
+        <article class="panel">
+          <div class="section-head"><div><h2>Current-data ingestion batches</h2><p>Uploaded file batches and task state from the last real ingestor call.</p></div><span class="mini-stat" id="nvidiaIngestHint">—</span></div>
+          <div class="table-wrap"><table id="nvidiaIngestTable"></table></div>
+        </article>
+        <article class="panel">
+          <div class="section-head"><div><h2>NVIDIA artifacts and service checks</h2><p>Health, smoke, ingestion, and benchmark files written by real service calls.</p></div><span class="mini-stat" id="nvidiaArtifactHint">—</span></div>
+          <div class="table-wrap"><table id="nvidiaTable"></table></div>
+        </article>
       </section>
     </section>
 

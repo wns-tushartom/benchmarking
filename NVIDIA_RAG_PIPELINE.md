@@ -60,6 +60,9 @@ bash setup_nvidia_rag_pipeline_on_vm.sh --host <VM_IP> --rag-zip rag-main.zip --
 - `Retreiver/data/nvidia_rag/health.json`
 - `Retreiver/data/nvidia_rag/smoke_latest.json`
 - `Retreiver/data/nvidia_rag/ingestion_latest.json`
+- `Retreiver/data/nvidia_rag/benchmark_summary.csv`
+- `Retreiver/data/nvidia_rag/benchmark_details.csv`
+- `Retreiver/data/nvidia_rag/benchmark_report.json`
 - `NVIDIA_RAG_SETUP_RESULT.txt`
 
 ## Health check
@@ -106,14 +109,32 @@ python3 scripts/run_nvidia_rag_pipeline_smoke.py \
   --query "refund old ticket and issue new ticket"
 ```
 
+## Benchmark on current WNS ground truth
+
+After current PDFs have been ingested into the NVIDIA collection, run the NVIDIA benchmark against the existing Project Smiley ground-truth file:
+
+```bash
+cd Retreiver
+python3 scripts/run_nvidia_rag_benchmark.py \
+  --env-file .env.project-smiley-nvidia \
+  --groundtruth data/groundtruth/groundtruth_500.csv \
+  --collection multimodal_data \
+  --limit 25 \
+  --top-k 10 \
+  --reranker-top-k 5
+```
+
+Use `--limit 0` only after the 25-query run succeeds. The outputs are written to `data/nvidia_rag/benchmark_summary.csv`, `benchmark_details.csv`, and `benchmark_report.json`.
+
 ## Dashboard controls
 
 Start the dashboard as usual and open the **NVIDIA RAG** tab. It can:
 
 - check NVIDIA health
+- ingest the current `data/pdfs` corpus into NVIDIA
 - run a retrieval smoke query
-- upload a small batch of PDFs to the NVIDIA ingestor
-- show NVIDIA JSON artifacts next to existing benchmark evidence
+- run the NVIDIA benchmark over `data/groundtruth/groundtruth_500.csv`
+- show NVIDIA health, ingestion, smoke, benchmark, and artifact evidence next to the existing benchmark lanes
 
 ## Remaining real-world dependencies
 

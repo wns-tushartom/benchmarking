@@ -180,6 +180,9 @@ def read_nvidia_rag() -> dict:
     health = read_json_file(NVIDIA_RAG_DIR / "health.json")
     smoke = read_json_file(NVIDIA_RAG_DIR / "smoke_latest.json")
     ingestion = read_json_file(NVIDIA_RAG_DIR / "ingestion_latest.json")
+    benchmark_report = read_json_file(NVIDIA_RAG_DIR / "benchmark_report.json")
+    benchmark_summary = sort_summary(read_csv(NVIDIA_RAG_DIR / "benchmark_summary.csv"))
+    benchmark_details = read_csv(NVIDIA_RAG_DIR / "benchmark_details.csv") if NVIDIA_RAG_DIR.exists() else []
     files = []
     if NVIDIA_RAG_DIR.exists():
         files = [str(p.relative_to(ROOT)) for p in sorted(NVIDIA_RAG_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
@@ -187,8 +190,13 @@ def read_nvidia_rag() -> dict:
         "health": health,
         "smoke": smoke,
         "ingestion": ingestion,
+        "benchmark": {
+            "report": benchmark_report,
+            "summary": benchmark_summary,
+            "details": benchmark_details[:250],
+        },
         "files": files,
-        "configured": bool(health or smoke or ingestion or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
+        "configured": bool(health or smoke or ingestion or benchmark_report or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
     }
 
 
@@ -343,6 +351,10 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/nvidia_rag/health.json",
                 "data/nvidia_rag/smoke_latest.json",
                 "data/nvidia_rag/ingestion_latest.json",
+                "data/nvidia_rag/benchmark_summary.csv",
+                "data/nvidia_rag/benchmark_details.csv",
+                "data/nvidia_rag/benchmark_report.json",
+                "data/nvidia_rag/benchmark_latest.json",
                 "data/retrieval_smoke/summary.json",
                 "data/evaluation/groundtruth_eval_summary.csv",
                 "data/evaluation/groundtruth_eval_details.csv",
@@ -477,11 +489,19 @@ class Handler(SimpleHTTPRequestHandler):
                 if qs.get("agentic", ["0"])[0] == "1":
                     cmd.append("--agentic")
             elif parsed.path == "/api/run/nvidia-ingest":
-                cmd = [sys.executable, "scripts/ingest_nvidia_rag_documents.py", "--collection", qs.get("collection", ["multimodal_data"])[0], "--limit", limit or "5", "--batch-size", qs.get("batch_size", ["2"])[0]]
+                cmd = [sys.executable, "scripts/ingest_nvidia_rag_documents.py", "--collection", qs.get("collection", ["multimodal_data"])[0], "--path", qs.get("path", ["data/pdfs"])[0], "--limit", limit or "5", "--batch-size", qs.get("batch_size", ["2"])[0]]
                 if qs.get("create_collection", ["0"])[0] == "1":
                     cmd.append("--create-collection")
                 if qs.get("poll", ["0"])[0] == "1":
                     cmd.append("--poll")
+            elif parsed.path == "/api/run/nvidia-benchmark":
+                gt = qs.get("groundtruth", [""])[0] or os.getenv("WNS_GROUNDTRUTH_PATH", "")
+                if not gt:
+                    candidates = sorted(GROUNDTRUTH_DIR.glob("*.csv")) + sorted(GROUNDTRUTH_DIR.glob("*.xlsx"))
+                    gt = str(candidates[-1]) if candidates else "data/groundtruth/groundtruth_500.csv"
+                cmd = [sys.executable, "scripts/run_nvidia_rag_benchmark.py", "--groundtruth", gt, "--collection", qs.get("collection", ["multimodal_data"])[0], "--limit", limit or "25", "--top-k", qs.get("top_k", ["10"])[0], "--reranker-top-k", qs.get("reranker_top_k", ["5"])[0]]
+                if qs.get("disable_reranker", ["0"])[0] == "1":
+                    cmd.append("--disable-reranker")
             elif parsed.path == "/api/run/parse-pdfs-mineru":
                 cmd = [sys.executable, "scripts/prepare_benchmark_input_mineru.py"]
                 if qs.get("include_image_markers", ["0"])[0] == "1":

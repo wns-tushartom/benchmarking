@@ -52,6 +52,35 @@ def check_url(name: str, url: str, timeout: float = 4.0) -> dict[str, Any]:
         return {"name": name, "url": url, "ok": False, "error": repr(exc), "latency_ms": round((time.perf_counter() - start) * 1000, 2)}
 
 
+def model_adapter_health_url() -> str:
+    """Return a health URL even if env accidentally points at an endpoint path.
+
+    VM shells often export MODEL_ADAPTER_URL as the service base URL, but some
+    runs only have GTE/Jina/reranker endpoint URLs. Normalize known adapter
+    paths back to the FastAPI base so the dashboard does not check
+    /embed/gte/health and report a misleading 404.
+    """
+    known_suffixes = ("/health", "/embed/gte", "/embed/jina", "/rerank/bge", "/rerank/qwen")
+    candidates = [
+        os.getenv("MODEL_ADAPTER_URL", ""),
+        os.getenv("GTE_EMBEDDING_URL", ""),
+        os.getenv("JINA_EMBEDDING_URL", ""),
+        os.getenv("BGE_RERANK_URL", ""),
+        os.getenv("QWEN_RERANK_URL", ""),
+        "http://127.0.0.1:5000",
+    ]
+    for raw in candidates:
+        url = (raw or "").strip().rstrip("/")
+        if not url:
+            continue
+        for suffix in known_suffixes:
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+                break
+        return url.rstrip("/") + "/health"
+    return "http://127.0.0.1:5000/health"
+
+
 def build_snapshot(root: Path) -> dict[str, Any]:
     ingestion_rows: list[dict[str, str]] = []
     for path in sorted((root / "data" / "db_ingestion_runs").glob("*/summary.csv")):
@@ -62,7 +91,7 @@ def build_snapshot(root: Path) -> dict[str, Any]:
     ok_rows = [r for r in ingestion_rows if r.get("status") == "ok"]
     combos = {(r.get("sheet"), r.get("embedding"), r.get("store")) for r in ok_rows}
     service_urls = {
-        "model_adapter": os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000").rstrip("/") + "/health",
+        "model_adapter": model_adapter_health_url(),
         "qdrant": os.getenv("QDRANT_URL", "http://127.0.0.1:5001").rstrip("/") + "/healthz",
         "weaviate": os.getenv("WEAVIATE_URL", "http://127.0.0.1:5004").rstrip("/") + "/v1/.well-known/ready",
     }
