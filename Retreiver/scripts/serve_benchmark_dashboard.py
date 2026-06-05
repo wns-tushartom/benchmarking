@@ -31,6 +31,7 @@ RETRIEVAL_DIR = ROOT / "data" / "retrieval_smoke"
 SNAPSHOT_PATH = ROOT / "data" / "vm_dashboard_snapshot.json"
 EVAL_DIR = ROOT / "data" / "evaluation"
 HALLUCINATION_DIR = ROOT / "data" / "hallucination"
+NVIDIA_RAG_DIR = ROOT / "data" / "nvidia_rag"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
@@ -47,7 +48,7 @@ def benchmark_options() -> dict:
         "retrieval_methods": matrix.get("retrieval_methods") or matrix.get("retrievers", ["Cosine Similarity"]),
         "rerankers": matrix.get("rerankers", []),
         "matrix_count": len(generate_matrix(cfg)),
-        "mode": cfg.get("experiment", {}).get("mode", "local_offline_fallback"),
+        "mode": cfg.get("experiment", {}).get("mode", "vm_remote_required"),
     }
 
 
@@ -164,6 +165,31 @@ def read_snapshot() -> dict:
         return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
     except Exception as exc:
         return {"error": str(exc)}
+
+
+def read_json_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc), "path": str(path.relative_to(ROOT))}
+
+
+def read_nvidia_rag() -> dict:
+    health = read_json_file(NVIDIA_RAG_DIR / "health.json")
+    smoke = read_json_file(NVIDIA_RAG_DIR / "smoke_latest.json")
+    ingestion = read_json_file(NVIDIA_RAG_DIR / "ingestion_latest.json")
+    files = []
+    if NVIDIA_RAG_DIR.exists():
+        files = [str(p.relative_to(ROOT)) for p in sorted(NVIDIA_RAG_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
+    return {
+        "health": health,
+        "smoke": smoke,
+        "ingestion": ingestion,
+        "files": files,
+        "configured": bool(health or smoke or ingestion or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
+    }
 
 
 def read_evaluation_dir(path: Path) -> dict:
@@ -314,6 +340,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/modular_runs/latest/manifest.json",
                 "data/modular_runs/latest/MODULAR_REPORT.md",
                 "data/vm_dashboard_snapshot.json",
+                "data/nvidia_rag/health.json",
+                "data/nvidia_rag/smoke_latest.json",
+                "data/nvidia_rag/ingestion_latest.json",
                 "data/retrieval_smoke/summary.json",
                 "data/evaluation/groundtruth_eval_summary.csv",
                 "data/evaluation/groundtruth_eval_details.csv",
@@ -347,6 +376,7 @@ class Handler(SimpleHTTPRequestHandler):
             evaluation = read_evaluation()
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
+            nvidia_rag = read_nvidia_rag()
             snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
@@ -369,6 +399,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "retrieval_smoke_loaded": len(retrieval_smokes),
                     "evaluation": evaluation,
                     "hallucination": hallucination,
+                    "nvidia_rag": nvidia_rag,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
                     "known_pdf_count": pdf_audit.get("total") or 225,
@@ -434,6 +465,23 @@ class Handler(SimpleHTTPRequestHandler):
                 cmd = [sys.executable, "scripts/compare_chunking_recall.py", "--limit", limit]
             elif parsed.path in {"/api/run/modular", "/api/run/selected"}:
                 cmd = [sys.executable, "scripts/benchmark_cli.py", "run", "--limit-queries", limit, "--max-runs", max_runs, "--output-dir", "data/modular_runs/latest"] + selected_cli_args(qs)
+            elif parsed.path == "/api/run/nvidia-health":
+                cmd = [sys.executable, "scripts/check_nvidia_rag_pipeline.py", "--out", "data/nvidia_rag/health.json"]
+            elif parsed.path == "/api/run/nvidia-smoke":
+                cmd = [sys.executable, "scripts/run_nvidia_rag_pipeline_smoke.py", "--mode", qs.get("mode", ["search"])[0], "--collection", qs.get("collection", ["multimodal_data"])[0], "--top-k", qs.get("top_k", ["10"])[0], "--reranker-top-k", qs.get("reranker_top_k", ["5"])[0]]
+                queries = [q.strip() for raw in qs.get("query", []) for q in raw.split("\n") if q.strip()]
+                if queries:
+                    cmd += ["--query", queries[0]]
+                if qs.get("disable_reranker", ["0"])[0] == "1":
+                    cmd.append("--disable-reranker")
+                if qs.get("agentic", ["0"])[0] == "1":
+                    cmd.append("--agentic")
+            elif parsed.path == "/api/run/nvidia-ingest":
+                cmd = [sys.executable, "scripts/ingest_nvidia_rag_documents.py", "--collection", qs.get("collection", ["multimodal_data"])[0], "--limit", limit or "5", "--batch-size", qs.get("batch_size", ["2"])[0]]
+                if qs.get("create_collection", ["0"])[0] == "1":
+                    cmd.append("--create-collection")
+                if qs.get("poll", ["0"])[0] == "1":
+                    cmd.append("--poll")
             elif parsed.path == "/api/run/parse-pdfs-mineru":
                 cmd = [sys.executable, "scripts/prepare_benchmark_input_mineru.py"]
                 if qs.get("include_image_markers", ["0"])[0] == "1":

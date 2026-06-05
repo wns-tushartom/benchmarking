@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WNS Smiley Benchmarking</title>
+  <title>Project Smiley Integrated RAG Pipeline</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <main class="shell">
     <section class="hero panel-soft">
       <div class="hero-copy">
-        <h1><span>WNS</span><small>Smiley Benchmarking</small></h1>
-        <p class="sub">Evidence-led benchmark workspace for complete Smiley retrieval pipelines: chunking, embedding, vector database, reranking, quality, and latency.</p>
+        <h1><span>Project Smiley</span><small>Integrated RAG Pipeline</small></h1>
+        <p class="sub">Evidence-led benchmark workspace for Project Smiley's integrated RAG pipeline: chunking, embedding, vector database, reranking, quality, and latency.</p>
         <div class="hero-actions">
           <button id="refreshBtn" type="button">Refresh live data</button>
           <span id="statusPill" class="status-pill muted-pill">Loading</span>
@@ -32,6 +32,7 @@
       <button class="tab-btn" data-page="run" type="button">Run tests</button>
       <button class="tab-btn" data-page="evidence" type="button">Retrieval evidence</button>
       <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
+      <button class="tab-btn" data-page="nvidia" type="button">NVIDIA RAG</button>
       <button class="tab-btn" data-page="upload" type="button">Upload dataset</button>
       <button class="tab-btn" data-page="ops" type="button">Operations</button>
     </nav>
@@ -216,6 +217,54 @@ Passenger wants return refund due to illness</textarea></label>
       </section>
     </section>
 
+    <section class="page" data-page-panel="nvidia">
+      <section class="grid two">
+        <article class="panel">
+          <div class="section-head">
+            <div><h2>NVIDIA RAG Blueprint lane</h2><p>End-to-end NVIDIA ingestion, retrieval, reranking, generation, citations, and agentic RAG as a separate evidence lane for Project Smiley.</p></div>
+            <span class="mini-stat" id="nvidiaStatus">Not checked</span>
+          </div>
+          <div id="nvidiaCards" class="comparison-grid"></div>
+          <div class="run-actions">
+            <button id="runNvidiaHealthBtn" type="button">Check NVIDIA health</button>
+            <button id="runNvidiaSmokeBtn" type="button">Run NVIDIA retrieval smoke</button>
+            <button id="runNvidiaIngestBtn" type="button">Upload sample PDFs to NVIDIA</button>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="section-head"><div><h2>Run settings</h2><p>Keep demos narrow. Use ingestion limit 5 first, then scale once services are healthy.</p></div></div>
+          <div class="run-grid nvidia-run-grid">
+            <label>NVIDIA query<textarea id="nvidiaQuery">refund old ticket and issue new ticket</textarea></label>
+            <label>Collection<input id="nvidiaCollection" value="multimodal_data" /></label>
+            <label>Smoke mode<select id="nvidiaMode"><option value="search">Search / rerank</option><option value="generate">Generate answer</option></select></label>
+            <label>Top K<input id="nvidiaTopK" value="10" /></label>
+            <label>Reranker top K<input id="nvidiaRerankerTopK" value="5" /></label>
+            <label>Ingestion file limit<input id="nvidiaLimit" value="5" /></label>
+            <label>Batch size<input id="nvidiaBatchSize" value="2" /></label>
+            <label class="check-row"><input id="nvidiaDisableReranker" type="checkbox" /> Disable reranker</label>
+            <label class="check-row"><input id="nvidiaAgentic" type="checkbox" /> Agentic generate</label>
+            <label class="check-row"><input id="nvidiaCreateCollection" type="checkbox" checked /> Create collection before ingest</label>
+            <label class="check-row"><input id="nvidiaPoll" type="checkbox" /> Poll ingestion tasks</label>
+          </div>
+          <pre id="nvidiaOutput" class="run-output"></pre>
+        </article>
+      </section>
+      <section class="grid two">
+        <article class="panel">
+          <div class="section-head"><div><h2>Latest NVIDIA smoke result</h2><p>Search/generation evidence from the last real rag-server call. Empty until a smoke JSON artifact exists.</p></div><span class="mini-stat" id="nvidiaSmokeHint">—</span></div>
+          <div class="table-wrap"><table id="nvidiaSmokeTable"></table></div>
+        </article>
+        <article class="panel">
+          <div class="section-head"><div><h2>Latest NVIDIA ingestion batches</h2><p>Uploaded file batches and task state from the last real ingestor call.</p></div><span class="mini-stat" id="nvidiaIngestHint">—</span></div>
+          <div class="table-wrap"><table id="nvidiaIngestTable"></table></div>
+        </article>
+      </section>
+      <section class="panel">
+        <div class="section-head"><div><h2>NVIDIA artifacts and service checks</h2><p>Health, smoke, and ingestion JSON written by real service calls. No synthetic benchmark rows are shown here.</p></div><span class="mini-stat" id="nvidiaArtifactHint">—</span></div>
+        <div class="table-wrap"><table id="nvidiaTable"></table></div>
+      </section>
+    </section>
+
     <section class="page" data-page-panel="upload">
       <section class="panel upload-panel">
         <div class="section-head">
@@ -234,7 +283,7 @@ Passenger wants return refund due to illness</textarea></label>
             <li>ZIP files are extracted safely under that folder.</li>
             <li>Use the generated command suggestions to prepare PDFs, ground truth, and benchmark runs.</li>
           </ol>
-          <p>This page does not fake a benchmark. It only accepts real data and gives the next executable commands.</p>
+          <p>This page does not fabricate a benchmark. It only accepts real data and gives the next executable commands.</p>
         </div>
         <pre id="uploadOutput" class="run-output"></pre>
       </section>

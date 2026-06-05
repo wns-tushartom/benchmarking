@@ -139,7 +139,7 @@ def run_experiment(
         lo, hi = bootstrap_ci(metric_lists["recall_at_5"], iterations=int(eval_cfg.get("bootstrap_iterations", 200)), seed=int(exp.get("random_seed", 42)))
         summary_rows.append({
             **row,
-            "mode": exp.get("mode", "local_offline_fallback"),
+            "mode": exp.get("mode", "vm_remote_required"),
             "query_count": len(queries),
             "chunk_count": len(chunks),
             "embedding_dimension": getattr(embedder, "dimensions", 0),

@@ -8,6 +8,8 @@ SKIP_PIP=0
 SKIP_DOCKER=0
 SKIP_MODEL_SERVICE=0
 SKIP_MODEL_SMOKE=0
+WITH_NVIDIA_RAG=0
+NVIDIA_RAG_ARGS=()
 DRY_RUN=0
 FORCE_ENV=0
 MODEL_PORT=5000
@@ -39,6 +41,9 @@ Options:
   --skip-docker            Do not start vector DB Docker Compose services
   --skip-model-service     Do not start model adapter FastAPI service
   --skip-model-smoke       Do not call model endpoints, only health URLs
+  --with-nvidia-rag        Also run setup_nvidia_rag_pipeline_on_vm.sh after base services
+  --nvidia-rag-root PATH   Forward NVIDIA rag-main source path to NVIDIA setup
+  --nvidia-rag-zip ZIP     Forward NVIDIA rag-main.zip path to NVIDIA setup
   --dry-run                Print actions and write generated files without starting services
   -h, --help               Show this help
 
@@ -60,6 +65,9 @@ while [[ $# -gt 0 ]]; do
     --skip-docker) SKIP_DOCKER=1; shift ;;
     --skip-model-service) SKIP_MODEL_SERVICE=1; shift ;;
     --skip-model-smoke) SKIP_MODEL_SMOKE=1; shift ;;
+    --with-nvidia-rag) WITH_NVIDIA_RAG=1; shift ;;
+    --nvidia-rag-root) WITH_NVIDIA_RAG=1; NVIDIA_RAG_ARGS+=(--rag-root "${2:-}"); shift 2 ;;
+    --nvidia-rag-zip) WITH_NVIDIA_RAG=1; NVIDIA_RAG_ARGS+=(--rag-zip "${2:-}"); shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
@@ -318,6 +326,22 @@ EOF
   echo "Wrote $ROOT/VM_SETUP_RESULT.txt"
 }
 
+run_nvidia_rag_setup() {
+  if [[ "$WITH_NVIDIA_RAG" != "1" ]]; then
+    return
+  fi
+  if [[ ! -x "$ROOT/setup_nvidia_rag_pipeline_on_vm.sh" ]]; then
+    echo "Missing setup_nvidia_rag_pipeline_on_vm.sh" >&2
+    exit 1
+  fi
+  local args=(--host "$VM_HOST" --force-env)
+  if [[ "$DRY_RUN" == "1" ]]; then
+    args+=(--dry-run --skip-start)
+  fi
+  args+=("${NVIDIA_RAG_ARGS[@]}")
+  run bash "$ROOT/setup_nvidia_rag_pipeline_on_vm.sh" "${args[@]}"
+}
+
 main() {
   VM_HOST="$(detect_host)"
   echo "WNS VM setup root: $ROOT"
@@ -327,6 +351,7 @@ main() {
   start_vector_dbs
   start_model_service
   run_checks "$VM_HOST"
+  run_nvidia_rag_setup
   write_result "$VM_HOST"
   echo "Done."
 }

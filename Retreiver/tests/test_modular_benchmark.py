@@ -60,9 +60,9 @@ class ModularBenchmarkTests(unittest.TestCase):
 
     def test_registry_can_add_new_adapter(self):
         registry = Registry()
-        registry.register("embedding", "dummy", object)
-        self.assertIs(registry.get("embedding", "dummy"), object)
-        self.assertIn("dummy", registry.list("embedding"))
+        registry.register("embedding", "unit_test_adapter", object)
+        self.assertIs(registry.get("embedding", "unit_test_adapter"), object)
+        self.assertIn("unit_test_adapter", registry.list("embedding"))
 
     def test_metrics(self):
         hits = [False, True, False, True]

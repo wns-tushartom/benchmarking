@@ -62,7 +62,7 @@ def summarize_config(
 ) -> Dict[str, Any]:
     return {
         **config,
-        "mode": "local_offline_fallback",
+        "mode": "legacy_local_reference",
         "query_count": query_count,
         "chunk_count": chunk_count,
         "embedding_dimension": embedding_dimension,
@@ -118,7 +118,7 @@ def evaluate_hits(
             "hit_at_10": int(recall_at_k(hit_flags, 10)),
             "search_latency_ms": round(search_latency * 1000, 4),
             "rerank_latency_ms": round(rerank_latency * 1000, 4),
-            "mode": "local_offline_fallback",
+            "mode": "legacy_local_reference",
             "notes": "Local deterministic embeddings/vector adapters used. Replace with provider adapters for production numbers.",
         })
     return detail_rows, recalls, latencies, rerank_latencies
@@ -228,7 +228,7 @@ def main() -> None:
     all_detail, all_summary, elapsed = run_fast_local_matrix(root, args)
     ranked = sorted(all_summary, key=lambda r: (float(r.get("recall_at_5") or 0), -float(r.get("avg_query_latency_ms") or 0)), reverse=True)
     write_json(out_dir / "benchmark_report.json", {
-        "mode": "local_offline_fallback",
+        "mode": "legacy_local_reference",
         "total_runs": len(all_summary),
         "query_count": int(all_summary[0]["query_count"]) if all_summary else 0,
         "elapsed_s": round(elapsed, 3),

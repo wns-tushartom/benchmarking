@@ -166,6 +166,104 @@ function renderHallucination(audit) {
   ]);
 }
 
+function nvidiaResponseBody(smoke) {
+  return smoke?.response?.body || {};
+}
+
+function nvidiaResultItems(body) {
+  const candidates = [
+    body?.results,
+    body?.documents,
+    body?.chunks,
+    body?.passages,
+    body?.citations,
+    body?.data?.results,
+    body?.data?.documents,
+    body?.data?.chunks,
+    body?.response?.results,
+  ];
+  return candidates.find(v => Array.isArray(v)) || [];
+}
+
+function nvidiaAnswerPreview(body) {
+  const choice = Array.isArray(body?.choices) ? body.choices[0] : null;
+  const value = choice?.message?.content || choice?.text || body?.answer || body?.generated_text || body?.response || body?.text || '';
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function nvidiaSource(hit) {
+  return hit?.document_name || hit?.source || hit?.filename || hit?.title || hit?.id || hit?.metadata?.source || hit?.metadata?.filename || hit?.metadata?.pdf_name || '—';
+}
+
+function nvidiaSnippet(hit) {
+  const raw = hit?.text || hit?.content || hit?.chunk || hit?.paragraph || hit?.page_content || hit?.document?.text || hit?.metadata?.text || '';
+  if (raw) return String(raw).replace(/\s+/g, ' ').trim();
+  try { return JSON.stringify(hit).slice(0, 240); } catch { return ''; }
+}
+
+function renderNvidiaRag(nvidia) {
+  const status = $('nvidiaStatus');
+  const cards = $('nvidiaCards');
+  const artifactHint = $('nvidiaArtifactHint');
+  if (!status || !cards) return;
+  const health = nvidia?.health || {};
+  const smoke = nvidia?.smoke || {};
+  const ingestion = nvidia?.ingestion || {};
+  const files = nvidia?.files || [];
+  const checks = health.checks || {};
+  const checkRows = Object.entries(checks).map(([name, check]) => ({name, ok: !!check.ok, url: check.url || '', status: check.status || '', error: check.error || '', latency_ms: check.latency_ms || ''}));
+  const healthyCount = checkRows.filter(r=>r.ok).length;
+  const body = nvidiaResponseBody(smoke);
+  const resultItems = nvidiaResultItems(body);
+  const answerPreview = nvidiaAnswerPreview(body);
+  const batches = ingestion.batches || [];
+  const uploadedBatches = batches.filter(b => b.upload?.ok).length;
+  status.textContent = health.ok ? 'Healthy' : (health.created_at ? 'Needs attention' : 'Not checked');
+  cards.innerHTML = `
+    <article class="pipeline-card ${health.ok ? 'ok' : 'warn'}"><div class="rank-label">Health</div><h3>NVIDIA RAG services</h3>${metricBar('Ready services', healthyCount, Math.max(checkRows.length, 1), `${healthyCount}/${checkRows.length || 3} healthy`)}</article>
+    <article class="pipeline-card ${smoke.ok ? 'ok' : 'warn'}"><div class="rank-label">Smoke</div><h3>${esc(smoke.query || 'No smoke query yet')}</h3><p>${smoke.ok ? `${esc(smoke.mode || 'search')} · ${resultItems.length || (answerPreview ? 1 : 0)} result items · ${fmt(smoke.response?.latency_seconds,3)}s` : (smoke.response?.error || 'Run a smoke test after services are healthy.')}</p></article>
+    <article class="pipeline-card ${ingestion.ok ? 'ok' : 'warn'}"><div class="rank-label">Ingestion</div><h3>${esc(ingestion.collection || 'multimodal_data')}</h3><p>${ingestion.files ? `${ingestion.files.length} files selected · ${uploadedBatches}/${batches.length || 0} batches uploaded` : 'No NVIDIA ingestion artifact yet.'}</p></article>`;
+  const serviceRows = checkRows.map(r => ({kind:'health', name:r.name, status:r.ok ? 'ok' : 'check', detail:r.error || r.url, latency:r.latency_ms ? `${fmt(r.latency_ms,1)} ms` : '—'}));
+  const artifactRows = files.map(f => ({kind:'artifact', name:f.split('/').pop(), status:'present', detail:f, latency:'—'}));
+  const rows = [
+    ...serviceRows,
+    ...(smoke.created_at ? [{kind:'smoke', name:smoke.mode || 'search', status:smoke.ok ? 'ok' : 'check', detail:smoke.query || smoke.response?.error || '', latency:smoke.response?.latency_seconds ? `${fmt(smoke.response.latency_seconds,3)}s` : '—'}] : []),
+    ...(ingestion.created_at ? [{kind:'ingestion', name:ingestion.collection || 'multimodal_data', status:ingestion.ok ? 'ok' : 'check', detail:`${(ingestion.files || []).length} files · ${batches.length} batches`, latency:'—'}] : []),
+    ...artifactRows,
+  ];
+  artifactHint.textContent = `${files.length} NVIDIA JSON artifacts`;
+  table($('nvidiaTable'), rows, [
+    {key:'kind', label:'Type'},
+    {key:'name', label:'Name'},
+    {key:'status', label:'Status'},
+    {key:'latency', label:'Latency'},
+    {key:'detail', label:'Detail', render:r=>esc((r.detail || '').slice(0, 180))},
+  ]);
+
+  const smokeRows = smoke.created_at ? (resultItems.length ? resultItems.slice(0, 12).map((hit, i) => ({rank:i+1, source:nvidiaSource(hit), score:hit.score ?? hit.relevance_score ?? hit.similarity ?? '', snippet:nvidiaSnippet(hit)})) : [{rank:1, source:smoke.mode || 'response', score:smoke.response?.status || '', snippet:answerPreview || smoke.response?.error || 'No result items found in response body.'}]) : [];
+  $('nvidiaSmokeHint') && ($('nvidiaSmokeHint').textContent = smoke.created_at ? `${smoke.mode || 'search'} · ${smoke.ok ? 'ok' : 'check'} · ${resultItems.length || (answerPreview ? 1 : 0)} rows` : 'No smoke artifact yet');
+  table($('nvidiaSmokeTable'), smokeRows, [
+    {key:'rank', label:'Rank'},
+    {key:'source', label:'Source', render:r=>esc((r.source || '').slice(0, 70))},
+    {key:'score', label:'Score/status', render:r=>esc(String(r.score || '—')).slice(0, 24)},
+    {key:'snippet', label:'Evidence / answer', render:r=>esc((r.snippet || '').slice(0, 260))},
+  ]);
+
+  const batchRows = batches.map(b => {
+    const taskBody = b.upload?.body || {};
+    const task = taskBody.task_id || taskBody.id || taskBody.taskId || '—';
+    return {batch:b.batch, files:(b.files || []).join(', '), status:b.upload?.ok ? 'uploaded' : 'check', task, detail:b.upload?.error || b.status?.error || JSON.stringify(b.status?.body || taskBody || {}).slice(0, 180)};
+  });
+  $('nvidiaIngestHint') && ($('nvidiaIngestHint').textContent = ingestion.created_at ? `${uploadedBatches}/${batches.length} batches uploaded` : 'No ingestion artifact yet');
+  table($('nvidiaIngestTable'), batchRows, [
+    {key:'batch', label:'Batch'},
+    {key:'status', label:'Status'},
+    {key:'task', label:'Task'},
+    {key:'files', label:'Files', render:r=>esc((r.files || '').slice(0, 120))},
+    {key:'detail', label:'Detail', render:r=>esc((r.detail || '').slice(0, 180))},
+  ]);
+}
+
 function renderRunResult(kind, payload) {
   const cards = $('runResultCards');
   const tbl = $('runResultTable');
@@ -493,6 +591,7 @@ function renderOperational() {
   renderEvaluation(op.evaluation);
   renderPipelineComparison(op.evaluation);
   renderHallucination(op.hallucination || {});
+  renderNvidiaRag(op.nvidia_rag || {});
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -560,6 +659,37 @@ function selectedParams() {
   return p;
 }
 
+async function runNvidiaAction(kind) {
+  const endpoints = {
+    health: '/api/run/nvidia-health',
+    smoke: '/api/run/nvidia-smoke',
+    ingest: '/api/run/nvidia-ingest',
+  };
+  const p = new URLSearchParams();
+  const collection = ($('nvidiaCollection')?.value || 'multimodal_data').trim();
+  if (collection) p.set('collection', collection);
+  p.set('limit', $('nvidiaLimit')?.value || '5');
+  p.set('batch_size', $('nvidiaBatchSize')?.value || '2');
+  p.set('top_k', $('nvidiaTopK')?.value || '10');
+  p.set('reranker_top_k', $('nvidiaRerankerTopK')?.value || '5');
+  if ($('nvidiaCreateCollection')?.checked) p.set('create_collection', '1');
+  if ($('nvidiaPoll')?.checked) p.set('poll', '1');
+  if (kind === 'smoke') {
+    p.set('mode', $('nvidiaMode')?.value || 'search');
+    const query = ($('nvidiaQuery')?.value || '').trim();
+    if (query) p.append('query', query);
+    if ($('nvidiaDisableReranker')?.checked) p.set('disable_reranker', '1');
+    if ($('nvidiaAgentic')?.checked) p.set('agentic', '1');
+  }
+  $('nvidiaStatus').textContent = 'Running';
+  $('nvidiaOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
+  const res = await fetch(`${endpoints[kind]}?${p.toString()}`, {method:'POST'});
+  const payload = await res.json();
+  $('nvidiaOutput').textContent += JSON.stringify(payload, null, 2).slice(0, 8000);
+  $('nvidiaStatus').textContent = payload.exit_code === 0 ? 'Done' : 'Check output';
+  await refresh();
+}
+
 async function runAction(kind) {
   const endpoints = {
     ingest: '/api/run/ingest-selected',
@@ -621,6 +751,9 @@ $('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval')
 $('runEvalBtn')?.addEventListener('click', () => runAction('eval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runHallucinationBtn')?.addEventListener('click', () => runAction('hallucination').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runHallucinationLlmBtn')?.addEventListener('click', () => runAction('hallucinationLlm').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runNvidiaHealthBtn')?.addEventListener('click', () => runNvidiaAction('health').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
+$('runNvidiaSmokeBtn')?.addEventListener('click', () => runNvidiaAction('smoke').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
+$('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));

@@ -93,14 +93,6 @@ class LocalVectorStoreAdapter:
         return scored[:top_k]
 
 
-class PassthroughReranker:
-    def __init__(self, name: str = "none", **_: Any):
-        self.name = name
-
-    def rerank(self, query: str, hits: List[SearchHit], top_k: int) -> List[SearchHit]:
-        return hits[:top_k]
-
-
 class WeightedOverlapReranker:
     def __init__(self, name: str, vector_weight: float = 0.5, overlap_weight: float = 0.5, **_: Any):
         self.name = name
