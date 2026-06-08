@@ -6,6 +6,7 @@ const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&
 const num = (v) => Number.parseFloat(v || 0) || 0;
 const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
 const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
+const costLabel = (r) => /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 'commercial key/cost' : 'open-source/VM cost';
 
 async function api(path, options = {}) {
   const res = await fetch(path, {cache: 'no-store', ...options});
@@ -85,10 +86,11 @@ function renderCoverage(rows) {
 }
 
 function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
-  const base = (retrievalSmokes || []).map(r => ({...r, reranker: 'none', evidence_type: 'retrieval'}));
-  const reranked = (rerankerSmokes || []).map(r => ({...r, evidence_type: 'reranked'}));
+  const base = (retrievalSmokes || []).map(r => ({...r, reranker: 'none', evidence_type: 'initial topK retrieval'}));
+  const reranked = (rerankerSmokes || []).map(r => ({...r, evidence_type: 'reranked final top3'}));
   return [...reranked, ...base].map(r => {
-    const hits = (r.hits || []).map((hit, i) => ({
+    const rawHits = r.hits || [];
+    const hits = rawHits.map((hit, i) => ({
       rank: hit.rank || i + 1,
       pdf_name: hit.pdf_name || hit.pdf || hit.source || '—',
       score: hit.score ?? hit.relevance_score ?? hit.relevanceScore ?? hit.similarity ?? '',
@@ -100,6 +102,8 @@ function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
       top_pdf: (hits[0] || {}).pdf_name || '—',
       evidence_snippet: hits[0]?.text || '',
       evidence_hits: hits,
+      initial_topk_count: r.retrieved_count || hits.length || rawHits.length || '—',
+      final_top3: hits.slice(0, 3),
     };
   });
 }
@@ -116,13 +120,14 @@ function shortEvidenceLabel(row) {
 }
 
 function renderEvidenceDetails(row) {
-  const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, 5);
+  const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, 10);
   if (!hits.length) return '<span class="muted-text">No paragraph returned in artifact</span>';
-  const body = hits.map(h => `<article class="evidence-hit">
-    <div><strong>Rank ${esc(h.rank)}</strong><span>${esc(h.pdf_name || '—')}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
+  const stage = row.evidence_type === 'reranked final top3' ? 'Final reranked evidence' : 'Initial vector topK evidence';
+  const body = hits.map((h, i) => `<article class="evidence-hit ${i < 3 ? 'final-hit' : ''}">
+    <div><strong>${esc(stage)} · Rank ${esc(h.rank)}</strong><span>${esc(h.pdf_name || '—')}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
     <p>${esc(h.text)}</p>
   </article>`).join('');
-  return `<div class="evidence-hit-list">${body}</div>`;
+  return `<div class="evidence-stage-note">${esc(stage)}. First three rows are the final answer candidates after reranking when a reranker artifact is selected.</div><div class="evidence-hit-list">${body}</div>`;
 }
 
 function filteredRetrieval(rows) {
@@ -145,12 +150,12 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 58))},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
-    {key:'store', label:'DB'},
+    {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker'},
-    {key:'top_pdf', label:'Top PDF', render:r=>esc((r.top_pdf || '').slice(0, 58))},
-    {key:'evidence_snippet', label:'Exact retrieved evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
-    {key:'retrieved_count', label:'Hits'},
-    {key:'evidence_type', label:'Type'},
+    {key:'top_pdf', label:'Top PDF/source', render:r=>esc((r.top_pdf || '').slice(0, 58))},
+    {key:'initial_topk_count', label:'Initial K'},
+    {key:'evidence_type', label:'Stage'},
+    {key:'evidence_snippet', label:'TopK to rerank to top3 evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
   ]);
@@ -181,7 +186,7 @@ function renderHallucination(audit) {
     {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 72))},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
-    {key:'store', label:'DB'},
+    {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker'},
     {key:'verdict', label:'Verdict', render:r=>`<span class="risk ${esc(r.risk || '')}">${esc(r.verdict || '')}</span>`},
     {key:'support_score', label:'Support'},
@@ -389,7 +394,7 @@ function renderQwenAnalysis(analysis) {
     {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 90))},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
-    {key:'store', label:'DB'},
+    {key:'store', label:'Vector DB'},
     {key:'base_rank', label:'Base rank'},
     {key:'reranked_rank', label:'Qwen rank'},
     {key:'delta_mrr', label:'ΔMRR'},
@@ -448,7 +453,7 @@ function renderEvaluation(evaluation) {
     {key:'winner_score', label:'Score', render:displayScore},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
-    {key:'store', label:'DB'},
+    {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker', render:r=>esc(r.reranker || 'none')},
     {key:'evaluated_queries', label:'Queries'},
     {key:'recall_at_1', label:'R@1'},
@@ -458,9 +463,10 @@ function renderEvaluation(evaluation) {
     {key:'mrr', label:'MRR'},
     {key:'precision_at_5', label:'P@5'},
     {key:'ndcg_at_5', label:'nDCG@5'},
-    {key:'avg_first_relevant_rank', label:'Avg rank'},
-    {key:'no_hit_queries', label:'No hit'},
-    {key:'avg_latency_seconds', label:'Avg sec/query'},
+    {key:'avg_first_relevant_rank', label:'Avg first relevant rank'},
+    {key:'no_hit_queries', label:'No-hit queries'},
+    {key:'avg_latency_seconds', label:'Avg latency/query'},
+    {key:'cost', label:'Cost lane', render:costLabel},
   ]);
   renderBestMethods(filteredRows.length ? filteredRows : displayRows);
 }
@@ -496,9 +502,9 @@ function renderBestMethods(rows) {
     {step:'Overall best combination', value:`${overall.sheet} · ${overall.embedding} · ${overall.store}${overall.reranker && overall.reranker !== 'none' ? ' · ' + overall.reranker : ''}`, note:`Score ${displayScore(overall)} · R@5 ${(num(overall.recall_at_5)*100).toFixed(1)}% · ${fmt(overall.avg_latency_seconds,3)}s`, accent:'gold'},
     {step:'Best chunking method', value:groupWinner(rows,'sheet').name, note:`Average score ${fmt(groupWinner(rows,'sheet').score,3)} across ${groupWinner(rows,'sheet').configs} configs`, accent:'cyan'},
     {step:'Best embedding model', value:groupWinner(rows,'embedding').name, note:`R@5 ${(groupWinner(rows,'embedding').r5*100).toFixed(1)}% · MRR ${fmt(groupWinner(rows,'embedding').mrr,3)}`, accent:'mint'},
-    {step:'Best vector database', value:groupWinner(rows,'store').name, note:`Avg latency ${fmt(groupWinner(rows,'store').latency,3)}s · score ${fmt(groupWinner(rows,'store').score,3)}`, accent:'rose'},
+    {step:'Best vector DB component', value:groupWinner(rows,'store').name, note:`Avg latency ${fmt(groupWinner(rows,'store').latency,3)}s · score ${fmt(groupWinner(rows,'store').score,3)}`, accent:'rose'},
     {step:'Best reranker', value:groupWinner(rows,'reranker').name || 'none', note:`Average score ${fmt(groupWinner(rows,'reranker').score,3)} across ${groupWinner(rows,'reranker').configs} configs`, accent:'rank'},
-    {step:'Fastest evaluated config', value:`${fastest.store}`, note:`${fastest.sheet} · ${fastest.embedding}${fastest.reranker && fastest.reranker !== 'none' ? ' · ' + fastest.reranker : ''} · ${fmt(fastest.avg_latency_seconds,3)}s`, accent:'speed'},
+    {step:'Lowest avg latency/query', value:`${fastest.store}`, note:`${fastest.sheet} · ${fastest.embedding}${fastest.reranker && fastest.reranker !== 'none' ? ' · ' + fastest.reranker : ''} · ${fmt(fastest.avg_latency_seconds,3)}s`, accent:'speed'},
     {step:'Best first-answer accuracy', value:`${bestR1.sheet}`, note:`${bestR1.embedding} · ${bestR1.store} · R@1 ${(num(bestR1.recall_at_1)*100).toFixed(1)}%`, accent:'rank'},
   ];
   $('bestMethodHint').textContent = `${rows.length} configs ranked`;
@@ -605,7 +611,7 @@ function renderPipelineComparison(evaluation) {
       ${metricBar('Score', metricScore(r), maxScore, displayScore(r))}
       ${metricBar('Recall@5', num(r.recall_at_5), maxR5, `${(num(r.recall_at_5)*100).toFixed(1)}%`)}
       ${metricBar('MRR', num(r.mrr), maxMrr, fmt(r.mrr,3))}
-      ${metricBar('Latency', maxLatency - num(r.avg_latency_seconds) + 0.0001, maxLatency, `${fmt(r.avg_latency_seconds,3)}s avg`)}
+      ${metricBar('Avg latency/query', maxLatency - num(r.avg_latency_seconds) + 0.0001, maxLatency, `${fmt(r.avg_latency_seconds,3)}s avg`) + metricBar('Cost lane', /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 0.55 : 1, 1, costLabel(r))}
     </article>`).join('');
 
   const byReranker = ['none', ...uniq(rows, 'reranker').filter(r => r !== 'none')].filter(Boolean).map(name => {
@@ -618,7 +624,7 @@ function renderPipelineComparison(evaluation) {
   const stageWinners = [
     ['Chunker', groupWinner(rows, 'sheet')],
     ['Embedding', groupWinner(rows, 'embedding')],
-    ['Vector DB', groupWinner(rows, 'store')],
+    ['Vector DB component', groupWinner(rows, 'store')],
     ['Reranker', groupWinner(rows, 'reranker')],
   ].filter(([,v]) => v);
   const maxStage = Math.max(...stageWinners.map(([,v]) => v.score), 0);
@@ -650,6 +656,29 @@ async function uploadDataset(ev) {
   $('uploadOutput').textContent = JSON.stringify(payload, null, 2);
 }
 
+
+function renderDocumentRepository(repo) {
+  const rows = repo?.rows || [];
+  const hint = $('documentRepositoryHint');
+  if (hint) hint.textContent = rows.length ? `${repo.ready_count || 0}/${repo.total || rows.length} chunked · ${repo.review_count || 0} in review` : 'No repository scan yet';
+  const cards = $('documentRepositoryCards');
+  if (cards) {
+    cards.innerHTML = `<article class="run-result-card ok"><span>Repository PDFs</span><strong>${esc(repo.total || rows.length || 0)}</strong><small>from data/pdfs</small></article>
+      <article class="run-result-card"><span>Chunked documents</span><strong>${esc(repo.ready_count || 0)}</strong><small>present in benchmark workbook</small></article>
+      <article class="run-result-card warn"><span>Review queue</span><strong>${esc(repo.review_count || 0)}</strong><small>shown only in repository/audit views</small></article>`;
+  }
+  table($('documentRepositoryTable'), rows, [
+    {key:'pdf_name', label:'PDF', render:r=>esc((r.pdf_name || '').slice(0, 88))},
+    {key:'status', label:'Readiness'},
+    {key:'chunked_rows', label:'Chunk rows'},
+    {key:'pages', label:'Pages'},
+    {key:'size_mb', label:'Size MB'},
+    {key:'parser_method', label:'Parser'},
+    {key:'repository_path', label:'Path', render:r=>`<code>${esc(r.repository_path || '')}</code>`},
+    {key:'note', label:'Note'},
+  ]);
+}
+
 function renderOperational() {
   const op = state.operational || {};
   const ingestion = op.ingestion || {};
@@ -671,22 +700,23 @@ function renderOperational() {
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   $('groundTruthStatus').textContent = evaluation?.report?.groundtruth_rows ? `${evaluation.report.groundtruth_rows} rows evaluated` : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending');
   $('pdfStatus').textContent = `${op.extracted_pdf_count || 0}/${op.known_pdf_count || 0}`;
-  $('pdfNote').textContent = `${op.failed_pdf_count || 0} PDFs need OCR decision`;
-  $('comboStatus').textContent = String(ingestion.combo_count ?? latest.length ?? 0);
+  $('pdfNote').textContent = 'chunked or ready in repository';
+  $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
+  $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
   $('retrievalStatus').textContent = String(op.retrieval_smoke_total || retrieval.length || 0);
   $('retrievalNote').textContent = `${retrieval.length} retrieval · ${rerank.length} reranked artifacts`;
   $('bestR5Status').textContent = best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—';
-  $('bestConfigNote').textContent = best ? pipelineLabel(best) : 'ground-truth winner';
+  $('bestConfigNote').textContent = best ? pipelineLabel(best) : 'best accuracy score';
   $('bestLatencyStatus').textContent = fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—';
-  $('bestLatencyNote').textContent = fastest ? `${pipelineLabel(fastest)} · avg/query` : 'fastest evaluated config';
+  $('bestLatencyNote').textContent = fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency';
   $('embeddingStatus').textContent = embeddings.length ? embeddings.join(' + ') : '—';
   $('dbStatus').textContent = stores.length ? stores.join(' + ') : '—';
-  $('ingestionHint').textContent = `${latest.length} latest successful rows`;
+  $('ingestionHint').textContent = `${latest.length} latest successful component rows`;
   $('rerankHint').textContent = `${rerank.length} artifacts`;
   $('artifactHint').textContent = `${state.files.length} files`;
   $('healthHint').textContent = `${health.filter(h => h.ok).length}/${health.length || 0} healthy`;
   const pdfAudit = op.pdf_audit || {};
-  $('pdfAuditHint') && ($('pdfAuditHint').textContent = pdfAudit.total ? `${pdfAudit.needs_ocr_count || 0}/${pdfAudit.total} need OCR/review` : 'No audit file yet');
+  $('pdfAuditHint') && ($('pdfAuditHint').textContent = pdfAudit.total ? `${pdfAudit.ok_count || 0}/${pdfAudit.total} ready · review hidden from KPI` : 'No audit file yet');
 
   renderCoverage(rows);
   renderServices(health);
@@ -696,15 +726,16 @@ function renderOperational() {
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
   renderQwenAnalysis(op.reranker_analysis || {});
+  renderDocumentRepository(op.document_repository || {});
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
-    {key:'store', label:'DB'},
+    {key:'store', label:'Vector DB'},
     {key:'chunk_count', label:'Chunks'},
     {key:'collection_or_table', label:'Collection/table', render:r=>`<code>${esc((r.collection_or_table || '').slice(0, 46))}</code>`},
-    {key:'total_store_seconds', label:'DB sec', render:r=>fmt(r.total_store_seconds, 2)},
+    {key:'total_store_seconds', label:'Store sec', render:r=>fmt(r.total_store_seconds, 2)},
     {key:'search_hits', label:'Hits'},
     {key:'status', label:'Status', render:r=>`<span class="badge ok">ok</span>`}
   ]);
@@ -714,7 +745,7 @@ function renderOperational() {
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
     {key:'rerank_seconds', label:'Sec', render:r=>fmt(r.rerank_seconds, 3)},
-    {key:'retrieved_count', label:'Retrieved'},
+    {key:'retrieved_count', label:'Initial K'},
     {key:'artifact', label:'Artifact', render:r=>`<code>${esc((r.artifact || '').slice(0, 56))}</code>`}
   ]);
   table($('pdfAuditTable'), (pdfAudit.rows || []).slice(0, 80), [
@@ -743,7 +774,7 @@ async function refresh() {
 async function loadOptions() {
   benchmarkOptions = await api('/api/options');
   fillRunSelect('runSheet', benchmarkOptions.chunkers || [], 'All chunkers');
-  fillRunSelect('runEmbedding', (benchmarkOptions.embeddings || []).filter(e => ['gte_multilingual_base','jina_v3'].includes(e)), 'All live embeddings');
+  fillRunSelect('runEmbedding', benchmarkOptions.embeddings || [], 'All embeddings');
   fillRunSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
   const mainReranker = $('runRerankerMain');
   if (mainReranker) {

@@ -126,7 +126,7 @@ def read_reranker_smokes(limit: int = 250) -> list[dict]:
         except Exception as exc:
             payload = {"error": str(exc)}
         payload["artifact"] = str(path.relative_to(ROOT))
-        payload["hits"] = (payload.get("hits") or [])[:3]
+        payload["hits"] = (payload.get("hits") or [])[:10]
         smokes.append(payload)
     smokes.sort(key=lambda r: (r.get("created_at", ""), r.get("rerank_seconds", 999999)), reverse=True)
     return smokes
@@ -144,7 +144,7 @@ def read_retrieval_smokes(limit: int = 250) -> list[dict[str, Any]]:
         except Exception as exc:
             payload = {"error": str(exc)}
         payload["artifact"] = str(path.relative_to(ROOT))
-        payload["hits"] = (payload.get("hits") or [])[:3]
+        payload["hits"] = (payload.get("hits") or [])[:10]
         smokes.append(payload)
     smokes.sort(key=lambda r: (r.get("created_at", ""), r.get("retrieval_seconds", 999999)), reverse=True)
     return smokes
@@ -250,6 +250,98 @@ def read_pdf_audit() -> dict:
         "needs_ocr": needs[:100],
     }
 
+
+
+def count_pdf_chunks(pdf_name: str) -> int:
+    csv_path = ROOT / "data" / "benchmark_input.csv"
+    if csv_path.exists():
+        rows = read_csv(csv_path)
+        count = sum(1 for r in rows if r.get("pdf_name") == pdf_name)
+        if count:
+            return count
+    workbook = ROOT / "data" / "chunking_methods_output_v2.xlsx"
+    if not workbook.exists():
+        return 0
+    try:
+        import zipfile as _zipfile
+        import xml.etree.ElementTree as ET
+        with _zipfile.ZipFile(workbook) as z:
+            shared = []
+            if "xl/sharedStrings.xml" in z.namelist():
+                tree = ET.fromstring(z.read("xl/sharedStrings.xml"))
+                ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                for si in tree.findall("a:si", ns):
+                    shared.append("".join(t.text or "" for t in si.findall(".//a:t", ns)))
+            workbook_xml = ET.fromstring(z.read("xl/workbook.xml"))
+            rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+            ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+            relmap = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+            target = None
+            for sheet in workbook_xml.findall("a:sheets/a:sheet", ns):
+                if sheet.attrib.get("name") == "original_input":
+                    target = relmap.get(sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"))
+                    break
+            if not target:
+                return 0
+            xml_path = "xl/" + target.lstrip("/")
+            ws = ET.fromstring(z.read(xml_path))
+            rows = ws.findall(".//a:sheetData/a:row", ns)
+            headers = []
+            total = 0
+            for idx, row in enumerate(rows):
+                vals = []
+                for c in row.findall("a:c", ns):
+                    v = c.find("a:v", ns)
+                    val = "" if v is None else v.text or ""
+                    if c.attrib.get("t") == "s" and val.isdigit() and int(val) < len(shared):
+                        val = shared[int(val)]
+                    vals.append(val)
+                if idx == 0:
+                    headers = vals
+                    continue
+                rec = dict(zip(headers, vals))
+                if rec.get("pdf_name") == pdf_name:
+                    total += 1
+            return total
+    except Exception:
+        return 0
+
+
+def read_document_repository() -> dict[str, Any]:
+    pdf_dir = ROOT / "data" / "pdfs"
+    audit_rows = read_csv(PDF_AUDIT_PATH)
+    audit_by_name = {r.get("pdf_name") or r.get("file") or r.get("filename"): r for r in audit_rows}
+    files = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
+    rows = []
+    for f in files:
+        audit = audit_by_name.get(f.name, {})
+        chunks = count_pdf_chunks(f.name)
+        status = audit.get("status") or ("chunked" if chunks else "present")
+        needs_review = str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed"}
+        rows.append({
+            "pdf_name": f.name,
+            "status": "review" if needs_review else status,
+            "repository_path": str(f.relative_to(ROOT)),
+            "size_mb": f"{f.stat().st_size / (1024*1024):.2f}",
+            "chunked_rows": chunks,
+            "parser_method": audit.get("parser_method") or audit.get("parser") or "—",
+            "pages": audit.get("total_pages") or audit.get("pages") or "—",
+            "text_chars": audit.get("text_chars") or "—",
+            "note": "Review in audit" if needs_review else ("Ready for benchmark" if chunks else "Present, chunking pending"),
+        })
+    uploaded = []
+    upload_dir = ROOT / "data" / "uploads"
+    if upload_dir.exists():
+        for f in sorted(upload_dir.rglob("*")):
+            if f.is_file() and f.suffix.lower() in {".pdf", ".csv", ".xlsx"}:
+                uploaded.append({"path": str(f.relative_to(ROOT)), "size_mb": f"{f.stat().st_size / (1024*1024):.2f}"})
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "ready_count": sum(1 for r in rows if r["chunked_rows"]),
+        "review_count": sum(1 for r in rows if r["status"] == "review"),
+        "uploaded": uploaded[:100],
+    }
 
 def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
     vals = [v for v in values if v and v != "all"]
@@ -468,6 +560,7 @@ class Handler(SimpleHTTPRequestHandler):
             evaluation = read_evaluation()
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
+            document_repository = read_document_repository()
             nvidia_rag = read_nvidia_rag()
             reranker_analysis = read_reranker_analysis()
             snapshot = read_snapshot()
@@ -496,11 +589,13 @@ class Handler(SimpleHTTPRequestHandler):
                     "reranker_analysis": reranker_analysis,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
-                    "known_pdf_count": pdf_audit.get("total") or 225,
-                    "extracted_pdf_count": pdf_audit.get("ok_count") or 222,
-                    "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 3,
+                    "known_pdf_count": document_repository.get("total") or pdf_audit.get("total") or 0,
+                    "extracted_pdf_count": document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
+                    "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,
                     "pdf_audit": pdf_audit,
+                    "document_repository": document_repository,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
+                    "options_formula": "5 chunkers × 3 embeddings × 3 vector DBs × 1 retrieval × 3 rerankers = 135",
                     "metrics_status": "Paused, no query ground-truth CSV requested yet",
                     "openai_status": "Pending OPENAI_API_KEY and cost approval",
                     "amazon_status": "Pending AWS/Bedrock credentials",

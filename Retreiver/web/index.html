@@ -10,7 +10,7 @@
   <main class="shell">
     <section class="hero panel-soft">
       <div class="hero-copy">
-        <div class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /><span>Benchmark workspace</span></div>
+        <div class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /><span>Benchmark review</span></div>
         <h1><span>Project Smiley</span><small>Integrated RAG Pipeline</small></h1>
         <p class="sub">Evidence-led benchmark workspace for Project Smiley's integrated RAG pipeline: chunking, embedding, vector database, reranking, quality, and latency.</p>
         <div class="hero-actions">
@@ -28,24 +28,25 @@
 
     <nav class="page-tabs" aria-label="Benchmark pages">
       <button class="tab-btn active" data-page="overview" type="button">Overview</button>
-      <button class="tab-btn" data-page="quality" type="button">Quality decision</button>
-      <button class="tab-btn" data-page="compare" type="button">Pipeline comparison</button>
-      <button class="tab-btn" data-page="run" type="button">Run tests</button>
-      <button class="tab-btn" data-page="evidence" type="button">Retrieval evidence</button>
+      <button class="tab-btn" data-page="quality" type="button">Metrics</button>
+      <button class="tab-btn" data-page="compare" type="button">Accuracy, cost, latency</button>
+      <button class="tab-btn" data-page="run" type="button">Run pipeline</button>
+      <button class="tab-btn" data-page="evidence" type="button">TopK to rerank evidence</button>
       <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
       <button class="tab-btn" data-page="nvidia" type="button">NVIDIA RAG</button>
-      <button class="tab-btn" data-page="upload" type="button">Upload dataset</button>
+      <button class="tab-btn" data-page="repository" type="button">Repository</button>
+      <button class="tab-btn" data-page="upload" type="button">Documents</button>
       <button class="tab-btn" data-page="ops" type="button">Operations</button>
     </nav>
 
     <section class="metrics-grid" aria-label="Live KPI metrics">
-      <div class="metric-card"><span>Documents extracted</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></div>
-      <div class="metric-card"><span>DB ingestion combos</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></div>
+      <div class="metric-card"><span>Documents ready</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></div>
+      <div class="metric-card"><span>Pipeline combinations</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></div>
       <div class="metric-card"><span>Retrieval checks</span><strong id="retrievalStatus">—</strong><small id="retrievalNote">retrieval and reranked artifacts</small></div>
       <div class="metric-card"><span>Best R@5</span><strong id="bestR5Status">—</strong><small id="bestConfigNote">ground-truth winner</small></div>
-      <div class="metric-card"><span>Best latency</span><strong id="bestLatencyStatus">—</strong><small id="bestLatencyNote">fastest evaluated config</small></div>
-      <div class="metric-card"><span>Embeddings</span><strong id="embeddingStatus">—</strong><small>from successful ingestion rows</small></div>
-      <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate</small></div>
+      <div class="metric-card"><span>Avg latency/query</span><strong id="bestLatencyStatus">—</strong><small id="bestLatencyNote">fastest evaluated config</small></div>
+      <div class="metric-card"><span>Embeddings</span><strong id="embeddingStatus">—</strong><small>configured component options</small></div>
+      <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate, FAISS planned</small></div>
     </section>
 
     <section class="panel glossary-panel">
@@ -80,7 +81,7 @@
       <section class="grid cockpit-grid">
         <article class="panel coverage-panel">
           <div class="section-head">
-            <div><h2>Benchmark coverage</h2><p>Successful ingestion coverage by chunker, embedding model, and vector database.</p></div>
+            <div><h2>Component coverage</h2><p>Successful ingestion coverage by component: chunker, embedding model, and vector database.</p></div>
             <span class="mini-stat" id="coverageHint">—</span>
           </div>
           <div class="table-wrap compact"><table id="coverageTable"></table></div>
@@ -98,7 +99,7 @@
     <section class="page" data-page-panel="quality">
       <section id="qualitySection" class="panel quality-panel hidden">
         <div class="section-head">
-          <div><h2>Ground-truth quality metrics</h2><p>Decision table for complete pipeline combinations: chunker, embedding, vector DB, and reranker. Avg sec/query is the average latency for a single query within that evaluated configuration, averaged over the row's query count.</p></div>
+          <div><h2>Ground-truth metrics</h2><p>Metric table for complete pipeline combinations. Components are chunker, embedding, vector DB, and reranker. Metrics are Recall@K, MRR, nDCG, score, cost, and average latency per query.</p></div>
           <span class="mini-stat" id="qualityHint">—</span>
         </div>
         <div class="filter-row quality-filters">
@@ -116,7 +117,7 @@
     <section class="page" data-page-panel="compare">
       <section class="panel">
         <div class="section-head">
-          <div><h2>Top 10 pipeline visualization</h2><p>Graphical comparison of the best complete pipelines by score, Recall@5, MRR, and latency. Built only from real evaluation rows.</p></div>
+          <div><h2>Top 10 pipeline visualization</h2><p>Graphical comparison of the best complete pipelines by accuracy score, Recall@5, MRR, and average query latency. Cost appears when commercial runs are configured.</p></div>
           <span class="mini-stat" id="top10Hint">Waiting for evaluation</span>
         </div>
         <div class="viz-grid">
@@ -126,7 +127,7 @@
       </section>
       <section class="panel">
         <div class="section-head">
-          <div><h2>Complete pipeline comparison</h2><p>Visual comparison of the best evaluated pipelines by quality and latency. Built only from real ground-truth summary rows.</p></div>
+          <div><h2>Accuracy, cost, latency comparison</h2><p>Visual comparison of evaluated pipelines across quality, latency, and commercial cost readiness. Built only from real ground-truth summary rows.</p></div>
           <span class="mini-stat" id="comparisonHint">Waiting for evaluation</span>
         </div>
         <div id="comparisonGrid" class="comparison-grid"></div>
@@ -137,7 +138,7 @@
           <div id="rerankerLiftChart" class="bar-list"></div>
         </article>
         <article class="panel">
-          <div class="section-head"><div><h2>Best by stage</h2><p>Average performance by chunker, embedding, DB, and reranker.</p></div></div>
+          <div class="section-head"><div><h2>Best by component</h2><p>Average performance grouped by component: chunker, embedding, vector DB, and reranker.</p></div></div>
           <div id="stageComparisonChart" class="bar-list"></div>
         </article>
       </section>
@@ -146,7 +147,7 @@
     <section class="page" data-page-panel="run">
       <section class="panel run-panel">
         <div class="section-head">
-          <div><h2>Run selected pipeline</h2><p>One run does the useful work: check requirements, ingest vectors, retrieve ground-truth queries, rerank, evaluate, then compare Qwen against no reranker. Output streams live while the run is active.</p></div>
+          <div><h2>Run selected pipeline</h2><p>One selected run checks requirements, ingests vectors, retrieves ground-truth queries, reranks, evaluates, and refreshes evidence. Use this instead of separate stage buttons for demos.</p></div>
           <span id="runStatus" class="mini-stat">Idle</span>
         </div>
         <div class="run-grid">
@@ -155,9 +156,9 @@
           <label>Vector DB<select id="runStore"></select></label>
           <label>Reranker<select id="runRerankerMain"><option value="all">All OSS rerankers</option><option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="none">No reranker baseline only</option></select></label>
           <label>Ground truth file<input id="runGroundtruth" value="data/groundtruth/groundtruth_500.csv" /></label>
+          <label>Top K<input id="runTopK" value="10" /><small>initial vector results retrieved per query</small></label>
           <label>Chunk limit<input id="runLimit" value="0" /><small>0 means all chunks</small></label>
           <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
-          <label>Top K<input id="runTopK" value="10" /></label>
           <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
         </div>
         <div class="run-actions primary-run-actions">
@@ -168,16 +169,16 @@
         <div class="table-wrap"><table id="runResultTable"></table></div>
         <details class="run-log" open><summary>Live execution output</summary><pre id="runOutput" class="run-output"></pre></details>
         <details class="advanced-run-actions">
-          <summary>Advanced single-stage actions</summary>
-          <p>Use these only for debugging a broken stage. The normal path is the complete pipeline button above.</p>
+          <summary>Developer stage actions</summary>
+          <p>Collapsed by default for Karthik demos. Use only when debugging one broken stage.</p>
           <div class="run-actions">
-            <button id="runParseMineruBtn" type="button">Parse PDFs with MinerU</button>
-            <button id="runIngestBtn" type="button">Run selected ingestion only</button>
-            <button id="runSmokeBtn" type="button">Run selected query evidence only</button>
-            <button id="runFullGtBtn" type="button">Run GT retrieval only</button>
-            <button id="runRerankerBtn" type="button">Run reranker only</button>
-            <button id="runRerankedEvalBtn" type="button">Evaluate reranked artifacts only</button>
-            <button id="runEvalBtn" type="button">Evaluate baseline artifacts only</button>
+            <button id="runParseMineruBtn" type="button">Parse PDFs, experimental</button>
+            <button id="runIngestBtn" type="button">Ingest selected components only</button>
+            <button id="runSmokeBtn" type="button">Test selected query evidence only</button>
+            <button id="runFullGtBtn" type="button">Run full GT retrieval only</button>
+            <button id="runRerankerBtn" type="button">Run reranker stage only</button>
+            <button id="runRerankedEvalBtn" type="button">Evaluate reranked results only</button>
+            <button id="runEvalBtn" type="button">Evaluate ground-truth baseline only</button>
             <button id="runHallucinationBtn" type="button">Evaluate grounding risk</button>
             <button id="runHallucinationLlmBtn" type="button">LLM grounding audit</button>
           </div>
@@ -207,7 +208,7 @@ Passenger wants return refund due to illness</textarea></label>
     <section class="page" data-page-panel="evidence">
       <section class="panel">
         <div class="section-head">
-          <div><h2>Retrieval evidence</h2><p>Query-level evidence across full pipeline choices. Filter to one combination for demos.</p></div>
+          <div><h2>TopK to rerank evidence</h2><p>Query-level evidence showing initial top K retrieval, reranker stage, and final top 3 evidence. Filter to one combination for demos.</p></div>
           <div class="filter-row">
             <select id="retrievalChunkerFilter"><option value="all">All chunkers</option></select>
             <select id="retrievalEmbeddingFilter"><option value="all">All embeddings</option></select>
@@ -303,16 +304,27 @@ Passenger wants return refund due to illness</textarea></label>
       </section>
     </section>
 
+    <section class="page" data-page-panel="repository">
+      <section class="panel">
+        <div class="section-head">
+          <div><h2>Document repository</h2><p>Current PDFs and processing readiness. This answers which documents are present, parsed, chunked, and ready for ingestion.</p></div>
+          <span class="mini-stat" id="documentRepositoryHint">—</span>
+        </div>
+        <div id="documentRepositoryCards" class="run-result-cards"></div>
+        <div class="table-wrap"><table id="documentRepositoryTable"></table></div>
+      </section>
+    </section>
+
     <section class="page" data-page-panel="upload">
       <section class="panel upload-panel">
         <div class="section-head">
-          <div><h2>Upload a new dataset</h2><p>Upload PDFs or a ZIP of PDFs/manuals. The server stores them under data/uploads for ingestion preparation and benchmark setup.</p></div>
+          <div><h2>Document repository and upload</h2><p>Review PDFs in the repository, upload new manuals, and prepare them for parsing, chunking, and ingestion.</p></div>
           <span id="uploadStatus" class="mini-stat">Ready</span>
         </div>
         <form id="uploadForm" class="upload-form">
           <label>Dataset file<input id="datasetFile" name="file" type="file" accept=".pdf,.zip,.csv,.xlsx" /></label>
           <label>Dataset label<input id="datasetLabel" name="label" placeholder="travel-refunds-june" /></label>
-          <button type="submit">Upload dataset</button>
+          <button type="submit">Documents</button>
         </form>
         <div class="upload-guidance">
           <h3>What happens after upload</h3>
@@ -341,7 +353,7 @@ Passenger wants return refund due to illness</textarea></label>
           </article>
         </section>
         <section class="panel artifact-panel">
-          <div class="section-head"><div><h2>PDF extraction audit</h2><p>MinerU/PyPDF2 parser status, image/table/formula counts, and the exact PDFs that need OCR review.</p></div><span class="mini-stat" id="pdfAuditHint">Run parser audit</span></div>
+          <div class="section-head"><div><h2>Document processing audit</h2><p>Parser status, image/table/formula counts, and document-level readiness. Review issues are kept here, not in the executive KPI row.</p></div><span class="mini-stat" id="pdfAuditHint">Run parser audit</span></div>
           <div class="table-wrap"><table id="pdfAuditTable"></table></div>
         </section>
         <section class="panel artifact-panel">
