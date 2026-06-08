@@ -14,3 +14,14 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Generated benchmark/runtime artifacts
+data/db_ingestion_runs/
+data/embedding_cache/
+data/retrieval_smoke/
+data/reranker_smoke/
+data/evaluation/
+data/evaluation_reranked/
+data/reranker_analysis/
+data/dashboard_jobs/
+data/pipeline_archives/

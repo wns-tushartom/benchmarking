@@ -207,6 +207,7 @@ def main() -> int:
     parser.add_argument("--stores", nargs="*", default=["Qdrant", "PGVector", "Weaviate"])
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-combos", type=int, default=18)
+    parser.add_argument("--query-limit", type=int, default=0, help="0 = all queries from queries file")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -216,6 +217,8 @@ def main() -> int:
     rows = [r for r in latest_ok_rows() if r.get("sheet") in args.sheets and r.get("embedding") in args.embeddings and r.get("store") in args.stores]
     rows = rows[: args.max_combos]
     queries = load_queries_file(Path(args.queries_file)) if args.queries_file else (args.queries or DEFAULT_QUERIES)
+    if args.query_limit:
+        queries = queries[: args.query_limit]
     all_results = []
     errors = []
     for row in rows:

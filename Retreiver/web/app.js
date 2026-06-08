@@ -7,8 +7,8 @@ const num = (v) => Number.parseFloat(v || 0) || 0;
 const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
 const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
 
-async function api(path) {
-  const res = await fetch(path, {cache: 'no-store'});
+async function api(path, options = {}) {
+  const res = await fetch(path, {cache: 'no-store', ...options});
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -30,11 +30,11 @@ function fillSelect(id, values, label) {
   el.value = values.includes(cur) ? cur : 'all';
 }
 
-function fillRunSelect(id, values) {
+function fillRunSelect(id, values, allLabel = 'All') {
   const el = $(id); if (!el) return;
-  const cur = el.value || (values[0] || 'all');
-  el.innerHTML = values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
-  el.value = values.includes(cur) ? cur : (values[0] || 'all');
+  const cur = el.value || 'all';
+  el.innerHTML = `<option value="all">${esc(allLabel)}</option>` + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  el.value = cur === 'all' || values.includes(cur) ? cur : 'all';
 }
 
 function latestRows(rows) {
@@ -362,6 +362,42 @@ function renderRunResult(kind, payload) {
   $('runOutput').textContent = output.slice(0, 8000);
 }
 
+function renderQwenAnalysis(analysis) {
+  const hint = $('qwenAnalysisHint');
+  const cards = $('qwenAnalysisCards');
+  const tbl = $('qwenAnalysisTable');
+  if (!hint || !cards || !tbl) return;
+  const report = analysis?.report || {};
+  const summary = analysis?.summary || [];
+  const details = analysis?.details || [];
+  const totalPaired = Number(report.paired_rows || 0);
+  const totalWorse = details.filter(r => r.verdict === 'worse').length;
+  const totalImproved = details.filter(r => r.verdict === 'improved').length;
+  const worst = summary[0] || null;
+  hint.textContent = totalPaired ? `${totalPaired} paired rows` : 'Waiting for paired run';
+  if (!totalPaired) {
+    const causes = report.likely_causes || ['Run the complete pipeline with Qwen selected to create paired baseline and reranked artifacts.'];
+    cards.innerHTML = `<div class="empty-state">${causes.map(esc).join('<br>')}</div>`;
+  } else {
+    cards.innerHTML = `<article class="run-result-card ${totalWorse ? 'warn' : 'ok'}"><span>Qwen demotions</span><strong>${totalWorse}</strong><small>Relevant hit moved lower than baseline</small></article>
+      <article class="run-result-card ok"><span>Qwen improvements</span><strong>${totalImproved}</strong><small>Relevant hit moved higher</small></article>
+      <article class="run-result-card"><span>Worst pipeline</span><strong>${worst ? esc(`${worst.sheet} · ${worst.embedding} · ${worst.store}`) : '—'}</strong><small>Avg ΔMRR ${worst ? fmt(worst.avg_delta_mrr,3) : '—'}</small></article>`;
+  }
+  const rows = details.filter(r => r.verdict === 'worse').slice(0, 40);
+  table(tbl, rows.length ? rows : details.slice(0, 40), [
+    {key:'verdict', label:'Verdict', render:r=>`<span class="badge ${r.verdict === 'worse' ? 'warn' : 'ok'}">${esc(r.verdict || '')}</span>`},
+    {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 90))},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'DB'},
+    {key:'base_rank', label:'Base rank'},
+    {key:'reranked_rank', label:'Qwen rank'},
+    {key:'delta_mrr', label:'ΔMRR'},
+    {key:'expected_pdf', label:'Expected PDF', render:r=>esc((r.expected_pdf || '').slice(0, 60))},
+    {key:'reranked_top_pdf', label:'Qwen top PDF', render:r=>esc((r.reranked_top_pdf || '').slice(0, 60))},
+  ]);
+}
+
 function pipelineLabel(r) {
   return `${r.sheet || '—'} · ${r.embedding || '—'} · ${r.store || '—'} · ${r.reranker || 'none'}`;
 }
@@ -659,6 +695,7 @@ function renderOperational() {
   renderPipelineComparison(op.evaluation);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
+  renderQwenAnalysis(op.reranker_analysis || {});
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -705,12 +742,14 @@ async function refresh() {
 
 async function loadOptions() {
   benchmarkOptions = await api('/api/options');
-  fillRunSelect('runSheet', benchmarkOptions.chunkers || []);
-  fillRunSelect('runEmbedding', benchmarkOptions.embeddings || []);
-  fillRunSelect('runStore', benchmarkOptions.vector_stores || []);
+  fillRunSelect('runSheet', benchmarkOptions.chunkers || [], 'All chunkers');
+  fillRunSelect('runEmbedding', (benchmarkOptions.embeddings || []).filter(e => ['gte_multilingual_base','jina_v3'].includes(e)), 'All live embeddings');
+  fillRunSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
   const mainReranker = $('runRerankerMain');
   if (mainReranker) {
-    mainReranker.innerHTML = '<option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="all">Both OSS rerankers</option>';
+    const cur = mainReranker.value || 'all';
+    mainReranker.innerHTML = '<option value="all">All OSS rerankers</option><option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="none">No reranker baseline only</option>';
+    mainReranker.value = ['all','qwen3_4b_rerank','bge-reranker-base','none'].includes(cur) ? cur : 'all';
   }
 }
 
@@ -719,9 +758,15 @@ function selectedParams() {
   if ($('runSheet')?.value) p.append('sheet', $('runSheet').value);
   if ($('runEmbedding')?.value) p.append('embedding', $('runEmbedding').value);
   if ($('runStore')?.value) p.append('store', $('runStore').value);
+  const reranker = $('runRerankerMain')?.value;
+  if (reranker) p.append('reranker', reranker);
   const limit = $('runLimit')?.value || '0';
   p.set('limit', limit);
+  p.set('chunk_limit', limit);
+  p.set('query_limit', $('runQueryLimit')?.value || '0');
   p.set('top_k', $('runTopK')?.value || '10');
+  p.set('groundtruth', $('runGroundtruth')?.value || 'data/groundtruth/groundtruth_500.csv');
+  if ($('runFresh')?.checked) p.set('fresh_run', '1');
   p.set('max_runs', '1');
   return p;
 }
@@ -762,6 +807,78 @@ async function runNvidiaAction(kind) {
   await refresh();
 }
 
+function renderPreflight(payload) {
+  const ok = !!payload.ok;
+  const missing = payload.missing || [];
+  const warnings = payload.warnings || [];
+  const checks = payload.service_checks || [];
+  $('runStatus').textContent = ok ? 'Ready' : 'Needs inputs';
+  $('runResultCards').innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Requirements</span><strong>${ok ? 'Ready' : 'Blocked'}</strong><small>${missing.length ? `${missing.length} item(s) needed` : 'All required inputs found'}</small></article>
+    <article class="run-result-card"><span>Pipeline size</span><strong>${esc(payload.combo_count || 0)}</strong><small>chunker · embedding · DB combinations</small></article>
+    <article class="run-result-card"><span>Ground truth</span><strong>${esc(payload.groundtruth || '—')}</strong><small>${payload.query_limit ? `${payload.query_limit} query limit` : 'all queries'}</small></article>`;
+  const rows = [
+    ...missing.map(x => ({type:'Needed', item:x})),
+    ...warnings.map(x => ({type:'Warning', item:x})),
+    ...checks.map(x => ({type:x.ok ? 'Service ok' : 'Service check', item:`${x.name}: ${x.note}`})),
+  ];
+  table($('runResultTable'), rows, [
+    {key:'type', label:'Type'},
+    {key:'item', label:'Details', render:r=>esc(r.item).slice(0, 220)},
+  ]);
+  $('runOutput').textContent = JSON.stringify(payload, null, 2);
+}
+
+async function runPreflight() {
+  const p = selectedParams();
+  $('runStatus').textContent = 'Checking';
+  const payload = await api(`/api/run/preflight-complete-pipeline?${p.toString()}`, {method:'POST'});
+  renderPreflight(payload);
+  return payload;
+}
+
+function parseLiveOutputRows(output) {
+  const lines = (output || '').split('\n').filter(Boolean);
+  const stageRows = lines.filter(l => l.includes('START ') || l.includes('DONE ') || l.includes('FAILED') || l.includes('groundtruth_rows=') || l.includes('OK ')).slice(-80);
+  return stageRows.map((line, i) => ({i:i+1, line}));
+}
+
+async function pollRunJob(jobId) {
+  const payload = await api(`/api/run/status?job_id=${encodeURIComponent(jobId)}`);
+  const output = payload.output || '';
+  const running = !!payload.running;
+  $('runStatus').textContent = running ? 'Running' : (payload.exit_code === 0 ? 'Done' : 'Check output');
+  $('runOutput').textContent = output;
+  $('runResultCards').innerHTML = `<article class="run-result-card ${payload.exit_code === 0 ? 'ok' : running ? '' : 'warn'}"><span>Status</span><strong>${running ? 'Running' : payload.exit_code === 0 ? 'Passed' : 'Needs attention'}</strong><small>job ${esc(jobId)}</small></article>
+    <article class="run-result-card"><span>Live log</span><strong>${output.split('\n').filter(Boolean).length}</strong><small>${esc(payload.log_path || '')}</small></article>
+    <article class="run-result-card"><span>Result view</span><strong>Quality + evidence</strong><small>Tables refresh when stages finish</small></article>`;
+  table($('runResultTable'), parseLiveOutputRows(output), [
+    {key:'i', label:'#'},
+    {key:'line', label:'Live stage/output', render:r=>esc(r.line).slice(0, 260)},
+  ]);
+  if (running) {
+    setTimeout(() => pollRunJob(jobId).catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }), 1500);
+  } else {
+    await refresh();
+  }
+}
+
+async function runCompletePipeline() {
+  const preflight = await runPreflight();
+  if (!preflight.ok) return;
+  if ((preflight.combo_count || 0) > 12) {
+    const ok = window.confirm(`This will run ${preflight.combo_count} pipeline combinations through ingestion, retrieval, reranking and evaluation. Continue?`);
+    if (!ok) {
+      $('runStatus').textContent = 'Cancelled';
+      return;
+    }
+  }
+  const p = selectedParams();
+  $('runStatus').textContent = 'Starting';
+  const payload = await api(`/api/run/complete-pipeline?${p.toString()}`, {method:'POST'});
+  $('runOutput').textContent = `Started job ${payload.job_id}\n${payload.output || ''}`;
+  await pollRunJob(payload.job_id);
+}
+
 async function runAction(kind) {
   const endpoints = {
     ingest: '/api/run/ingest-selected',
@@ -791,7 +908,7 @@ async function runAction(kind) {
     let selected = [];
     if (mainChoice === 'all') {
       selected = ['bge-reranker-base', 'qwen3_4b_rerank'];
-    } else if (mainChoice) {
+    } else if (mainChoice && mainChoice !== 'none') {
       selected = [mainChoice];
     } else {
       selected = [...($('runReranker')?.selectedOptions || [])].map(o=>o.value);
@@ -814,6 +931,8 @@ async function runAction(kind) {
 ['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], state.operational?.reranker_smokes || [])));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
+$('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runParseMineruBtn')?.addEventListener('click', () => runAction('parseMineru').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));

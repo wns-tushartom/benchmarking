@@ -12,7 +12,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
 import zipfile
+from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,8 @@ NVIDIA_RAG_DIR = ROOT / "data" / "nvidia_rag"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
+JOB_DIR = ROOT / "data" / "dashboard_jobs"
+JOBS: dict[str, dict[str, Any]] = {}
 
 
 def benchmark_options() -> dict:
@@ -253,6 +257,75 @@ def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
         cmd.append(flag)
         cmd.extend(vals)
 
+
+def read_reranker_analysis() -> dict:
+    path = ROOT / "data" / "reranker_analysis"
+    report_path = path / "qwen_vs_none_report.json"
+    report = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            report = {"error": str(exc)}
+    return {
+        "report": report,
+        "summary": read_csv(path / "reranker_lift_summary.csv") if path.exists() else [],
+        "details": read_csv(path / "reranker_lift_details.csv")[:250] if path.exists() else [],
+    }
+
+
+def complete_pipeline_cmd(qs: dict[str, list[str]], preflight: bool = False) -> list[str]:
+    cmd = [sys.executable, "scripts/run_complete_pipeline.py"]
+    if preflight:
+        cmd.append("--preflight-only")
+    add_multi(cmd, "--sheets", qs.get("sheet", []))
+    add_multi(cmd, "--embeddings", qs.get("embedding", []))
+    add_multi(cmd, "--stores", qs.get("store", []))
+    rerankers = qs.get("reranker", [])
+    if rerankers:
+        add_multi(cmd, "--rerankers", rerankers)
+    if qs.get("groundtruth", [""])[0]:
+        cmd += ["--groundtruth", qs.get("groundtruth", [""])[0]]
+    cmd += ["--top-k", qs.get("top_k", ["10"])[0] or "10"]
+    chunk_limit = qs.get("chunk_limit", qs.get("limit", ["0"]))[0] or "0"
+    query_limit = qs.get("query_limit", ["0"])[0] or "0"
+    cmd += ["--chunk-limit", chunk_limit, "--query-limit", query_limit]
+    if qs.get("fresh_run", ["0"])[0] == "1":
+        cmd.append("--fresh-run")
+    return cmd
+
+
+def launch_job(cmd: list[str]) -> dict[str, Any]:
+    JOB_DIR.mkdir(parents=True, exist_ok=True)
+    job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8]
+    log_path = JOB_DIR / f"{job_id}.log"
+    log_handle = log_path.open("w", encoding="utf-8", buffering=1)
+    proc = subprocess.Popen(cmd, cwd=ROOT, text=True, stdout=log_handle, stderr=subprocess.STDOUT)
+    log_handle.close()
+    job = {"job_id": job_id, "cmd": cmd, "log_path": str(log_path), "process": proc, "started_at": datetime.now().isoformat()}
+    JOBS[job_id] = job
+    return job_status(job_id)
+
+
+def job_status(job_id: str) -> dict[str, Any]:
+    job = JOBS.get(job_id)
+    if not job:
+        return {"error": "unknown job_id", "job_id": job_id}
+    proc = job["process"]
+    exit_code = proc.poll()
+    log_path = Path(job["log_path"])
+    output = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else ""
+    return {
+        "job_id": job_id,
+        "running": exit_code is None,
+        "exit_code": exit_code,
+        "cmd": job["cmd"],
+        "started_at": job["started_at"],
+        "output": output[-20000:],
+        "log_path": str(log_path.relative_to(ROOT)),
+    }
+
+
 def sort_summary(rows: list[dict]) -> list[dict]:
     def key(r: dict) -> tuple:
         try:
@@ -327,6 +400,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/run/status":
+            job_id = parse_qs(parsed.query).get("job_id", [""])[0]
+            self.send_json(job_status(job_id))
+            return
         if parsed.path == "/api/options":
             self.send_json(benchmark_options())
             return
@@ -359,6 +436,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/evaluation/groundtruth_eval_summary.csv",
                 "data/evaluation/groundtruth_eval_details.csv",
                 "data/evaluation/groundtruth_eval_report.json",
+                "data/reranker_analysis/reranker_lift_summary.csv",
+                "data/reranker_analysis/reranker_lift_details.csv",
+                "data/reranker_analysis/qwen_vs_none_report.json",
                 "WNS_VM_PROGRESS_20260528.md",
                 "JINA_TIMINGS_20260528.md",
                 "RERANKER_SMOKE_20260528.md",
@@ -389,6 +469,7 @@ class Handler(SimpleHTTPRequestHandler):
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
             nvidia_rag = read_nvidia_rag()
+            reranker_analysis = read_reranker_analysis()
             snapshot = read_snapshot()
             self.send_json({
                 "summary_count": len(summary),
@@ -412,6 +493,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "evaluation": evaluation,
                     "hallucination": hallucination,
                     "nvidia_rag": nvidia_rag,
+                    "reranker_analysis": reranker_analysis,
                     "vm_snapshot": snapshot,
                     "service_health": snapshot.get("health", []),
                     "known_pdf_count": pdf_audit.get("total") or 225,
@@ -467,6 +549,21 @@ class Handler(SimpleHTTPRequestHandler):
         limit = qs.get("limit", ["50"])[0]
         max_runs = qs.get("max_runs", ["0"])[0]
         try:
+            if parsed.path == "/api/run/preflight-complete-pipeline":
+                cmd = complete_pipeline_cmd(qs, preflight=True)
+                proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=120)
+                try:
+                    payload = json.loads(proc.stdout or "{}")
+                except Exception:
+                    payload = {"ok": False, "missing": ["Could not parse preflight output"], "output": proc.stdout + proc.stderr}
+                payload["exit_code"] = proc.returncode
+                payload["cmd"] = cmd
+                self.send_json(payload, 200 if proc.returncode in {0, 2} else 500)
+                return
+            if parsed.path == "/api/run/complete-pipeline":
+                cmd = complete_pipeline_cmd(qs, preflight=False)
+                self.send_json(launch_job(cmd))
+                return
             if parsed.path == "/api/run/matrix":
                 cmd = [sys.executable, "scripts/run_full_benchmark_matrix.py", "--limit", limit, "--max-runs", max_runs]
                 if qs.get("include_candidates", ["0"])[0] == "1":

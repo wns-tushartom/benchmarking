@@ -13,7 +13,11 @@ app = FastAPI(title="WNS VM Model Adapter Service")
 JINA_MODEL_NAME = os.getenv("JINA_EMBEDDING_MODEL", "jinaai/jina-embeddings-v3")
 GTE_MODEL_NAME = os.getenv("GTE_EMBEDDING_MODEL", "Alibaba-NLP/gte-multilingual-base")
 BGE_RERANK_MODEL = os.getenv("BGE_RERANKER_MODEL", "BAAI/bge-reranker-base")
-QWEN_RERANK_MODEL = os.getenv("QWEN_RERANK_MODEL", "Qwen/Qwen3-Reranker-4B")
+QWEN_RERANK_MODEL = os.getenv("QWEN_RERANK_MODEL", "tomaarsen/Qwen3-Reranker-4B-seq-cls")
+QWEN_RERANK_INSTRUCTION = os.getenv(
+    "QWEN_RERANK_INSTRUCTION",
+    "Given a WNS airline support query, retrieve relevant policy or process passages that answer the query.",
+)
 DEVICE = os.getenv("WNS_MODEL_DEVICE", os.getenv("EMBEDDING_DEVICE", "cuda"))
 
 
@@ -39,6 +43,32 @@ def _list(value: List[str] | str | None) -> List[str]:
     if isinstance(value, str):
         return [value]
     return [str(v) for v in value]
+
+
+def format_qwen_query(query: str) -> str:
+    """Format Qwen3 reranker input with its expected instruction fields."""
+    prefix = (
+        "<|im_start|>system\n"
+        "Judge whether the Document meets the requirements based on the Query and the Instruct provided. "
+        "Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
+        "<|im_start|>user\n"
+    )
+    return f"{prefix}<Instruct>: {QWEN_RERANK_INSTRUCTION}\n<Query>: {query}\n"
+
+
+def format_qwen_document(document: str) -> str:
+    suffix = "<|im_end|>\n<|im_start|>assistant\n\n\n"
+    return f"<Document>: {document}{suffix}"
+
+
+def score_float(value) -> float:
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return float(value[0])
+        except Exception:
+            return 0.0
 
 
 @lru_cache(maxsize=8)
@@ -73,6 +103,12 @@ def health():
     return {
         "ok": True,
         "device": DEVICE,
+        "models": {
+            "jina": JINA_MODEL_NAME,
+            "gte": GTE_MODEL_NAME,
+            "bge_reranker": BGE_RERANK_MODEL,
+            "qwen_reranker": QWEN_RERANK_MODEL,
+        },
         "endpoints": ["/embed/jina", "/embed/gte", "/rerank/bge", "/rerank/qwen"],
     }
 
@@ -107,12 +143,17 @@ def rerank(key: str, req: RerankRequest):
     if not docs:
         raise ValueError("rerank request needs documents, texts, or passages")
     model = cross_encoder_model(key)
-    pairs = [(req.query, doc) for doc in docs]
     if key == "qwen":
-        raw_scores = [model.predict([pair])[0] for pair in pairs]
-    else:
+        if os.getenv("QWEN_RERANK_FORMATTED", "1") == "0":
+            pairs = [(req.query, doc) for doc in docs]
+        else:
+            formatted_query = format_qwen_query(req.query)
+            pairs = [(formatted_query, format_qwen_document(doc)) for doc in docs]
         raw_scores = model.predict(pairs)
-    scores = [float(s) for s in raw_scores]
+    else:
+        pairs = [(req.query, doc) for doc in docs]
+        raw_scores = model.predict(pairs)
+    scores = [score_float(s) for s in raw_scores]
     ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
     if req.top_k:
         ranked = ranked[: req.top_k]

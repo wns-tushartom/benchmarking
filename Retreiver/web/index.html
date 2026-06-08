@@ -146,49 +146,61 @@
     <section class="page" data-page-panel="run">
       <section class="panel run-panel">
         <div class="section-head">
-          <div><h2>Run meaningful tests</h2><p>Use this for live demos: selected retrieval, reranker pass, and ground-truth evaluation. Keep the run narrow unless you intentionally want a long batch.</p></div>
+          <div><h2>Run selected pipeline</h2><p>One run does the useful work: check requirements, ingest vectors, retrieve ground-truth queries, rerank, evaluate, then compare Qwen against no reranker. Output streams live while the run is active.</p></div>
           <span id="runStatus" class="mini-stat">Idle</span>
         </div>
         <div class="run-grid">
           <label>Chunker<select id="runSheet"></select></label>
           <label>Embedding<select id="runEmbedding"></select></label>
           <label>Vector DB<select id="runStore"></select></label>
-          <label>Reranker<select id="runRerankerMain"><option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="all">Both OSS rerankers</option></select></label>
-          <label>Chunk limit<input id="runLimit" value="0" /></label>
+          <label>Reranker<select id="runRerankerMain"><option value="all">All OSS rerankers</option><option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="none">No reranker baseline only</option></select></label>
+          <label>Ground truth file<input id="runGroundtruth" value="data/groundtruth/groundtruth_500.csv" /></label>
+          <label>Chunk limit<input id="runLimit" value="0" /><small>0 means all chunks</small></label>
+          <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
           <label>Top K<input id="runTopK" value="10" /></label>
-          <button id="openTestOptionsBtn" type="button">Test options</button>
+          <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
         </div>
-        <div class="run-actions">
-          <button id="runParseMineruBtn" type="button">Parse PDFs with MinerU</button>
-          <button id="runIngestBtn" type="button">Run selected ingestion</button>
-          <button id="runSmokeBtn" type="button">Test selected queries</button>
-          <button id="runFullGtBtn" type="button">Run full GT retrieval</button>
-          <button id="runRerankerBtn" type="button">Run reranker test</button>
-          <button id="runRerankedEvalBtn" type="button">Evaluate reranked results</button>
-          <button id="runEvalBtn" type="button">Evaluate ground truth</button>
-          <button id="runHallucinationBtn" type="button">Evaluate grounding risk</button>
-          <button id="runHallucinationLlmBtn" type="button">LLM grounding audit</button>
+        <div class="run-actions primary-run-actions">
+          <button id="runPreflightBtn" type="button">Check what is needed</button>
+          <button id="runCompletePipelineBtn" type="button">Run pipeline and evaluate</button>
         </div>
         <div id="runResultCards" class="run-result-cards"></div>
         <div class="table-wrap"><table id="runResultTable"></table></div>
-        <pre id="runOutput" class="run-output"></pre>
+        <details class="run-log" open><summary>Live execution output</summary><pre id="runOutput" class="run-output"></pre></details>
+        <details class="advanced-run-actions">
+          <summary>Advanced single-stage actions</summary>
+          <p>Use these only for debugging a broken stage. The normal path is the complete pipeline button above.</p>
+          <div class="run-actions">
+            <button id="runParseMineruBtn" type="button">Parse PDFs with MinerU</button>
+            <button id="runIngestBtn" type="button">Run selected ingestion only</button>
+            <button id="runSmokeBtn" type="button">Run selected query evidence only</button>
+            <button id="runFullGtBtn" type="button">Run GT retrieval only</button>
+            <button id="runRerankerBtn" type="button">Run reranker only</button>
+            <button id="runRerankedEvalBtn" type="button">Evaluate reranked artifacts only</button>
+            <button id="runEvalBtn" type="button">Evaluate baseline artifacts only</button>
+            <button id="runHallucinationBtn" type="button">Evaluate grounding risk</button>
+            <button id="runHallucinationLlmBtn" type="button">LLM grounding audit</button>
+          </div>
+        </details>
         <dialog id="testOptionsDialog" class="test-options-dialog">
           <form method="dialog" class="dialog-card">
-            <div class="section-head"><div><h2>Pipeline test options</h2><p>Use a few business-relevant queries for live proof.</p></div><button value="cancel" type="submit">Close</button></div>
+            <div class="section-head"><div><h2>Single-query debug options</h2><p>Only used by the advanced one-stage evidence action.</p></div><button value="cancel" type="submit">Close</button></div>
             <div class="dialog-grid">
               <label>Custom test queries<textarea id="runQueries">What to do when flights have been cancelled
 How to add infant manually
 Passenger wants return refund due to illness</textarea></label>
-              <label>Rerankers
-                <select id="runReranker" multiple>
-                  <option value="bge-reranker-base" selected>bge-reranker-base</option>
-                  <option value="qwen3_4b_rerank" selected>qwen3_4b_rerank</option>
-                </select>
-              </label>
-              <label>Reranker artifact limit<input id="rerankerLimit" value="100" /></label>
+              <label>Reranker artifact limit<input id="rerankerLimit" value="0" /><small>0 means all artifacts</small></label>
             </div>
           </form>
         </dialog>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <div><h2>Qwen vs no-reranker diagnosis</h2><p>After a complete run, this shows exactly where Qwen improved, tied, or demoted the relevant answer compared with plain retrieval.</p></div>
+          <span id="qwenAnalysisHint" class="mini-stat">Waiting for paired run</span>
+        </div>
+        <div id="qwenAnalysisCards" class="run-result-cards"></div>
+        <div class="table-wrap"><table id="qwenAnalysisTable"></table></div>
       </section>
     </section>
 
