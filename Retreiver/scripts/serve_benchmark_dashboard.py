@@ -318,6 +318,9 @@ def read_document_repository() -> dict[str, Any]:
         chunks = count_pdf_chunks(f.name)
         status = audit.get("status") or ("chunked" if chunks else "present")
         needs_review = str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed"}
+        if (audit.get("parser_method") or "") == "PyPDF2_fallback":
+            status = "text_only_review"
+            needs_review = True
         rows.append({
             "pdf_name": f.name,
             "status": "review" if needs_review else status,

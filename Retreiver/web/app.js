@@ -62,25 +62,50 @@ function renderServices(health) {
   }).join('');
 }
 
+function matrixOptions() {
+  const opt = benchmarkOptions || state.options || {};
+  return {
+    chunkers: opt.chunkers || [],
+    embeddings: opt.embeddings || [],
+    stores: opt.vector_stores || [],
+    rerankers: opt.rerankers || [],
+  };
+}
+
+function setRunSelection(sheet, embedding, store, reranker = 'all') {
+  showPage('run');
+  if ($('runSheet')) $('runSheet').value = sheet || 'all';
+  if ($('runEmbedding')) $('runEmbedding').value = embedding || 'all';
+  if ($('runStore')) $('runStore').value = store || 'all';
+  if ($('runRerankerMain')) $('runRerankerMain').value = reranker || 'all';
+  $('runStatus').textContent = 'Selected missing benchmark option';
+  $('runOutput').textContent = `Selected: chunker=${sheet || 'all'}, embedding=${embedding || 'all'}, vector DB=${store || 'all'}, reranker=${reranker || 'all'}\nClick Preflight first, then Run selected pipeline.`;
+}
+
 function renderCoverage(rows) {
   const latest = latestRows(rows);
-  const stores = uniq(latest, 'store');
-  $('coverageHint').textContent = `${latest.length} successful combos`;
-  const grouped = new Map();
-  latest.forEach(r => {
-    const key = `${r.sheet}|${r.embedding}`;
-    if (!grouped.has(key)) grouped.set(key, { sheet: r.sheet, embedding: r.embedding, stores: {} });
-    grouped.get(key).stores[r.store] = r;
-  });
-  const coverageRows = [...grouped.values()].sort((a,b) => `${a.sheet}${a.embedding}`.localeCompare(`${b.sheet}${b.embedding}`));
+  const opts = matrixOptions();
+  const stores = opts.stores.length ? opts.stores : uniq(latest, 'store');
+  const chunkers = opts.chunkers.length ? opts.chunkers : uniq(latest, 'sheet');
+  const embeddings = opts.embeddings.length ? opts.embeddings : uniq(latest, 'embedding');
+  const expected = chunkers.length * embeddings.length * stores.length;
+  $('coverageHint').textContent = `${latest.length}/${expected || latest.length} chunker × embedding × vector DB combos run`;
+  const latestMap = new Map(latest.map(r => [`${r.sheet}|${r.embedding}|${r.store}`, r]));
+  const coverageRows = [];
+  chunkers.forEach(sheet => embeddings.forEach(embedding => {
+    const storeMap = {};
+    stores.forEach(store => { storeMap[store] = latestMap.get(`${sheet}|${embedding}|${store}`); });
+    coverageRows.push({ sheet, embedding, stores: storeMap });
+  }));
   const cols = [
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
     ...stores.map(st => ({key:st, label:st, render:r => {
       const v = r.stores[st];
-      return v ? `<span class="coverage-ok">ok</span> <code>${fmt(v.total_store_seconds, 2)}s</code>` : '<span class="coverage-miss">not run</span>';
+      if (v) return `<span class="coverage-ok">ok</span> <code>${fmt(v.total_store_seconds, 2)}s</code>`;
+      return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}">Run</button>`;
     }})),
-    {key:'total', label:'DBs ready', render:r => `${Object.keys(r.stores).length}/${stores.length}`}
+    {key:'total', label:'DBs ready', render:r => `${Object.values(r.stores).filter(Boolean).length}/${stores.length}`}
   ];
   table($('coverageTable'), coverageRows, cols);
 }
@@ -141,9 +166,10 @@ function filteredRetrieval(rows) {
 
 function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
   const evidence = buildEvidenceRows(retrievalSmokes, rerankerSmokes);
-  fillSelect('retrievalChunkerFilter', uniq(evidence, 'sheet'), 'All chunkers');
-  fillSelect('retrievalEmbeddingFilter', uniq(evidence, 'embedding'), 'All embeddings');
-  fillSelect('retrievalDbFilter', uniq(evidence, 'store'), 'All DBs');
+  const opts = matrixOptions();
+  fillSelect('retrievalChunkerFilter', opts.chunkers.length ? opts.chunkers : uniq(evidence, 'sheet'), 'All chunkers');
+  fillSelect('retrievalEmbeddingFilter', opts.embeddings.length ? opts.embeddings : uniq(evidence, 'embedding'), 'All embeddings');
+  fillSelect('retrievalDbFilter', opts.stores.length ? opts.stores : uniq(evidence, 'store'), 'All DBs');
   fillSelect('retrievalRerankerFilter', uniq(evidence, 'reranker'), 'All rerankers');
   const rows = filteredRetrieval(evidence).slice(0, 80);
   table($('retrievalTable'), rows, [
@@ -673,7 +699,7 @@ function renderDocumentRepository(repo) {
     {key:'chunked_rows', label:'Chunk rows'},
     {key:'pages', label:'Pages'},
     {key:'size_mb', label:'Size MB'},
-    {key:'parser_method', label:'Parser'},
+    {key:'parser_method', label:'Parser', render:r=> (r.parser_method === 'PyPDF2_fallback' ? '<span class="badge warn">text-only fallback</span>' : esc(r.parser_method || '—'))},
     {key:'repository_path', label:'Path', render:r=>`<code>${esc(r.repository_path || '')}</code>`},
     {key:'note', label:'Note'},
   ]);
@@ -688,8 +714,9 @@ function renderOperational() {
   const rerank = op.reranker_smokes || [];
   const health = op.service_health || [];
   const snapshot = op.vm_snapshot || {};
-  const embeddings = uniq(latest, 'embedding');
-  const stores = uniq(latest, 'store');
+  const optsForStatus = matrixOptions();
+  const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
+  const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
   const evaluation = op.evaluation || {};
   const evalRows = [...(evaluation.summary || []), ...(evaluation.reranked?.summary || [])].map(r => ({...r, reranker: r.reranker || 'none'})).sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
   const best = evalRows[0] || null;
@@ -703,8 +730,8 @@ function renderOperational() {
   $('pdfNote').textContent = 'chunked or ready in repository';
   $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
-  $('retrievalStatus').textContent = String(op.retrieval_smoke_total || retrieval.length || 0);
-  $('retrievalNote').textContent = `${retrieval.length} retrieval · ${rerank.length} reranked artifacts`;
+  $('retrievalStatus').textContent = String(retrieval.length + rerank.length);
+  $('retrievalNote').textContent = `${retrieval.length + rerank.length} loaded rows from ${op.retrieval_smoke_total || 0} retrieval + ${op.reranker_smoke_total || 0} reranker artifact files. Raw totals are generated evidence files, not query count.`;
   $('bestR5Status').textContent = best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—';
   $('bestConfigNote').textContent = best ? pipelineLabel(best) : 'best accuracy score';
   $('bestLatencyStatus').textContent = fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—';
@@ -751,7 +778,7 @@ function renderOperational() {
   table($('pdfAuditTable'), (pdfAudit.rows || []).slice(0, 80), [
     {key:'pdf_name', label:'PDF', render:r=>esc((r.pdf_name || '').slice(0, 72))},
     {key:'status', label:'Status'},
-    {key:'parser_method', label:'Parser'},
+    {key:'parser_method', label:'Parser', render:r=> (r.parser_method === 'PyPDF2_fallback' ? '<span class="badge warn">text-only fallback</span>' : esc(r.parser_method || '—'))},
     {key:'total_pages', label:'Pages'},
     {key:'text_chars', label:'Text chars'},
     {key:'image_count', label:'Images'},
@@ -930,7 +957,7 @@ async function runAction(kind) {
   }
   if (kind === 'full') {
     p.set('top_k', $('runTopK')?.value || '10');
-    p.set('max_runs', '36');
+    p.set('max_runs', String(benchmarkOptions.matrix_count || 135));
   }
   if (kind === 'rerank') {
     p.set('top_k', $('runTopK')?.value || '10');
@@ -977,6 +1004,10 @@ $('runNvidiaHealthBtn')?.addEventListener('click', () => runNvidiaAction('health
 $('runNvidiaSmokeBtn')?.addEventListener('click', () => runNvidiaAction('smoke').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 $('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 $('runNvidiaBenchmarkBtn')?.addEventListener('click', () => runNvidiaAction('benchmark').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.mini-run-btn');
+  if (btn) setRunSelection(btn.dataset.sheet, btn.dataset.embedding, btn.dataset.store);
+});
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));

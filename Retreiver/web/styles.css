@@ -26,3 +26,5 @@ details.snippet summary{cursor:pointer;color:var(--soft);max-width:460px;line-he
 
 /* Karthik review polish */
 .table-wrap{scrollbar-color:rgba(125,211,252,.35) rgba(3,11,20,.28);scrollbar-width:thin}.table-wrap::-webkit-scrollbar{height:8px;width:8px}.table-wrap::-webkit-scrollbar-track{background:rgba(3,11,20,.28);border-radius:999px}.table-wrap::-webkit-scrollbar-thumb{background:rgba(125,211,252,.35);border-radius:999px}.evidence-stage-note{margin:8px 0 10px;color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}.evidence-hit.final-hit{border-color:rgba(167,243,208,.3);background:rgba(167,243,208,.055)}
+.mini-run-btn{border:1px solid rgba(125,211,252,.38);background:rgba(14,165,233,.10);color:#bae6fd;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:800;cursor:pointer}.mini-run-btn:hover{background:rgba(14,165,233,.18);border-color:rgba(125,211,252,.7)}
+.badge.warn{background:rgba(251,191,36,.13);border:1px solid rgba(251,191,36,.35);color:#fde68a;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
