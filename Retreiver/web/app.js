@@ -8,6 +8,53 @@ const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].
 const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
 const costLabel = (r) => /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 'commercial key/cost' : 'open-source/VM cost';
 
+function positivePageNumber(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw === '—') return '';
+  const match = raw.match(/\d+/);
+  if (!match) return '';
+  const page = Number.parseInt(match[0], 10);
+  return Number.isFinite(page) && page > 0 ? page : '';
+}
+
+function pageNumberFromHit(hit = {}) {
+  const metadata = hit.metadata || hit.meta || {};
+  const candidates = [
+    hit.page_number,
+    hit.page_num,
+    hit.page,
+    hit.pdf_page,
+    hit.page_start,
+    hit.start_page,
+    metadata.page_number,
+    metadata.page_num,
+    metadata.page,
+    metadata.pdf_page,
+  ];
+  for (const candidate of candidates) {
+    const page = positivePageNumber(candidate);
+    if (page) return page;
+  }
+  return '';
+}
+
+function pdfOpenUrl(name, page = '') {
+  const raw = String(name || '').trim();
+  if (!raw || raw === '—' || !raw.toLowerCase().endsWith('.pdf')) return '';
+  const clean = raw.split(/[\\/]/).pop();
+  const pageNumber = positivePageNumber(page);
+  return `/api/pdf?name=${encodeURIComponent(clean)}${pageNumber ? `#page=${pageNumber}` : ''}`;
+}
+
+function pdfLink(name, label = '', page = '') {
+  const pageNumber = positivePageNumber(page);
+  const url = pdfOpenUrl(name, pageNumber);
+  const text = label || name || '—';
+  const display = pageNumber ? `${text} · page ${pageNumber}` : text;
+  if (!url) return esc(display);
+  return `<a class="pdf-link" href="${url}" target="_blank" rel="noopener">${esc(display)}</a>`;
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {cache: 'no-store', ...options});
   if (!res.ok) throw new Error(await res.text());
@@ -118,6 +165,8 @@ function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
     const hits = rawHits.map((hit, i) => ({
       rank: hit.rank || i + 1,
       pdf_name: hit.pdf_name || hit.pdf || hit.source || '—',
+      page_number: pageNumberFromHit(hit),
+      source_type: hit.source_type || hit.type || hit.metadata?.source_type || '',
       score: hit.score ?? hit.relevance_score ?? hit.relevanceScore ?? hit.similarity ?? '',
       text: evidenceTextFromHit(hit),
     }));
@@ -125,6 +174,7 @@ function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
       ...r,
       reranker: r.reranker || 'none',
       top_pdf: (hits[0] || {}).pdf_name || '—',
+      top_page_number: (hits[0] || {}).page_number || '',
       evidence_snippet: hits[0]?.text || '',
       evidence_hits: hits,
       initial_topk_count: r.retrieved_count || hits.length || rawHits.length || '—',
@@ -145,14 +195,15 @@ function shortEvidenceLabel(row) {
 }
 
 function renderEvidenceDetails(row) {
-  const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, 10);
+  const limit = row.evidence_type === 'reranked final top3' ? 3 : 5;
+  const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, limit);
   if (!hits.length) return '<span class="muted-text">No paragraph returned in artifact</span>';
-  const stage = row.evidence_type === 'reranked final top3' ? 'Final reranked evidence' : 'Initial vector topK evidence';
+  const stage = row.evidence_type === 'reranked final top3' ? 'Final reranked evidence' : 'Initial vector top 5 evidence';
   const body = hits.map((h, i) => `<article class="evidence-hit ${i < 3 ? 'final-hit' : ''}">
-    <div><strong>${esc(stage)} · Rank ${esc(h.rank)}</strong><span>${esc(h.pdf_name || '—')}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
+    <div><strong>${esc(stage)} · Rank ${esc(h.rank)}</strong><span>${pdfLink(h.pdf_name || '—', '', h.page_number)}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
     <p>${esc(h.text)}</p>
   </article>`).join('');
-  return `<div class="evidence-stage-note">${esc(stage)}. First three rows are the final answer candidates after reranking when a reranker artifact is selected.</div><div class="evidence-hit-list">${body}</div>`;
+  return `<div class="evidence-stage-note">${esc(stage)}. Open the PDF page link to inspect the source page behind each retrieved chunk.</div><div class="evidence-hit-list">${body}</div>`;
 }
 
 function filteredRetrieval(rows) {
@@ -178,10 +229,10 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'embedding', label:'Embedding'},
     {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker'},
-    {key:'top_pdf', label:'Top PDF/source', render:r=>esc((r.top_pdf || '').slice(0, 58))},
+    {key:'top_pdf', label:'Top PDF/source', render:r=>pdfLink(r.top_pdf, (r.top_pdf || '').slice(0, 58) || '—', r.top_page_number)},
     {key:'initial_topk_count', label:'Initial K'},
     {key:'evidence_type', label:'Stage'},
-    {key:'evidence_snippet', label:'TopK to rerank to top3 evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
+    {key:'evidence_snippet', label:'Top 5 hits to rerank to top 3 evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
   ]);
@@ -694,7 +745,7 @@ function renderDocumentRepository(repo) {
       <article class="run-result-card warn"><span>Review queue</span><strong>${esc(repo.review_count || 0)}</strong><small>shown only in repository/audit views</small></article>`;
   }
   table($('documentRepositoryTable'), rows, [
-    {key:'pdf_name', label:'PDF', render:r=>esc((r.pdf_name || '').slice(0, 88))},
+    {key:'pdf_name', label:'PDF', render:r=>pdfLink(r.pdf_name, (r.pdf_name || '').slice(0, 88) || '—')},
     {key:'status', label:'Readiness'},
     {key:'chunked_rows', label:'Chunk rows'},
     {key:'pages', label:'Pages'},

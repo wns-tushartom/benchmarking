@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -29,7 +30,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -40,6 +40,7 @@ from benchmarking.adapters.vector_pgvector import PGVectorStoreAdapter
 from benchmarking.adapters.vector_qdrant import QdrantVectorStoreAdapter
 from benchmarking.adapters.vector_weaviate import WeaviateVectorStoreAdapter
 from benchmarking.core.schemas import Chunk
+from scripts.wns_env import load_env_files
 
 EMBEDDING_CONFIGS: dict[str, dict[str, Any]] = {
     "gte_multilingual_base": {
@@ -63,6 +64,23 @@ DEFAULT_SHEETS = [
     "semantic_split",
 ]
 DEFAULT_STORES = ["Qdrant", "PGVector", "Weaviate"]
+OPTIONAL_METADATA_COLUMNS = ["page_number", "source_type", "parser_method", "image_count", "table_count", "formula_count"]
+SUMMARY_FIELDS = [
+    "status",
+    "sheet",
+    "embedding",
+    "store",
+    "chunk_count",
+    "vector_count",
+    "upsert_latency_s",
+    "total_store_seconds",
+    "search_hits",
+    "top_hit_pdf",
+    "top_hit_score",
+    "collection_or_table",
+    "error",
+    "created_at",
+]
 
 
 def log(msg: str) -> None:
@@ -74,15 +92,13 @@ def safe_name(value: str) -> str:
 
 
 def load_env(root: Path) -> None:
-    env_path = root / ".env"
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    load_env_files(root)
+
+
+def require_pandas():
+    import pandas as pd
+
+    return pd
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -94,13 +110,14 @@ def append_csv(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists()
     with path.open("a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
         if not exists:
             writer.writeheader()
-        writer.writerow(row)
+        writer.writerow({field: row.get(field, "") for field in SUMMARY_FIELDS})
 
 
 def load_chunks(workbook: Path, sheet: str, limit: int = 0) -> list[Chunk]:
+    pd = require_pandas()
     df = pd.read_excel(workbook, sheet_name=sheet)
     if limit:
         df = df.head(limit)
@@ -109,16 +126,73 @@ def load_chunks(workbook: Path, sheet: str, limit: int = 0) -> list[Chunk]:
         paragraph = str(getattr(r, "paragraph", "") or "").strip()
         if not paragraph:
             continue
+        metadata = {"sheet": sheet}
+        for column in OPTIONAL_METADATA_COLUMNS:
+            value = getattr(r, column, "")
+            if value is not None and str(value).strip() and str(value).lower() != "nan":
+                metadata[column] = value
         chunks.append(
             Chunk(
                 id=int(getattr(r, "id")),
                 pdf_name=str(getattr(r, "pdf_name")),
                 paragraph=paragraph,
                 parent_id=str(getattr(r, "id")),
-                metadata={"sheet": sheet},
+                metadata=metadata,
             )
         )
     return chunks
+
+
+def chunks_fingerprint(chunks: list[Chunk]) -> str:
+    h = hashlib.sha256()
+    for chunk in chunks:
+        h.update(str(chunk.id).encode("utf-8"))
+        h.update(b"\0")
+        h.update(chunk.pdf_name.encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+        h.update(chunk.paragraph.encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def validate_vectors_for_chunks(chunks: list[Chunk], vectors: list[list[float]], expected_dim: int, embedding: str) -> None:
+    if not chunks:
+        raise ValueError(f"No chunks available for {embedding}; refusing to ingest empty sheet")
+    if not vectors:
+        raise ValueError(f"No vectors returned for {embedding}; refusing to ingest empty vector batch")
+    if len(vectors) != len(chunks):
+        raise ValueError(f"Vector count mismatch for {embedding}: chunks={len(chunks)} vectors={len(vectors)}")
+    for idx, vector in enumerate(vectors):
+        if len(vector) != expected_dim:
+            raise ValueError(f"Vector dimension mismatch for {embedding} at index {idx}: expected={expected_dim} got={len(vector)}")
+        arr = np.asarray(vector, dtype="float32")
+        if not np.isfinite(arr).all():
+            raise ValueError(f"Vector contains non-finite values for {embedding} at index {idx}")
+
+
+def cache_metadata(chunks: list[Chunk], embedding_name: str, batch_size: int, limit: int, endpoint_env: str, expected_dim: int) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "embedding": embedding_name,
+        "endpoint_env": endpoint_env,
+        "endpoint_url": os.environ.get(endpoint_env, ""),
+        "expected_dim": expected_dim,
+        "batch_size": batch_size,
+        "limit": int(limit or 0),
+        "chunk_count": len(chunks),
+        "chunks_sha256": chunks_fingerprint(chunks),
+    }
+
+
+def metadata_matches(path: Path, expected: dict[str, Any]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        actual = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    keys = ["version", "embedding", "endpoint_env", "endpoint_url", "expected_dim", "limit", "chunk_count", "chunks_sha256"]
+    return all(actual.get(key) == expected.get(key) for key in keys)
 
 
 def get_vectors(
@@ -126,14 +200,21 @@ def get_vectors(
     embedding_name: str,
     batch_size: int,
     cache_path: Path,
+    meta_path: Path,
+    limit: int = 0,
     force: bool = False,
 ) -> list[list[float]]:
-    if cache_path.exists() and not force:
+    cfg = EMBEDDING_CONFIGS[embedding_name]
+    expected_dim = int(cfg["dimensions"])
+    expected_meta = cache_metadata(chunks, embedding_name, batch_size, limit, cfg["endpoint_env"], expected_dim)
+    if cache_path.exists() and not force and metadata_matches(meta_path, expected_meta):
         vectors = np.load(cache_path).tolist()
         log(f"loaded_cached_vectors path={cache_path} count={len(vectors)} dim={len(vectors[0]) if vectors else 0}")
+        validate_vectors_for_chunks(chunks, vectors, expected_dim, embedding_name)
         return vectors
+    if cache_path.exists() and not force:
+        log(f"embedding cache metadata mismatch; regenerating vectors path={cache_path}")
 
-    cfg = EMBEDDING_CONFIGS[embedding_name]
     embedder = RemoteHTTPEmbeddingAdapter(
         model_name=embedding_name,
         endpoint_env=cfg["endpoint_env"],
@@ -144,8 +225,10 @@ def get_vectors(
     start = time.perf_counter()
     vectors = embedder.embed_many(texts)
     elapsed = time.perf_counter() - start
+    validate_vectors_for_chunks(chunks, vectors, expected_dim, embedding_name)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(cache_path, np.asarray(vectors, dtype="float32"))
+    write_json(meta_path, expected_meta)
     log(f"embedded model={embedding_name} count={len(vectors)} dim={len(vectors[0]) if vectors else 0} seconds={elapsed:.2f} cache={cache_path}")
     return vectors
 
@@ -162,11 +245,18 @@ def make_store(store_name: str, sheet: str, embedding: str):
 
 
 def upsert_and_check(store_name: str, sheet: str, embedding: str, chunks: list[Chunk], vectors: list[list[float]]) -> dict[str, Any]:
+    if not chunks:
+        raise RuntimeError(f"{sheet} has zero chunks; refusing to write an ok ingestion row")
+    if not vectors:
+        raise RuntimeError(f"{embedding} produced zero vectors; refusing to write an ok ingestion row")
+    validate_vectors_for_chunks(chunks, vectors, int(EMBEDDING_CONFIGS[embedding]["dimensions"]), embedding)
     store = make_store(store_name, sheet, embedding)
     start = time.perf_counter()
     metrics = store.upsert(chunks, vectors)
-    hits = store.search(vectors[0], top_k=5) if vectors else []
+    hits = store.search(vectors[0], top_k=5)
     elapsed = time.perf_counter() - start
+    if not hits:
+        raise RuntimeError(f"{store_name} search check returned zero hits after upsert")
     return {
         "store": store_name,
         "sheet": sheet,
@@ -213,6 +303,7 @@ def main() -> int:
 
     completed_keys: set[tuple[str, str, str]] = set()
     if args.skip_existing_store_success and summary_csv.exists():
+        pd = require_pandas()
         prev = pd.read_csv(summary_csv)
         for r in prev.to_dict("records"):
             if str(r.get("status")) == "ok":
@@ -233,8 +324,7 @@ def main() -> int:
             vec_path = cache_dir / f"{safe_name(sheet)}_{safe_name(embedding)}_vectors.npy"
             meta_path = cache_dir / f"{safe_name(sheet)}_{safe_name(embedding)}_meta.json"
             try:
-                vectors = get_vectors(chunks, embedding, batch_size, vec_path, force=args.force_embed)
-                write_json(meta_path, {"sheet": sheet, "embedding": embedding, "count": len(vectors), "dim": len(vectors[0]) if vectors else 0, "batch_size": batch_size})
+                vectors = get_vectors(chunks, embedding, batch_size, vec_path, meta_path, limit=args.limit, force=args.force_embed)
             except Exception as exc:
                 row = {"status": "embedding_failed", "sheet": sheet, "embedding": embedding, "store": "", "error": repr(exc), "created_at": datetime.now().isoformat()}
                 append_csv(summary_csv, row)

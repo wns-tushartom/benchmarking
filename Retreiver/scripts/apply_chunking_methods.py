@@ -7,7 +7,8 @@ Creates an Excel file with separate sheets for each chunking method:
 - entity_heuristic_w4
 - Heading_sections_l2
 
-Each sheet contains: id, pdf_name, paragraph
+Each sheet contains: id, pdf_name, paragraph, plus optional source metadata
+(page_number, source_type, parser_method, image/table/formula counts) when present.
 
 Usage:
     python scripts/apply_chunking_methods.py
@@ -29,6 +30,8 @@ except ImportError:
 # Configuration
 INPUT_CSV = Path("data/benchmark_input.csv")
 OUTPUT_EXCEL = Path("data/chunking_methods_output.xlsx")
+REQUIRED_COLUMNS = ['id', 'pdf_name', 'paragraph']
+OPTIONAL_METADATA_COLUMNS = ['page_number', 'source_type', 'parser_method', 'image_count', 'table_count', 'formula_count']
 
 # Setup logging
 logging.basicConfig(
@@ -61,11 +64,15 @@ def load_input_data() -> List[Dict[str, Any]]:
     with open(INPUT_CSV, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            rows.append({
+            item = {
                 'id': int(row['id']),
                 'pdf_name': row['pdf_name'],
                 'paragraph': clean_text_for_excel(row['paragraph'])
-            })
+            }
+            for column in OPTIONAL_METADATA_COLUMNS:
+                if column in row:
+                    item[column] = row.get(column, '')
+            rows.append(item)
     
     logger.info(f"Loaded {len(rows)} rows from {INPUT_CSV}")
     return rows
@@ -246,11 +253,15 @@ def apply_chunking_method(rows: List[Dict[str, Any]], method_name: str) -> pd.Da
         
         # Add chunks to results
         for chunk in chunks:
-            results.append({
+            item = {
                 'id': chunk_id,
                 'pdf_name': pdf_name,
                 'paragraph': chunk
-            })
+            }
+            for column in OPTIONAL_METADATA_COLUMNS:
+                if column in row:
+                    item[column] = row.get(column, '')
+            results.append(item)
             chunk_id += 1
     
     df = pd.DataFrame(results)

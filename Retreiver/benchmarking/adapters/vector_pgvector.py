@@ -37,16 +37,19 @@ class PGVectorStoreAdapter:
         with self.psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             conn.execute(f'DROP TABLE IF EXISTS "{self.table}"')
-            conn.execute(f'CREATE TABLE "{self.table}" (id BIGINT PRIMARY KEY, chunk_id TEXT, pdf_name TEXT, paragraph TEXT, embedding vector({self.dimensions}))')
-            rows = [(i, str(chunk.id), chunk.pdf_name, chunk.paragraph, _vec(vector)) for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1)]
+            conn.execute(f'CREATE TABLE "{self.table}" (id BIGINT PRIMARY KEY, chunk_id TEXT, pdf_name TEXT, paragraph TEXT, page_number TEXT, source_type TEXT, parser_method TEXT, embedding vector({self.dimensions}))')
+            rows = []
+            for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
+                metadata = chunk.metadata or {}
+                rows.append((i, str(chunk.id), chunk.pdf_name, chunk.paragraph, str(metadata.get("page_number", "")), str(metadata.get("source_type", "")), str(metadata.get("parser_method", "")), _vec(vector)))
             with conn.cursor() as cur:
-                cur.executemany(f'INSERT INTO "{self.table}" (id, chunk_id, pdf_name, paragraph, embedding) VALUES (%s, %s, %s, %s, %s::vector)', rows)
+                cur.executemany(f'INSERT INTO "{self.table}" (id, chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, embedding) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)', rows)
             conn.execute(f'CREATE INDEX "{self.table}_hnsw" ON "{self.table}" USING hnsw (embedding vector_cosine_ops)')
         return {"upsert_latency_s": time.perf_counter() - start, "vector_count": len(vectors)}
 
     def search(self, query_vector: List[float], top_k: int) -> List[SearchHit]:
-        sql = f'SELECT chunk_id, pdf_name, paragraph, 1 - (embedding <=> %s::vector) AS score FROM "{self.table}" ORDER BY embedding <=> %s::vector LIMIT %s'
+        sql = f'SELECT chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, 1 - (embedding <=> %s::vector) AS score FROM "{self.table}" ORDER BY embedding <=> %s::vector LIMIT %s'
         q = _vec(query_vector)
         with self.psycopg.connect(self.dsn) as conn:
             rows = conn.execute(sql, (q, q, top_k)).fetchall()
-        return [SearchHit(Chunk(id=int(row[0]) if str(row[0]).isdigit() else i, pdf_name=row[1], paragraph=row[2], parent_id=str(row[0]), metadata={"store": "PGVector"}), float(row[3])) for i, row in enumerate(rows, 1)]
+        return [SearchHit(Chunk(id=int(row[0]) if str(row[0]).isdigit() else i, pdf_name=row[1], paragraph=row[2], parent_id=str(row[0]), metadata={"store": "PGVector", "page_number": row[3] or "", "source_type": row[4] or "", "parser_method": row[5] or ""}), float(row[6])) for i, row in enumerate(rows, 1)]

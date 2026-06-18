@@ -17,7 +17,7 @@ services:
     container_name: wns-pgvector
     environment:
       POSTGRES_USER: wns
-      POSTGRES_PASSWORD: wns_password
+      POSTGRES_PASSWORD: ${WNS_POSTGRES_PASSWORD:-wns_password}
       POSTGRES_DB: wns_benchmark
     ports:
       - "5003:5432"

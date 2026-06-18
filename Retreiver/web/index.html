@@ -31,7 +31,7 @@
       <button class="tab-btn" data-page="quality" type="button">Metrics</button>
       <button class="tab-btn" data-page="compare" type="button">Accuracy, cost, latency</button>
       <button class="tab-btn" data-page="run" type="button">Run pipeline</button>
-      <button class="tab-btn" data-page="evidence" type="button">TopK to rerank evidence</button>
+      <button class="tab-btn" data-page="evidence" type="button">Top 5 hits evidence</button>
       <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
       <button class="tab-btn" data-page="nvidia" type="button">NVIDIA RAG</button>
       <button class="tab-btn" data-page="repository" type="button">Repository</button>
@@ -208,7 +208,7 @@ Passenger wants return refund due to illness</textarea></label>
     <section class="page" data-page-panel="evidence">
       <section class="panel">
         <div class="section-head">
-          <div><h2>TopK to rerank evidence</h2><p>Query-level evidence showing initial top K retrieval, reranker stage, and final top 3 evidence. Filter to one combination for demos.</p></div>
+          <div><h2>Top 5 hits to rerank evidence</h2><p>Query-level evidence showing initial top 5 retrieval, reranker stage, final top 3 evidence, and source PDF page links. Filter to one combination for demos.</p></div>
           <div class="filter-row">
             <select id="retrievalChunkerFilter"><option value="all">All chunkers</option></select>
             <select id="retrievalEmbeddingFilter"><option value="all">All embeddings</option></select>

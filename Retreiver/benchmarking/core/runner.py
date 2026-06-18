@@ -13,21 +13,11 @@ from benchmarking.adapters.local import load_query_cases
 from benchmarking.core.config import config_hash, dataset_hash, generate_matrix, load_benchmark_config, selected_config, technique
 from benchmarking.core.metrics import bootstrap_ci, mean, mrr, ndcg_at_k, precision_at_k, recall_at_k
 from benchmarking.core.registry import default_registry
+from scripts.wns_env import load_env_files
 
 
 def load_env_file(root: Path) -> None:
-    env_path = root / ".env"
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+    load_env_files(root)
 
 
 def run_experiment(

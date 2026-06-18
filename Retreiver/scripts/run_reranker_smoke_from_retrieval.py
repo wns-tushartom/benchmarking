@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.wns_env import load_env_files
+
 ROOT = Path(__file__).resolve().parents[1]
 RERANKERS = {
     "bge-reranker-base": ("BGE_RERANK_URL", "http://127.0.0.1:5000/rerank/bge"),
@@ -29,15 +31,7 @@ def safe_name(value: str) -> str:
 
 
 def load_env(root: Path) -> None:
-    env_path = root / ".env"
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    load_env_files(root)
 
 
 def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -100,6 +94,16 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts = load_retrieval_artifacts(ROOT / args.retrieval_dir, args.limit_artifacts)
     results, errors = [], []
+    if not artifacts:
+        errors.append({
+            "error": "no_retrieval_artifacts",
+            "retrieval_dir": args.retrieval_dir,
+            "hint": "Run scripts/run_retrieval_smoke_from_vm_dbs.py for the selected current run before reranking.",
+        })
+        summary = {"created_at": datetime.now().isoformat(), "result_count": 0, "error_count": len(errors), "errors": errors[:100]}
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+        return 1
     for path in artifacts:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

@@ -46,14 +46,25 @@ class WeaviateVectorStoreAdapter:
                 {"name": "chunk_id", "dataType": ["text"]},
                 {"name": "pdf_name", "dataType": ["text"]},
                 {"name": "paragraph", "dataType": ["text"]},
+                {"name": "page_number", "dataType": ["text"]},
+                {"name": "source_type", "dataType": ["text"]},
+                {"name": "parser_method", "dataType": ["text"]},
             ],
         })
         objects = []
         for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
+            metadata = chunk.metadata or {}
             objects.append({
                 "class": self.class_name,
                 "id": f"00000000-0000-0000-0000-{i:012d}",
-                "properties": {"chunk_id": str(chunk.id), "pdf_name": chunk.pdf_name, "paragraph": chunk.paragraph},
+                "properties": {
+                    "chunk_id": str(chunk.id),
+                    "pdf_name": chunk.pdf_name,
+                    "paragraph": chunk.paragraph,
+                    "page_number": str(metadata.get("page_number", "")),
+                    "source_type": str(metadata.get("source_type", "")),
+                    "parser_method": str(metadata.get("parser_method", "")),
+                },
                 "vector": vector,
             })
         for i in range(0, len(objects), 100):
@@ -62,7 +73,7 @@ class WeaviateVectorStoreAdapter:
 
     def search(self, query_vector: List[float], top_k: int) -> List[SearchHit]:
         gql = {
-            "query": "{ Get { %s(nearVector:{vector:%s} limit:%d) { chunk_id pdf_name paragraph _additional { distance certainty } } } }" % (
+            "query": "{ Get { %s(nearVector:{vector:%s} limit:%d) { chunk_id pdf_name paragraph page_number source_type parser_method _additional { distance certainty } } } }" % (
                 self.class_name,
                 json.dumps([float(v) for v in query_vector]),
                 int(top_k),
@@ -76,5 +87,5 @@ class WeaviateVectorStoreAdapter:
             score = add.get("certainty")
             if score is None and add.get("distance") is not None:
                 score = 1.0 - float(add["distance"])
-            hits.append(SearchHit(Chunk(id=int(row.get("chunk_id") or i), pdf_name=row.get("pdf_name", ""), paragraph=row.get("paragraph", ""), parent_id=str(row.get("chunk_id", i)), metadata={"store": "Weaviate"}), float(score or 0.0)))
+            hits.append(SearchHit(Chunk(id=int(row.get("chunk_id") or i), pdf_name=row.get("pdf_name", ""), paragraph=row.get("paragraph", ""), parent_id=str(row.get("chunk_id", i)), metadata={"store": "Weaviate", "page_number": row.get("page_number", ""), "source_type": row.get("source_type", ""), "parser_method": row.get("parser_method", "")}), float(score or 0.0)))
         return hits

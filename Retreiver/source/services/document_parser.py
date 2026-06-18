@@ -145,8 +145,8 @@ class DocumentParserService:
         return self._max_file_size
 
     # ---------- Public APIs ----------
-    async def parse_pdf(self, file_path: str, filename: str) -> ParsedDocument:
-        """Parse PDF using MinerU (preferred) or PyPDF2 (fallback)."""
+    async def parse_pdf(self, file_path: str, filename: str, allow_fallback: bool = False) -> ParsedDocument:
+        """Parse PDF using MinerU (preferred) or PyPDF2 when explicitly allowed."""
         document_id = str(uuid.uuid4())
         # Each parse session gets a UUID container directory
         session_dir = self.output_dir / document_id
@@ -161,14 +161,18 @@ class DocumentParserService:
             try:
                 return await self._parse_pdf_with_mineru(file_path, filename, document_id, session_dir)
             except Exception as e:
-                logger.warning("MinerU parsing failed, considering fallback to PyPDF2: %s", e)
-                # Fall through to PyPDF2 if available
+                if not allow_fallback:
+                    raise RuntimeError(f"MinerU parsing failed and PyPDF2 fallback disabled: {e}") from e
+                logger.warning("MinerU parsing failed, falling back to PyPDF2 because fallback is enabled: %s", e)
 
-        if PYPDF2_AVAILABLE:
+        if backend == "pypdf2" and not allow_fallback:
+            raise RuntimeError("PyPDF2 fallback disabled. MinerU/magic-pdf is required for layout-aware extraction.")
+
+        if PYPDF2_AVAILABLE and allow_fallback:
             return await self._parse_pdf_with_pypdf2(file_path, filename, document_id)
 
         # If we reach here, nothing could parse
-        raise RuntimeError("No PDF parsing libraries available or all backends failed. Install magic-pdf or PyPDF2.")
+        raise RuntimeError("No layout-aware PDF parser available. Install magic-pdf/MinerU or explicitly enable PyPDF2 text-only fallback.")
 
     async def parse_bytes(self, content: bytes, filename: str, mime_type: Optional[str] = None) -> ParsedDocument:
         """
@@ -271,38 +275,47 @@ class DocumentParserService:
         # Run MinerU in a worker thread (blocking)
         await asyncio.to_thread(self._run_mineru_parsing, file_path, str(session_dir))
 
-        # MinerU writes under: <session_dir>/<PDF_STEM>/...
+        # MinerU output layout varies across versions. Prefer stem-matching
+        # content_list files, but recursively discover any produced JSON.
         pdf_stem = Path(filename).stem
-        mineru_dir = session_dir / pdf_stem
-        if not mineru_dir.exists():
-            # List session_dir contents for debugging
+        produced = [p for p in session_dir.rglob("*")]
+        content_candidates = sorted(
+            [p for p in produced if p.is_file() and p.name.endswith("_content_list.json")],
+            key=lambda p: (0 if pdf_stem.lower() in str(p).lower() else 1, len(str(p))),
+        )
+        if not content_candidates:
             try:
-                produced = [str(p.relative_to(session_dir)) for p in session_dir.glob("**/*")]
+                produced_rel = [str(p.relative_to(session_dir)) for p in produced]
                 logger.warning(
-                    "MinerU output dir not found: %s. Session produced %d paths under %s.\nPaths:\n%s",
-                    mineru_dir,
-                    len(produced),
+                    "MinerU content JSON not found. Session produced %d paths under %s.\nPaths:\n%s",
+                    len(produced_rel),
                     session_dir,
-                    "\n".join(produced[:100]),
+                    "\n".join(produced_rel[:100]),
                 )
             except Exception:
                 pass
-            raise RuntimeError("MinerU did not create expected output directory. Check magic-pdf models/config.")
+            raise RuntimeError("MinerU did not produce a *_content_list.json file. Layout-aware extraction is not usable.")
 
-        # Expected file names inside the nested directory:
-        content_file = mineru_dir / f"{pdf_stem}_content_list.json"
-        markdown_file = mineru_dir / f"{pdf_stem}.md"
+        content_file = content_candidates[0]
+        mineru_dir = content_file.parent
+        markdown_candidates = sorted(
+            [p for p in produced if p.is_file() and p.suffix.lower() == ".md"],
+            key=lambda p: (0 if pdf_stem.lower() in str(p).lower() else 1, len(str(p))),
+        )
+        markdown_file = markdown_candidates[0] if markdown_candidates else mineru_dir / f"{pdf_stem}.md"
 
         content_data: List[DocumentContent] = []
-        if content_file.exists():
-            try:
-                with content_file.open("r", encoding="utf-8") as f:
-                    json_content = json.load(f)
-                content_data = self._process_json_content(json_content)
-            except Exception as e:
-                logger.error("Failed reading MinerU JSON: %s", e)
-        else:
-            logger.warning("MinerU JSON not found: %s", content_file)
+        try:
+            with content_file.open("r", encoding="utf-8") as f:
+                json_content = json.load(f)
+            if isinstance(json_content, dict):
+                json_content = json_content.get("content_list") or json_content.get("items") or []
+            content_data = self._process_json_content(json_content)
+        except Exception as e:
+            logger.error("Failed reading MinerU JSON %s: %s", content_file, e)
+            raise
+        if not content_data:
+            raise RuntimeError(f"MinerU produced no structured content from {content_file}. Refusing empty layout extraction.")
 
         markdown_content = ""
         if markdown_file.exists():
@@ -384,6 +397,9 @@ class DocumentParserService:
                 "original_file_path": file_path,
                 "file_size": file_size,
                 "parsing_method": "PyPDF2_fallback",
+                "text_only_review": True,
+                "needs_ocr_review": True,
+                "layout_counts_valid": False,
                 "total_pdf_pages": total_pages,
             },
             created_at=now,
@@ -422,19 +438,25 @@ class DocumentParserService:
                 page_num = 0
 
         #   Type routing
-            typ = item.get("type", "text")
-            if typ == "text":
-                txt = str(item.get("text", "")).strip()
+            typ = str(item.get("type") or item.get("category") or item.get("block_type") or "text").lower()
+            if typ in {"text", "title", "plain_text", "list", "list_item"} or "text" in typ:
+                txt = str(item.get("text") or item.get("content") or item.get("page_content") or "").strip()
                 if txt:
                     content_by_page[page_num]["text"].append(txt)
-            elif typ == "image":
-                p = str(item.get("image_path", "")).strip()
+            elif typ in {"image", "img", "figure"} or "image" in typ or typ == "figure":
+                p = str(item.get("image_path") or item.get("img_path") or item.get("path") or "").strip()
                 if p:
                     content_by_page[page_num]["images"].append(p)
-            elif typ == "table":
+                caption = str(item.get("caption") or item.get("image_caption") or "").strip()
+                if caption:
+                    content_by_page[page_num]["text"].append(caption)
+            elif "table" in typ:
                 content_by_page[page_num]["tables"].append(item)
-            elif typ in ("formula", "equation"):
-                latex = str(item.get("latex", item.get("text", ""))).strip()
+                table_text = str(item.get("table_body") or item.get("table_caption") or item.get("text") or item.get("content") or "").strip()
+                if table_text:
+                    content_by_page[page_num]["text"].append(table_text)
+            elif "formula" in typ or "equation" in typ:
+                latex = str(item.get("latex") or item.get("text") or item.get("content") or "").strip()
                 if latex:
                     content_by_page[page_num]["formulas"].append(latex)
 

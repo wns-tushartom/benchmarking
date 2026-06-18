@@ -34,8 +34,9 @@ BGE_RERANK_URL=http://VM_HOST:5000/rerank/bge
 
 QDRANT_URL=http://VM_HOST:5001
 QDRANT_GRPC_URL=http://VM_HOST:5002
-PGVECTOR_DSN=postgresql://wns:wns_password@VM_HOST:5003/wns_benchmark
-DATABASE_URL=postgresql://wns:wns_password@VM_HOST:5003/wns_benchmark
+WNS_POSTGRES_PASSWORD=wns_password
+PGVECTOR_DSN=postgresql://wns:***@VM_HOST:5003/wns_benchmark
+DATABASE_URL=postgresql://wns:***@VM_HOST:5003/wns_benchmark
 WEAVIATE_URL=http://VM_HOST:5004
 WEAVIATE_GRPC_URL=VM_HOST:5005
 ```

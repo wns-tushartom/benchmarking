@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
 from benchmarking.adapters.vector_pgvector import _vec
+from scripts.wns_env import load_env_files
 
 EMBEDDING_CONFIGS: dict[str, dict[str, Any]] = {
     "gte_multilingual_base": {
@@ -44,15 +45,7 @@ def safe_name(value: str) -> str:
 
 
 def load_env(root: Path) -> None:
-    env_path = root / ".env"
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    load_env_files(root)
 
 DEFAULT_QUERIES = [
     "refund old ticket and issue new ticket",
@@ -95,10 +88,12 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def latest_ok_rows() -> list[dict[str, str]]:
+def latest_ok_rows(run_id_filter: str = "") -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for path in sorted((ROOT / "data" / "db_ingestion_runs").glob("*/summary.csv")):
         run_id = path.parent.name
+        if run_id_filter and run_id != run_id_filter:
+            continue
         for row in read_csv(path):
             if row.get("status") == "ok" and row.get("collection_or_table"):
                 row["run_id"] = run_id
@@ -121,6 +116,19 @@ def embed_query(query: str, embedding: str) -> list[float]:
     return adapter.embed_many([query])[0]
 
 
+def hit_payload(rank: int, score: float, pdf_name: Any, chunk_id: Any, paragraph: Any, page_number: Any = "", source_type: Any = "", parser_method: Any = "") -> dict[str, Any]:
+    return {
+        "rank": rank,
+        "score": float(score),
+        "pdf_name": pdf_name or "",
+        "chunk_id": chunk_id or "",
+        "paragraph": paragraph or "",
+        "page_number": page_number or "",
+        "source_type": source_type or "",
+        "parser_method": parser_method or "",
+    }
+
+
 def search_qdrant(collection: str, vector: list[float], top_k: int) -> list[dict[str, Any]]:
     from qdrant_client import QdrantClient
     url = os.environ.get("QDRANT_URL", "http://127.0.0.1:5001")
@@ -133,7 +141,7 @@ def search_qdrant(collection: str, vector: list[float], top_k: int) -> list[dict
     out = []
     for i, item in enumerate(results, 1):
         p = item.payload or {}
-        out.append({"rank": i, "score": float(item.score), "pdf_name": p.get("pdf_name", ""), "chunk_id": p.get("chunk_id", ""), "paragraph": p.get("paragraph", "")})
+        out.append(hit_payload(i, float(item.score), p.get("pdf_name", ""), p.get("chunk_id", ""), p.get("paragraph", ""), p.get("page_number", ""), p.get("source_type", ""), p.get("parser_method", "")))
     return out
 
 
@@ -143,10 +151,16 @@ def search_pgvector(table: str, vector: list[float], top_k: int) -> list[dict[st
     if not dsn:
         raise RuntimeError("PGVECTOR_DSN or DATABASE_URL is required")
     q = _vec(vector)
-    sql = f'SELECT chunk_id, pdf_name, paragraph, 1 - (embedding <=> %s::vector) AS score FROM "{table}" ORDER BY embedding <=> %s::vector LIMIT %s'
     with psycopg.connect(dsn) as conn:
+        cols = {r[0] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", (table,)).fetchall()}
+        has_page_cols = {"page_number", "source_type", "parser_method"}.issubset(cols)
+        if has_page_cols:
+            sql = f'SELECT chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, 1 - (embedding <=> %s::vector) AS score FROM "{table}" ORDER BY embedding <=> %s::vector LIMIT %s'
+            rows = conn.execute(sql, (q, q, top_k)).fetchall()
+            return [hit_payload(i, float(row[6]), row[1], row[0], row[2], row[3], row[4], row[5]) for i, row in enumerate(rows, 1)]
+        sql = f'SELECT chunk_id, pdf_name, paragraph, 1 - (embedding <=> %s::vector) AS score FROM "{table}" ORDER BY embedding <=> %s::vector LIMIT %s'
         rows = conn.execute(sql, (q, q, top_k)).fetchall()
-    return [{"rank": i, "score": float(row[3]), "pdf_name": row[1], "chunk_id": row[0], "paragraph": row[2]} for i, row in enumerate(rows, 1)]
+        return [hit_payload(i, float(row[3]), row[1], row[0], row[2]) for i, row in enumerate(rows, 1)]
 
 
 def weaviate_request(url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -157,8 +171,14 @@ def weaviate_request(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def search_weaviate(class_name: str, vector: list[float], top_k: int) -> list[dict[str, Any]]:
     url = os.environ.get("WEAVIATE_URL", "http://127.0.0.1:5004").rstrip("/")
-    gql = {"query": "{ Get { %s(nearVector:{vector:%s} limit:%d) { chunk_id pdf_name paragraph _additional { distance certainty } } } }" % (class_name, json.dumps([float(v) for v in vector]), int(top_k))}
+    vector_json = json.dumps([float(v) for v in vector])
+    fields = "chunk_id pdf_name paragraph page_number source_type parser_method _additional { distance certainty }"
+    gql = {"query": "{ Get { %s(nearVector:{vector:%s} limit:%d) { %s } } }" % (class_name, vector_json, int(top_k), fields)}
     data = weaviate_request(f"{url}/v1/graphql", gql)
+    if data.get("errors"):
+        legacy_fields = "chunk_id pdf_name paragraph _additional { distance certainty }"
+        gql = {"query": "{ Get { %s(nearVector:{vector:%s} limit:%d) { %s } } }" % (class_name, vector_json, int(top_k), legacy_fields)}
+        data = weaviate_request(f"{url}/v1/graphql", gql)
     rows = data.get("data", {}).get("Get", {}).get(class_name, [])
     out = []
     for i, row in enumerate(rows, 1):
@@ -166,7 +186,7 @@ def search_weaviate(class_name: str, vector: list[float], top_k: int) -> list[di
         score = add.get("certainty")
         if score is None and add.get("distance") is not None:
             score = 1.0 - float(add["distance"])
-        out.append({"rank": i, "score": float(score or 0), "pdf_name": row.get("pdf_name", ""), "chunk_id": row.get("chunk_id", ""), "paragraph": row.get("paragraph", "")})
+        out.append(hit_payload(i, float(score or 0), row.get("pdf_name", ""), row.get("chunk_id", ""), row.get("paragraph", ""), row.get("page_number", ""), row.get("source_type", ""), row.get("parser_method", "")))
     return out
 
 
@@ -208,19 +228,36 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-combos", type=int, default=18)
     parser.add_argument("--query-limit", type=int, default=0, help="0 = all queries from queries file")
+    parser.add_argument("--run-id", default="", help="Restrict ingestion discovery to one data/db_ingestion_runs/<run_id> directory")
     args = parser.parse_args()
 
     os.chdir(ROOT)
     load_env(ROOT)
     out_dir = ROOT / "data" / "retrieval_smoke"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = [r for r in latest_ok_rows() if r.get("sheet") in args.sheets and r.get("embedding") in args.embeddings and r.get("store") in args.stores]
+    rows = [r for r in latest_ok_rows(args.run_id) if r.get("sheet") in args.sheets and r.get("embedding") in args.embeddings and r.get("store") in args.stores]
     rows = rows[: args.max_combos]
     queries = load_queries_file(Path(args.queries_file)) if args.queries_file else (args.queries or DEFAULT_QUERIES)
     if args.query_limit:
         queries = queries[: args.query_limit]
     all_results = []
     errors = []
+    if not rows:
+        errors.append({
+            "error": "no_matching_ingestion_rows",
+            "run_id": args.run_id,
+            "sheets": args.sheets,
+            "embeddings": args.embeddings,
+            "stores": args.stores,
+            "hint": "Run scripts/run_long_db_ingestion.py for the selected combinations first.",
+        })
+    if not queries:
+        errors.append({"error": "no_queries", "queries_file": args.queries_file, "hint": "Provide a groundtruth/query file with query/question rows."})
+    if errors:
+        summary = {"created_at": datetime.now().isoformat(), "result_count": 0, "error_count": len(errors), "errors": errors}
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+        return 1
     for row in rows:
         for query in queries:
             try:

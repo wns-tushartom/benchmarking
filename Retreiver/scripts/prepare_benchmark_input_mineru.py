@@ -112,7 +112,7 @@ async def parse_one(pdf: Path, include_image_markers: bool, allow_text_only_fall
         await document_parser.validate_file(str(pdf))
         if not MINERU_AVAILABLE and not allow_text_only_fallback:
             raise RuntimeError("MinerU/magic-pdf is not available. Refusing PyPDF2 text-only extraction because image/table/formula/layout counts would be wrong. Install requirements-mineru.txt or pass --allow-text-only-fallback for temporary text-only rows.")
-        parsed = await document_parser.parse_pdf(str(pdf), pdf.name)
+        parsed = await document_parser.parse_pdf(str(pdf), pdf.name, allow_fallback=allow_text_only_fallback)
         audit["parser_method"] = parsed.metadata.get("parsing_method", "")
         text_only_fallback = audit["parser_method"] == "PyPDF2_fallback"
         audit["total_pages"] = parsed.metadata.get("total_pdf_pages", parsed.total_pages)
@@ -193,6 +193,16 @@ async def main_async(args: argparse.Namespace) -> int:
         if audit_path.exists():
             with audit_path.open("r", encoding="utf-8-sig", newline="") as f:
                 existing_audits = list(csv.DictReader(f))
+        reprocess_statuses = {"failed", "text_only_review", "needs_ocr", "partial_ocr_review"}
+        reprocess_pdf_names = {
+            str(a.get("pdf_name", "")).strip()
+            for a in existing_audits
+            if str(a.get("status", "")).strip() in reprocess_statuses
+        }
+        if reprocess_pdf_names:
+            existing_rows = [r for r in existing_rows if str(r.get("pdf_name", "")).strip() not in reprocess_pdf_names]
+            existing_audits = [a for a in existing_audits if str(a.get("pdf_name", "")).strip() not in reprocess_pdf_names]
+            existing_pdf_names -= reprocess_pdf_names
         pdfs = [pdf for pdf in pdfs if pdf.name not in existing_pdf_names]
 
     print(f"MinerU available: {MINERU_AVAILABLE}; PyPDF2 available: {PYPDF2_AVAILABLE}")
@@ -227,6 +237,12 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"PDFs needing OCR/review: {len(needs)}")
     for a in needs[:50]:
         print(f"needs_review\t{a['pdf_name']}\tstatus={a['status']}\terror={a['error']}")
+    if needs and not args.allow_partial:
+        print("Extraction is not final-product clean. Re-run after fixing MinerU/layout extraction, or pass --allow-partial only for temporary text-only/debug artifacts.")
+        return 1
+    if not all_rows:
+        print("No benchmark rows were produced.")
+        return 1
     return 0
 
 
@@ -237,6 +253,7 @@ def main() -> int:
     parser.add_argument("--audit-output", default="data/pdf_extraction_audit.csv")
     parser.add_argument("--include-image-markers", action="store_true", help="Add image-reference rows when MinerU emits image paths. OCR text is still taken from MinerU text/table output.")
     parser.add_argument("--allow-text-only-fallback", action="store_true", help="Allow PyPDF2 fallback when MinerU is unavailable. Use only for temporary text-only debugging; images/tables/formulas will be marked invalid for review.")
+    parser.add_argument("--allow-partial", action="store_true", help="Return success even when PDFs need OCR/layout review. Use only for temporary debugging, not final product runs.")
     parser.add_argument("--only-missing", action="store_true", help="Append only PDFs not already present in the output CSV; use this for newly added PDFs.")
     args = parser.parse_args()
     return asyncio.run(main_async(args))

@@ -36,6 +36,8 @@ except ImportError as exc:
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
+REQUIRED_COLUMNS = ["id", "pdf_name", "paragraph"]
+OPTIONAL_METADATA_COLUMNS = ["page_number", "source_type", "parser_method", "image_count", "table_count", "formula_count"]
 
 STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
@@ -195,19 +197,24 @@ def rows_for_method(df: "pd.DataFrame", method: str) -> "pd.DataFrame":
             raise ValueError(f"Unknown method: {method}")
 
         for chunk in chunks:
-            output.append({
+            item = {
                 "id": len(output) + 1,
                 "pdf_name": pdf_name,
                 "paragraph": chunk,
-            })
+            }
+            for column in OPTIONAL_METADATA_COLUMNS:
+                if column in row and not pd.isna(row[column]):
+                    item[column] = row[column]
+            output.append(item)
 
-    return pd.DataFrame(output, columns=["id", "pdf_name", "paragraph"])
+    columns = REQUIRED_COLUMNS + [column for column in OPTIONAL_METADATA_COLUMNS if any(column in row for row in output)]
+    return pd.DataFrame(output, columns=columns)
 
 
 def verify_sheet(name: str, df: "pd.DataFrame") -> None:
-    expected = ["id", "pdf_name", "paragraph"]
-    if list(df.columns) != expected:
-        raise ValueError(f"{name}: columns must be {expected}, got {list(df.columns)}")
+    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    if missing:
+        raise ValueError(f"{name}: missing required columns {missing}, got {list(df.columns)}")
     if df["id"].duplicated().any():
         raise ValueError(f"{name}: duplicate ids found")
     if df["pdf_name"].isna().any() or df["paragraph"].isna().any():
@@ -231,24 +238,21 @@ def main() -> None:
         raise SystemExit(f"Input CSV not found: {input_path}")
 
     df = pd.read_csv(input_path)
-    expected = ["id", "pdf_name", "paragraph"]
-    missing = [col for col in expected if col not in df.columns]
+    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise SystemExit(f"Input is missing required columns {missing}; available columns: {list(df.columns)}")
-    # Keep the canonical benchmark columns for the Excel sheets. Source/page/parser
-    # metadata may be present in benchmark_input.csv after MinerU extraction, but
-    # downstream chunking workbooks intentionally remain id,pdf_name,paragraph.
-    df = df[expected].copy()
+    kept_columns = REQUIRED_COLUMNS + [col for col in OPTIONAL_METADATA_COLUMNS if col in df.columns]
+    df = df[kept_columns].copy()
 
     sheets: Dict[str, pd.DataFrame] = {}
 
     if existing_path.exists():
         existing = pd.read_excel(existing_path, sheet_name=None)
         for name, sheet_df in existing.items():
-            # Keep only required columns in case Excel added formatting columns.
-            sheets[name] = sheet_df[expected].copy()
+            keep = REQUIRED_COLUMNS + [col for col in OPTIONAL_METADATA_COLUMNS if col in sheet_df.columns]
+            sheets[name] = sheet_df[keep].copy()
     else:
-        sheets["original_input"] = df[expected].copy()
+        sheets["original_input"] = df[kept_columns].copy()
 
     for method in ["semantic_split", "fixed_tok1200_ov150"]:
         print(f"Generating {method}...")

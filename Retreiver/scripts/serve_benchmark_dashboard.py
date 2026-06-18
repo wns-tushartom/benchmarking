@@ -19,9 +19,11 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import generate_matrix, load_benchmark_config
+from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -35,10 +37,12 @@ EVAL_DIR = ROOT / "data" / "evaluation"
 HALLUCINATION_DIR = ROOT / "data" / "hallucination"
 NVIDIA_RAG_DIR = ROOT / "data" / "nvidia_rag"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
+PDF_DIR = ROOT / "data" / "pdfs"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
+load_env_files(ROOT)
 
 
 def benchmark_options() -> dict:
@@ -171,6 +175,58 @@ def read_snapshot() -> dict:
         return {"error": str(exc)}
 
 
+def service_check(name: str, url: str, timeout: float = 2.0) -> dict[str, Any]:
+    started = datetime.now()
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            body = resp.read(200).decode("utf-8", "ignore")
+            latency_ms = (datetime.now() - started).total_seconds() * 1000
+            return {"name": name, "url": url, "ok": 200 <= resp.status < 300, "error": "", "latency_ms": latency_ms, "note": f"HTTP {resp.status}", "body": body}
+    except Exception as exc:
+        latency_ms = (datetime.now() - started).total_seconds() * 1000
+        return {"name": name, "url": url, "ok": False, "error": str(exc), "latency_ms": latency_ms, "note": str(exc)}
+
+
+def pgvector_service_check() -> dict[str, Any]:
+    started = datetime.now()
+    dsn = os.getenv("PGVECTOR_DSN") or os.getenv("DATABASE_URL")
+    if not dsn:
+        return {"name": "pgvector", "url": "PGVECTOR_DSN/DATABASE_URL", "ok": False, "error": "PGVECTOR_DSN or DATABASE_URL is not set", "latency_ms": 0, "note": "missing DSN"}
+    try:
+        import psycopg  # type: ignore[import-not-found]
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            conn.execute("SELECT 1").fetchone()
+        latency_ms = (datetime.now() - started).total_seconds() * 1000
+        return {"name": "pgvector", "url": "PGVECTOR_DSN/DATABASE_URL", "ok": True, "error": "", "latency_ms": latency_ms, "note": "SELECT 1 OK"}
+    except Exception as exc:
+        latency_ms = (datetime.now() - started).total_seconds() * 1000
+        return {"name": "pgvector", "url": "PGVECTOR_DSN/DATABASE_URL", "ok": False, "error": str(exc), "latency_ms": latency_ms, "note": str(exc)}
+
+
+def live_service_health(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    model_base = service_base_from_endpoint(os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000"))
+    checks = [
+        ("model_adapter", model_base + "/health"),
+        ("qdrant", os.getenv("QDRANT_URL", "http://127.0.0.1:5001").rstrip("/") + "/healthz"),
+        ("weaviate", os.getenv("WEAVIATE_URL", "http://127.0.0.1:5004").rstrip("/") + "/v1/.well-known/ready"),
+    ]
+    # Normalize endpoint URLs accidentally stored in env to the adapter base.
+    out = []
+    for name, url in checks:
+        if name == "model_adapter":
+            if url.endswith("/health/health"):
+                url = url[: -len("/health/health")] + "/health"
+            for suffix in ("/embed/gte/health", "/embed/jina/health", "/rerank/bge/health", "/rerank/qwen/health"):
+                if url.endswith(suffix):
+                    url = url[: -len(suffix)] + "/health"
+            for suffix in ("/embed/gte", "/embed/jina", "/rerank/bge", "/rerank/qwen"):
+                if url.endswith(suffix + "/health"):
+                    url = url[: -len(suffix + "/health")] + "/health"
+        out.append(service_check(name, url))
+    out.append(pgvector_service_check())
+    return out
+
+
 def read_json_file(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -187,9 +243,13 @@ def read_nvidia_rag() -> dict:
     benchmark_report = read_json_file(NVIDIA_RAG_DIR / "benchmark_report.json")
     benchmark_summary = sort_summary(read_csv(NVIDIA_RAG_DIR / "benchmark_summary.csv"))
     benchmark_details = read_csv(NVIDIA_RAG_DIR / "benchmark_details.csv") if NVIDIA_RAG_DIR.exists() else []
+    baseline_report = read_json_file(NVIDIA_RAG_DIR / "benchmark_baseline_report.json")
+    reranked_report = read_json_file(NVIDIA_RAG_DIR / "benchmark_reranked_report.json")
+    baseline_summary = sort_summary(read_csv(NVIDIA_RAG_DIR / "benchmark_baseline_summary.csv"))
+    reranked_summary = sort_summary(read_csv(NVIDIA_RAG_DIR / "benchmark_reranked_summary.csv"))
     files = []
     if NVIDIA_RAG_DIR.exists():
-        files = [str(p.relative_to(ROOT)) for p in sorted(NVIDIA_RAG_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)]
+        files = [str(p.relative_to(ROOT)) for p in sorted(NVIDIA_RAG_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True) if p.is_file() and p.suffix.lower() in {".json", ".csv"}]
     return {
         "health": health,
         "smoke": smoke,
@@ -198,9 +258,12 @@ def read_nvidia_rag() -> dict:
             "report": benchmark_report,
             "summary": benchmark_summary,
             "details": benchmark_details[:250],
+            "baseline": {"report": baseline_report, "summary": baseline_summary},
+            "reranked": {"report": reranked_report, "summary": reranked_summary},
         },
         "files": files,
-        "configured": bool(health or smoke or ingestion or benchmark_report or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
+        "configured": bool(health or smoke or ingestion or benchmark_report or baseline_report or reranked_report or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
+        "note": "NVIDIA RAG metrics are service evidence only. They are separate from the 135-combination Project Smiley benchmark matrix.",
     }
 
 
@@ -239,15 +302,29 @@ def read_hallucination() -> dict:
 
 
 def read_pdf_audit() -> dict:
+    if not PDF_AUDIT_PATH.exists():
+        return {
+            "status": "audit_missing",
+            "missing": True,
+            "rows": [],
+            "total": 0,
+            "ok_count": 0,
+            "needs_ocr_count": 0,
+            "needs_ocr": [],
+            "message": "data/pdf_extraction_audit.csv missing. Live benchmark pipeline blocks until MinerU/layout extraction audit exists.",
+        }
     rows = read_csv(PDF_AUDIT_PATH)
-    needs = [r for r in rows if str(r.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or r.get("status") in {"needs_ocr", "partial_ocr_review", "failed"}]
+    needs = [r for r in rows if str(r.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or r.get("status") in {"needs_ocr", "partial_ocr_review", "failed", "text_only_review"} or (r.get("parser_method") or "") == "PyPDF2_fallback"]
     ok = [r for r in rows if r not in needs]
     return {
+        "status": "ok" if rows and not needs else "review_required",
+        "missing": False,
         "rows": rows[:500],
         "total": len(rows),
         "ok_count": len(ok),
         "needs_ocr_count": len(needs),
         "needs_ocr": needs[:100],
+        "message": "Audit clean" if rows and not needs else "Extraction audit has review-required rows",
     }
 
 
@@ -307,17 +384,34 @@ def count_pdf_chunks(pdf_name: str) -> int:
         return 0
 
 
+def pdf_path_for_name(name: str) -> Path | None:
+    clean = str(name or "").strip()
+    if not clean or "/" in clean or "\\" in clean:
+        return None
+    if Path(clean).suffix.lower() != ".pdf":
+        return None
+    try:
+        base = PDF_DIR.resolve()
+        target = (PDF_DIR / clean).resolve()
+    except Exception:
+        return None
+    if target.parent != base or not target.exists() or not target.is_file():
+        return None
+    return target
+
+
 def read_document_repository() -> dict[str, Any]:
-    pdf_dir = ROOT / "data" / "pdfs"
+    pdf_dir = PDF_DIR
     audit_rows = read_csv(PDF_AUDIT_PATH)
+    audit_missing = not PDF_AUDIT_PATH.exists()
     audit_by_name = {r.get("pdf_name") or r.get("file") or r.get("filename"): r for r in audit_rows}
     files = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
     rows = []
     for f in files:
         audit = audit_by_name.get(f.name, {})
         chunks = count_pdf_chunks(f.name)
-        status = audit.get("status") or ("chunked" if chunks else "present")
-        needs_review = str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed"}
+        status = audit.get("status") or ("audit_missing" if audit_missing else ("chunked" if chunks else "present"))
+        needs_review = audit_missing or str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed", "text_only_review"}
         if (audit.get("parser_method") or "") == "PyPDF2_fallback":
             status = "text_only_review"
             needs_review = True
@@ -330,7 +424,7 @@ def read_document_repository() -> dict[str, Any]:
             "parser_method": audit.get("parser_method") or audit.get("parser") or "—",
             "pages": audit.get("total_pages") or audit.get("pages") or "—",
             "text_chars": audit.get("text_chars") or "—",
-            "note": "Review in audit" if needs_review else ("Ready for benchmark" if chunks else "Present, chunking pending"),
+            "note": "Extraction audit missing" if audit_missing else ("Review in audit" if needs_review else ("Ready for benchmark" if chunks else "Present, chunking pending")),
         })
     uploaded = []
     upload_dir = ROOT / "data" / "uploads"
@@ -341,7 +435,7 @@ def read_document_repository() -> dict[str, Any]:
     return {
         "rows": rows,
         "total": len(rows),
-        "ready_count": sum(1 for r in rows if r["chunked_rows"]),
+        "ready_count": sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review"),
         "review_count": sum(1 for r in rows if r["status"] == "review"),
         "uploaded": uploaded[:100],
     }
@@ -387,6 +481,8 @@ def complete_pipeline_cmd(qs: dict[str, list[str]], preflight: bool = False) -> 
     cmd += ["--chunk-limit", chunk_limit, "--query-limit", query_limit]
     if qs.get("fresh_run", ["0"])[0] == "1":
         cmd.append("--fresh-run")
+    if qs.get("allow_partial_extraction", ["0"])[0] == "1":
+        cmd.append("--allow-partial-extraction")
     return cmd
 
 
@@ -502,6 +598,21 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/options":
             self.send_json(benchmark_options())
             return
+        if parsed.path == "/api/pdf":
+            name = parse_qs(parsed.query).get("name", [""])[0]
+            pdf_path = pdf_path_for_name(name)
+            if not pdf_path:
+                self.send_json({"error": "PDF not found in data/pdfs", "name": name}, 404)
+                return
+            body = pdf_path.read_bytes()
+            safe_filename = pdf_path.name.replace('"', "")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", f'inline; filename="{safe_filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/results":
             summary = sort_summary(read_csv(FULL_DIR / "benchmark_summary.csv"))
             chunking = sort_summary(read_csv(ROOT / "data" / "chunking_recall_summary.csv"))
@@ -527,6 +638,14 @@ class Handler(SimpleHTTPRequestHandler):
                 "data/nvidia_rag/benchmark_details.csv",
                 "data/nvidia_rag/benchmark_report.json",
                 "data/nvidia_rag/benchmark_latest.json",
+                "data/nvidia_rag/benchmark_baseline_summary.csv",
+                "data/nvidia_rag/benchmark_baseline_details.csv",
+                "data/nvidia_rag/benchmark_baseline_report.json",
+                "data/nvidia_rag/benchmark_baseline_latest.json",
+                "data/nvidia_rag/benchmark_reranked_summary.csv",
+                "data/nvidia_rag/benchmark_reranked_details.csv",
+                "data/nvidia_rag/benchmark_reranked_report.json",
+                "data/nvidia_rag/benchmark_reranked_latest.json",
                 "data/retrieval_smoke/summary.json",
                 "data/evaluation/groundtruth_eval_summary.csv",
                 "data/evaluation/groundtruth_eval_details.csv",
@@ -591,7 +710,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "nvidia_rag": nvidia_rag,
                     "reranker_analysis": reranker_analysis,
                     "vm_snapshot": snapshot,
-                    "service_health": snapshot.get("health", []),
+                    "service_health": live_service_health(snapshot),
                     "known_pdf_count": document_repository.get("total") or pdf_audit.get("total") or 0,
                     "extracted_pdf_count": document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
                     "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,

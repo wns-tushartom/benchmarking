@@ -43,7 +43,17 @@ class QdrantVectorStoreAdapter:
         self.chunks = {}
         for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
             self.chunks[str(i)] = chunk
-            points.append(self.models.PointStruct(id=i, vector=vector, payload={"chunk_key": str(i), "chunk_id": chunk.id, "pdf_name": chunk.pdf_name, "paragraph": chunk.paragraph}))
+            metadata = chunk.metadata or {}
+            payload = {
+                "chunk_key": str(i),
+                "chunk_id": chunk.id,
+                "pdf_name": chunk.pdf_name,
+                "paragraph": chunk.paragraph,
+                "page_number": metadata.get("page_number", ""),
+                "source_type": metadata.get("source_type", ""),
+                "parser_method": metadata.get("parser_method", ""),
+            }
+            points.append(self.models.PointStruct(id=i, vector=vector, payload=payload))
         for batch_start in range(0, len(points), 256):
             self.client.upsert(collection_name=self.collection, points=points[batch_start:batch_start + 256], wait=True)
         return {"upsert_latency_s": time.perf_counter() - start, "vector_count": len(vectors)}

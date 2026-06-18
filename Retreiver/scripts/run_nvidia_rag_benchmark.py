@@ -253,16 +253,41 @@ def avg(values: list[float]) -> float:
     return round(sum(values) / len(values), 6) if values else 0.0
 
 
+def nvidia_pipeline_label() -> str:
+    return os.getenv("NVIDIA_RAG_PIPELINE_LABEL", "NVIDIA RAG service lane")
+
+
+def nvidia_embedding_label() -> str:
+    return os.getenv("NVIDIA_RAG_EMBEDDING_MODEL") or "not reported by NVIDIA service"
+
+
+def nvidia_splitter_label() -> str:
+    return os.getenv("NVIDIA_RAG_SPLITTER") or "not reported by NVIDIA service"
+
+
+def nvidia_reranker_label(enabled: bool) -> str:
+    if not enabled:
+        return "none"
+    return os.getenv("NVIDIA_RAG_RERANKER_MODEL") or "service reranker enabled"
+
+
+def nvidia_success_flags(details: list[dict[str, Any]]) -> tuple[bool, bool, int]:
+    successful_count = sum(1 for r in details if int(r.get("ok", 0)) == 1)
+    all_queries_ok = bool(details) and successful_count == len(details)
+    partial_ok = 0 < successful_count < len(details)
+    return all_queries_ok, partial_ok, successful_count
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         path.write_text("", encoding="utf-8")
         return
     with path.open("w", encoding="utf-8", newline="") as f:
-        fieldnames = list(rows[0].keys())
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
 
 
 def evaluate_case(case: dict[str, str], response: dict[str, Any], top_k: int, threshold: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -272,11 +297,11 @@ def evaluate_case(case: dict[str, str], response: dict[str, Any], top_k: int, th
     detail = {
         "id": case["id"],
         "query": case["query"],
-        "pipeline": "NVIDIA RAG Blueprint",
-        "sheet": "NVIDIA Blueprint splitter",
-        "embedding": os.getenv("NVIDIA_RAG_EMBEDDING_MODEL", "NVIDIA Blueprint embedding"),
+        "pipeline": nvidia_pipeline_label(),
+        "sheet": nvidia_splitter_label(),
+        "embedding": nvidia_embedding_label(),
         "store": os.getenv("NVIDIA_RAG_COLLECTION", "multimodal_data"),
-        "reranker": "NVIDIA reranker" if response.get("reranker_enabled") else "none",
+        "reranker": nvidia_reranker_label(bool(response.get("reranker_enabled"))),
         "top_k": top_k,
         "retrieved_count": len(hits),
         "latency_seconds": response.get("latency_seconds", ""),
@@ -309,11 +334,11 @@ def summarize(rows: list[dict[str, Any]], collection: str, reranker_enabled: boo
     latency = avg([float(r["latency_seconds"] or 0) for r in rows])
     winner_score = round((0.45 * recall5) + (0.30 * mrr_score) + (0.20 * ndcg5) + (0.05 * (1 / (1 + latency))), 6)
     return [{
-        "pipeline": "NVIDIA RAG Blueprint",
-        "sheet": "NVIDIA Blueprint splitter",
-        "embedding": os.getenv("NVIDIA_RAG_EMBEDDING_MODEL", "NVIDIA Blueprint embedding"),
+        "pipeline": nvidia_pipeline_label(),
+        "sheet": nvidia_splitter_label(),
+        "embedding": nvidia_embedding_label(),
         "store": collection,
-        "reranker": "NVIDIA reranker" if reranker_enabled else "none",
+        "reranker": nvidia_reranker_label(reranker_enabled),
         "evaluated_queries": len(rows),
         "successful_queries": sum(1 for r in rows if int(r.get("ok", 0)) == 1),
         "recall_at_1": avg([float(r["hit_at_1"]) for r in rows]),
@@ -373,12 +398,21 @@ def main() -> int:
             first_error = response.get("error", "") or json.dumps(response.get("body", {}), ensure_ascii=False)[:600]
         print(f"{index}/{len(cases)} status={response.get('status')} hits={len(hits)} query={case['query'][:80]!r}", flush=True)
 
-    successful_count = sum(1 for r in details if int(r.get("ok", 0)) == 1)
+    all_queries_ok, partial_ok, successful_count = nvidia_success_flags(details)
     summary = summarize(details, collection, reranker_enabled) if successful_count else []
+    mode = "reranked" if reranker_enabled else "baseline"
+    details_path = OUT_DIR / f"benchmark_{mode}_details.csv"
+    summary_path = OUT_DIR / f"benchmark_{mode}_summary.csv"
+    report_path = OUT_DIR / f"benchmark_{mode}_report.json"
+    latest_path = OUT_DIR / f"benchmark_{mode}_latest.json"
+    write_csv(details_path, details)
+    write_csv(summary_path, summary)
+    # Compatibility/latest files are overwritten intentionally, while baseline/reranked files remain separate.
     write_csv(OUT_DIR / "benchmark_details.csv", details)
     write_csv(OUT_DIR / "benchmark_summary.csv", summary)
     report = {
-        "ok": bool(summary and any(int(r.get("ok", 0)) for r in details)),
+        "ok": all_queries_ok,
+        "partial_ok": partial_ok,
         "created_at": datetime.now().isoformat(),
         "url": url,
         "collection": collection,
@@ -386,25 +420,30 @@ def main() -> int:
         "groundtruth_rows_loaded": len(cases),
         "evaluated_rows": len(details),
         "successful_queries": successful_count,
+        "failed_queries": len(details) - successful_count,
         "top_k": args.top_k,
         "reranker_enabled": reranker_enabled,
+        "mode": mode,
         "text_threshold": args.text_threshold,
         "total_seconds": round(time.time() - started, 6),
         "best": summary[0] if summary else None,
         "first_error": first_error,
         "preview": previews,
-        "methodology": "Deterministic benchmark over NVIDIA RAG /v1/search. Relevance uses expected PDF match when present, otherwise lexical overlap against ground-truth context/answer.",
+        "methodology": "Deterministic benchmark over NVIDIA RAG /v1/search. Relevance uses expected PDF match when present, otherwise lexical overlap against ground-truth context/answer. ok=true only when every evaluated query succeeds.",
     }
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    latest_payload = {"report": report, "summary": summary, "details_preview": details[:20]}
+    latest_path.write_text(json.dumps(latest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     (OUT_DIR / "benchmark_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    (OUT_DIR / "benchmark_latest.json").write_text(json.dumps({"report": report, "summary": summary, "details_preview": details[:20]}, indent=2, ensure_ascii=False), encoding="utf-8")
+    (OUT_DIR / "benchmark_latest.json").write_text(json.dumps(latest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({
         "ok": report["ok"],
         "groundtruth_rows": len(cases),
         "evaluated_rows": len(details),
         "successful_queries": report["successful_queries"],
-        "summary": "data/nvidia_rag/benchmark_summary.csv",
-        "details": "data/nvidia_rag/benchmark_details.csv",
-        "report": "data/nvidia_rag/benchmark_report.json",
+        "summary": str(summary_path.relative_to(ROOT)),
+        "details": str(details_path.relative_to(ROOT)),
+        "report": str(report_path.relative_to(ROOT)),
         "error": first_error[:300],
     }, indent=2, ensure_ascii=False))
     return 0 if report["ok"] else 1
