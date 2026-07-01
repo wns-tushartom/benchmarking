@@ -1,35 +1,32 @@
-# Retriever/config/QA_Text/config.base.yaml
-
 llm_client:
   http_timeout_sec: 60
   http_retries: 0
-  default_model: "meta/llama-3.3-70b-instruct"
-  default_provider: "custom"
+  default_model: meta/llama-3.3-70b-instruct
+  default_provider: custom
   available_models:
     gpt-4o:
-      provider: "azure"
-      deployment: "gpt-4o"
+      provider: azure
+      deployment: gpt-4o
     gpt-4o-mini:
-      provider: "azure"
-      deployment: "gpt-4o-mini"
+      provider: azure
+      deployment: gpt-4o-mini
     llama3.3-70b-wns-airesearch-domain:
-      provider: "custom"
-      api_url: "http://3.212.184.57:5001/v1/completions"
-      model_id: "llama3.3-70b-wns-airesearch-domain"
+      provider: custom
+      api_url: http://3.212.184.57:5001/v1/completions
+      model_id: llama3.3-70b-wns-airesearch-domain
     meta/llama-3.3-70b-instruct:
-      provider: "custom"
-      api_url: "http://3.212.184.57:5001/v1/completions"
-      model_id: "meta/llama-3.3-70b-instruct"
-
+      provider: custom
+      api_url: http://3.212.184.57:5001/v1/completions
+      model_id: meta/llama-3.3-70b-instruct
 llm_settings:
-  provider: "WNS"
-  default_model: "llama3.3-70b-wns-airesearch-domain"
-  default_model_description: "Primary model (or Azure deployment name)"
-  default_fast_model: "llama3.3-70b-wns-airesearch-domain"
-  default_fast_model_description: "Cheaper/faster model for light calls"
+  provider: WNS
+  default_model: llama3.3-70b-wns-airesearch-domain
+  default_model_description: Primary model (or Azure deployment name)
+  default_fast_model: llama3.3-70b-wns-airesearch-domain
+  default_fast_model_description: Cheaper/faster model for light calls
   enable_azure_resolver: false
-  enable_azure_resolver_description: "If chat_service exposes _resolve_model, prefer it to map to Azure deployments"
-
+  enable_azure_resolver_description: If chat_service exposes _resolve_model, prefer
+    it to map to Azure deployments
   max_tokens_default: 1000
   max_tokens_cap: 128000
   temperature_default: 0.7
@@ -37,43 +34,38 @@ llm_settings:
   context_k_per_doc_default: 3
   followup_top_k: 5
   max_documents_per_request: 5
-
   sse_heartbeat_ms: 15000
-  sse_headers_cache_control: "no-cache"
-  sse_headers_connection: "keep-alive"
-  sse_headers_accel_buffering: "no"
+  sse_headers_cache_control: no-cache
+  sse_headers_connection: keep-alive
+  sse_headers_accel_buffering: 'no'
   summary_context_cap: 16
-
   available_models:
-    - model: "gpt-4o"
-      description: "Latest Omni; strong multimodal + reasoning"
-      max_tokens: 128000
-      in_consideration: false
-    - model: "gpt-4o-mini"
-      description: "Fast, cost-efficient for chat/RAG"
-      max_tokens: 128000
-      in_consideration: false
-    - model: "meta/llama-3.3-70b-instruct"
-      description: "Fine-tuned Llama 3 model for specialized tasks"
-      max_tokens: 32000
-      in_consideration: false
-    - model: "llama3.3-70b-wns-airesearch-domain"
-      description: "Fine-tuned Llama 3.3 model for domain-specific tasks"
-      max_tokens: 32000
-      in_consideration: true
-
-  recommended_model_for_rag: "llama3.3-70b-wns-airesearch-domain"
-  recommended_finetuned_model: "llama3.3-70b-wns-airesearch-domain"
-
+  - model: gpt-4o
+    description: Latest Omni; strong multimodal + reasoning
+    max_tokens: 128000
+    in_consideration: false
+  - model: gpt-4o-mini
+    description: Fast, cost-efficient for chat/RAG
+    max_tokens: 128000
+    in_consideration: false
+  - model: meta/llama-3.3-70b-instruct
+    description: Fine-tuned Llama 3 model for specialized tasks
+    max_tokens: 32000
+    in_consideration: false
+  - model: llama3.3-70b-wns-airesearch-domain
+    description: Fine-tuned Llama 3.3 model for domain-specific tasks
+    max_tokens: 32000
+    in_consideration: true
+  recommended_model_for_rag: llama3.3-70b-wns-airesearch-domain
+  recommended_finetuned_model: llama3.3-70b-wns-airesearch-domain
 document_settings:
-  upload_tmp_dir: "/tmp/app_uploads"     # override via ENV in Windows/containers
+  upload_tmp_dir: /tmp/app_uploads
   max_file_size: 52428800
   upload_chunk_size: 2097152
   batch_upload_concurrency: 4
   embedding_batch_size: 64
-
 embedding_settings:
-  default_model: "nvidia/nv-embedqa-e5-v5"
+  default_model: nvidia/nv-embedqa-e5-v5
   enable_model_resolver: true
   single_batch_max_texts: 100
   compare_max_texts: 50
@@ -83,17 +75,16 @@ embedding_settings:
   similarity_matrix_limit: 50
   top_k_default: 10
   available_models:
-    - model: "nvidia/nv-embedqa-e5-v5"
-      description: "NVIDIA high-quality embedding model for Q&A"
-      dimension: 1024
-      recommended: true
-    - model: "nvidia/nv-embed-v1"
-      description: "NVIDIA general purpose embedding model"
-      dimension: 1024
-      recommended: false
-
+  - model: nvidia/nv-embedqa-e5-v5
+    description: NVIDIA high-quality embedding model for Q&A
+    dimension: 1024
+    recommended: true
+  - model: nvidia/nv-embed-v1
+    description: NVIDIA general purpose embedding model
+    dimension: 1024
+    recommended: false
 search_settings:
-  default_embedding_model: "nvidia/nv-embedqa-e5-v5"
+  default_embedding_model: nvidia/nv-embedqa-e5-v5
   embed_dimension_fallback: 1024
   top_k_default: 5
   top_k_cap: 100
@@ -102,68 +93,50 @@ search_settings:
   content_fetch_hard_cap: 2000
   doc_chunks_per_document_estimate: 10
   stats_concurrency: 8
-
-# >>> Parser config used by the unified document_parser.py
 document_parser:
-  # Paths (anchored to QA_Text/Retreiver when relative)
-  output_dir: "data/processed"           # session artifacts
-  input_dir: "data/pdfs"                 # bulk CLI input
-  output_dir_parsed: "data/parsed_output"# bulk CLI outputs (md/json)
-  tmp_dir: "data/tmp"
-
-  # File handling
-  supported_exts: [".pdf", ".txt", ".md"]
-  max_file_size: 52428800                # 50 MB
+  output_dir: data/processed
+  input_dir: data/pdfs
+  output_dir_parsed: data/parsed_output
+  tmp_dir: data/tmp
+  supported_exts:
+  - .pdf
+  - .txt
+  - .md
+  max_file_size: 125829120
   keep_tmp: false
-
-  # Backend selection & MinerU config
-  force_backend: null                    # null | "mineru_api" | "mineru_cli" | "pypdf2" | "mineru"
-  mineru_parse_method: "auto"
-  mineru_model_json_path: null           # e.g., "models/mineru/model.json"
+  force_backend: null
+  mineru_parse_method: ocr
+  mineru_model_json_path: null
   mineru_dump_json_md: true
-
-  # Policy: when MinerU is present but fails, avoid PyPDF2?
-  no_pypdf2_if_mineru_present: false      # set false to allow fallback text-only
-
-  # Concurrency for multi-file helpers
+  no_pypdf2_if_mineru_present: false
   max_concurrency: 4
-
 cloud_services:
-  # Azure OpenAI
-  azure_endpoint_url: "https://wns-openai-dt-dev-eus.openai.azure.com/"
-  azure_deployment_name: "gpt-4o"
-  api_version: "2024-02-15-preview"
-  region: "EUS"
-  azure_api_key: "b9a6ddcad6ba40a185c3cc83923be088"   # consider moving to ENV
-
-  # NVIDIA
-  nvidia_base_url: "https://integrate.api.nvidia.com/v1"
-  nvidia_api_key: "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"  # move to ENV
-  nvidia_embedding_model: "nvidia/nv-embedqa-e5-v5"
-  nvidia_fallback_embedding_model: "nvidia/nv-embed-v1"
-
-  # Storage/Vector
-  embeddings_path: "data/embeddings/markdown_embeddings.jsonl"
-  milvus_host: "localhost"
+  azure_endpoint_url: https://wns-openai-dt-dev-eus.openai.azure.com/
+  azure_deployment_name: gpt-4o
+  api_version: 2024-02-15-preview
+  region: EUS
+  azure_api_key: b9a6ddcad6ba40a185c3cc83923be088
+  nvidia_base_url: https://integrate.api.nvidia.com/v1
+  nvidia_api_key: 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
+  nvidia_embedding_model: nvidia/nv-embedqa-e5-v5
+  nvidia_fallback_embedding_model: nvidia/nv-embed-v1
+  embeddings_path: data/embeddings/markdown_embeddings.jsonl
+  milvus_host: localhost
   milvus_port: 19530
-  milvus_uri: "C:/temp/milvus_benchmark.db"
-  default_collection: "documents"
+  milvus_uri: C:/temp/milvus_benchmark.db
+  default_collection: documents
   embedding_dim: 1024
-
-  # API host
-  api_host: "127.0.0.1"
+  api_host: 127.0.0.1
   api_port: 8000
-
-  # Misc (note: parser reads document_parser.supported_exts; keep this for other services)
-  log_level: "INFO"
+  log_level: INFO
   max_file_size: 52428800
-  supported_file_types: [".pdf"]
+  supported_file_types:
+  - .pdf
   chunk_size: 1000
   chunk_overlap: 200
-  metric_type: "COSINE"
-
+  metric_type: COSINE
 query_settings:
-  analysis_model: "llama3.3-70b-wns-airesearch-domain"
+  analysis_model: llama3.3-70b-wns-airesearch-domain
   temperature_default: 0.1
   max_tokens_default: 800
   heuristic_only: false
@@ -171,190 +144,278 @@ query_settings:
   llm_retry_base_delay: 0.6
   llm_retry_jitter: 0.2
   prompt_keys:
-    system_prompt: "query_analysis"
-    template_name: "query_analysis_comprehensive"
-
+    system_prompt: query_analysis
+    template_name: query_analysis_comprehensive
 prompts:
   system:
-    chat_with_rag: >
-      You are an expert AI assistant that answers questions using provided document
-      context. Always prioritize the context; if it’s insufficient, say so explicitly.
-      Cite sources using [Source N]. Be precise, helpful, and acknowledge uncertainty.
-    chat_without_rag: >
-      You are a helpful, knowledgeable, and concise AI assistant. Provide accurate,
-      well-structured responses and state limitations when needed.
-    chat_streaming: >
-      You are optimized for real-time streaming. Use short, structured chunks and
-      clear formatting for incremental delivery.
-    technical_expert: >
-      You are a technical expert. Provide accurate, detailed explanations with
-      practical examples where helpful.
-    helpful_assistant: >
-      You are a helpful, accurate, and concise AI assistant. Provide useful,
-      well-structured responses.
-    query_analysis: >
-      You are an expert query analysis system. Analyze user intent, complexity, and
-      information requirements. Output ONLY valid JSON that matches the requested schema.
-      Be thorough yet concise; keep confidence realistic.
+    chat_with_rag: "You are an expert AI assistant that answers questions using provided\
+      \ document context. Always prioritize the context; if it\u2019s insufficient,\
+      \ say so explicitly. Cite sources using [Source N]. Be precise, helpful, and\
+      \ acknowledge uncertainty.\n"
+    chat_without_rag: 'You are a helpful, knowledgeable, and concise AI assistant.
+      Provide accurate, well-structured responses and state limitations when needed.
 
+      '
+    chat_streaming: 'You are optimized for real-time streaming. Use short, structured
+      chunks and clear formatting for incremental delivery.
+
+      '
+    technical_expert: 'You are a technical expert. Provide accurate, detailed explanations
+      with practical examples where helpful.
+
+      '
+    helpful_assistant: 'You are a helpful, accurate, and concise AI assistant. Provide
+      useful, well-structured responses.
+
+      '
+    query_analysis: 'You are an expert query analysis system. Analyze user intent,
+      complexity, and information requirements. Output ONLY valid JSON that matches
+      the requested schema. Be thorough yet concise; keep confidence realistic.
+
+      '
   templates:
     chat_with_context:
       name: chat_with_context
       description: Standard RAG chat prompt with source citations
       category: chat
-      version: "1.0"
-      required_fields: [context, query]
+      version: '1.0'
+      required_fields:
+      - context
+      - query
       optional_fields: []
       max_length: 4000
-      tags: [rag, citations, context-aware]
-      template: |
-        Context Information:
+      tags:
+      - rag
+      - citations
+      - context-aware
+      template: 'Context Information:
+
         {context}
+
 
         Question: {query}
 
-        Instructions: Answer using ONLY the context above. If the context is insufficient, say so explicitly.
+
+        Instructions: Answer using ONLY the context above. If the context is insufficient,
+        say so explicitly.
+
         Cite sources like [Source N] when referencing specific information.
 
+
         Response:
+
+        '
     chat_with_history:
       name: chat_with_history
       description: Chat with conversation history and context
       category: chat
-      version: "1.0"
-      required_fields: [history, context, query]
-      optional_fields: [max_history_turns]
+      version: '1.0'
+      required_fields:
+      - history
+      - context
+      - query
+      optional_fields:
+      - max_history_turns
       max_length: 4000
-      tags: [history, context, conversational]
-      template: |
-        Conversation History:
+      tags:
+      - history
+      - context
+      - conversational
+      template: 'Conversation History:
+
         {history}
 
+
         Current Context:
+
         {context}
+
 
         User Question: {query}
 
-        Instructions: Use both the conversation history and current context to provide a comprehensive answer.
+
+        Instructions: Use both the conversation history and current context to provide
+        a comprehensive answer.
+
         Maintain conversation flow while incorporating new context information.
 
+
         Response:
+
+        '
     query_analysis_comprehensive:
       name: query_analysis_comprehensive
       description: Comprehensive query analysis with detailed JSON schema
       category: analysis
-      version: "1.0"
-      required_fields: [query]
-      optional_fields: [context]
+      version: '1.0'
+      required_fields:
+      - query
+      optional_fields:
+      - context
       max_length: 5000
-      tags: [json, comprehensive, structured]
-      template: |
-        Analyze this user query and return ONLY valid JSON:
-
-        Query: "{query}"
-        Context: {context}
-
-        Required JSON format:
-        {{
-          "intent": "factual|analytical|procedural|creative|research|clarification|conversational",
-          "complexity": "simple|moderate|complex|research_intensive",
-          "context_requirement": "none|minimal|moderate|extensive",
-          "key_concepts": ["concept1","concept2"],
-          "sub_questions": ["sub1","sub2"],
-          "search_terms": ["t1","t2"],
-          "confidence": 0.0,
-          "reasoning": "explain briefly",
-          "estimated_tokens": 0,
-          "requires_multi_step": false,
-          "domain_hints": [],
-          "query_type": "question|request|command",
-          "ambiguity_score": 0.0,
-          "suggested_approach": "rag|reasoning|direct|creative",
-          "expected_answer_type": "factual|list|explanation|comparison|procedure"
-        }}
+      tags:
+      - json
+      - comprehensive
+      - structured
+      template: "Analyze this user query and return ONLY valid JSON:\n\nQuery: \"\
+        {query}\"\nContext: {context}\n\nRequired JSON format:\n{{\n  \"intent\":\
+        \ \"factual|analytical|procedural|creative|research|clarification|conversational\"\
+        ,\n  \"complexity\": \"simple|moderate|complex|research_intensive\",\n  \"\
+        context_requirement\": \"none|minimal|moderate|extensive\",\n  \"key_concepts\"\
+        : [\"concept1\",\"concept2\"],\n  \"sub_questions\": [\"sub1\",\"sub2\"],\n\
+        \  \"search_terms\": [\"t1\",\"t2\"],\n  \"confidence\": 0.0,\n  \"reasoning\"\
+        : \"explain briefly\",\n  \"estimated_tokens\": 0,\n  \"requires_multi_step\"\
+        : false,\n  \"domain_hints\": [],\n  \"query_type\": \"question|request|command\"\
+        ,\n  \"ambiguity_score\": 0.0,\n  \"suggested_approach\": \"rag|reasoning|direct|creative\"\
+        ,\n  \"expected_answer_type\": \"factual|list|explanation|comparison|procedure\"\
+        \n}}\n"
     reasoning_plan_detailed:
       name: reasoning_plan_detailed
       description: Detailed reasoning plan
       category: reasoning
-      version: "1.0"
-      required_fields: [query]
-      optional_fields: [complexity, intent, concepts, sub_questions, domain_hints]
+      version: '1.0'
+      required_fields:
+      - query
+      optional_fields:
+      - complexity
+      - intent
+      - concepts
+      - sub_questions
+      - domain_hints
       max_length: 5000
-      tags: [planning, multi-step, structured]
-      template: |
-        Create a detailed reasoning plan for:
+      tags:
+      - planning
+      - multi-step
+      - structured
+      template: 'Create a detailed reasoning plan for:
+
         "{query}"
 
+
         Return JSON with steps, dependencies, validation, fallback strategy, and confidence.
+
+        '
     final_synthesis:
       name: final_synthesis
       description: Final synthesis from reasoning steps
       category: reasoning
-      version: "1.0"
-      required_fields: [original_query, step_results]
-      optional_fields: [synthesis_instructions]
+      version: '1.0'
+      required_fields:
+      - original_query
+      - step_results
+      optional_fields:
+      - synthesis_instructions
       max_length: 5000
-      tags: [synthesis, integration, final-answer]
-      template: |
-        Synthesize a comprehensive final answer.
+      tags:
+      - synthesis
+      - integration
+      - final-answer
+      template: 'Synthesize a comprehensive final answer.
+
 
         Original Query: {original_query}
+
         Step Results:
+
         {step_results}
+
 
         Instructions: {synthesis_instructions}
 
+
         Final Answer:
+
+        '
     document_summary_structured:
       name: document_summary_structured
       description: Structured document summarization
       category: document
-      version: "1.0"
-      required_fields: [document_id, context]
-      optional_fields: [summary_type, target_length, include_key_points]
+      version: '1.0'
+      required_fields:
+      - document_id
+      - context
+      optional_fields:
+      - summary_type
+      - target_length
+      - include_key_points
       max_length: 5000
-      tags: [summary, structured]
-      template: |
-        Create a structured summary of the document:
+      tags:
+      - summary
+      - structured
+      template: 'Create a structured summary of the document:
+
 
         Document ID: {document_id}
+
         Context:
+
         {context}
 
+
         Summary Requirements:
+
         - Type: {summary_type}
+
         - Target Length: {target_length}
+
         - Include Key Points: {include_key_points}
 
+
         Structure:
+
         1) Main Topic/Purpose
+
         2) Key Points
+
         3) Supporting Details
+
         4) Conclusions/Implications
+
         5) Limitations
 
+
         Summary:
+
+        '
     comparison_analysis:
       name: comparison_analysis
       description: Structured comparison analysis
       category: analysis
-      version: "1.0"
-      required_fields: [topic, items, context]
-      optional_fields: [criteria]
+      version: '1.0'
+      required_fields:
+      - topic
+      - items
+      - context
+      optional_fields:
+      - criteria
       max_length: 5000
-      tags: [comparison, evaluation]
-      template: |
-        Perform a comparison.
+      tags:
+      - comparison
+      - evaluation
+      template: 'Perform a comparison.
+
 
         Topic: {topic}
+
         Items: {items}
+
         Context:
+
         {context}
+
         Criteria: {criteria}
 
+
         Output:
+
         1) Overview
+
         2) Detailed Comparison
+
         3) Strengths & Weaknesses
+
         4) Summary Table (concise)
+
         5) Recommendations
+
+        '

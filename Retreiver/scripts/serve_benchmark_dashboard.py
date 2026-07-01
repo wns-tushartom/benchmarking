@@ -432,11 +432,15 @@ def read_document_repository() -> dict[str, Any]:
         for f in sorted(upload_dir.rglob("*")):
             if f.is_file() and f.suffix.lower() in {".pdf", ".csv", ".xlsx"}:
                 uploaded.append({"path": str(f.relative_to(ROOT)), "size_mb": f"{f.stat().st_size / (1024*1024):.2f}"})
+    chunked_count = sum(1 for r in rows if r["chunked_rows"])
+    review_count = sum(1 for r in rows if r["status"] == "review")
+    ready_count = sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review")
     return {
         "rows": rows,
         "total": len(rows),
-        "ready_count": sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review"),
-        "review_count": sum(1 for r in rows if r["status"] == "review"),
+        "chunked_count": chunked_count,
+        "ready_count": ready_count,
+        "review_count": review_count,
         "uploaded": uploaded[:100],
     }
 
@@ -673,8 +677,8 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:
                         pass
             ingestion_rows = read_ingestion_summaries()
-            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["120"])[0])
-            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["120"])[0])
+            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["60000"])[0])
+            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["60000"])[0])
             retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
             reranker_smokes = read_reranker_smokes(limit=reranker_limit)
             retrieval_total = retrieval_smoke_count()
@@ -712,8 +716,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "vm_snapshot": snapshot,
                     "service_health": live_service_health(snapshot),
                     "known_pdf_count": document_repository.get("total") or pdf_audit.get("total") or 0,
-                    "extracted_pdf_count": document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
-                    "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,
+                    "extracted_pdf_count": document_repository.get("chunked_count") or document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
+                    "failed_pdf_count": document_repository.get("review_count") or pdf_audit.get("needs_ocr_count") or 0,
                     "pdf_audit": pdf_audit,
                     "document_repository": document_repository,
                     "known_matrix_count": benchmark_options().get("matrix_count"),

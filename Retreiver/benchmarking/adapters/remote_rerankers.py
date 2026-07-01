@@ -54,7 +54,14 @@ class RemoteHTTPRerankerAdapter:
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
 
     def rerank(self, query: str, hits: List[SearchHit], top_k: int) -> List[SearchHit]:
-        documents = [h.chunk.paragraph for h in hits]
+        input_top_k = int(os.environ.get("RERANK_INPUT_TOP_K", str(top_k)) or top_k)
+        input_top_k = max(1, min(len(hits), input_top_k))
+        max_chars = int(os.environ.get("RERANK_MAX_CHARS", "0") or "0")
+        active_hits = hits[:input_top_k]
+        if max_chars > 0:
+            documents = [str(h.chunk.paragraph or "")[:max_chars] for h in active_hits]
+        else:
+            documents = [h.chunk.paragraph for h in active_hits]
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         payloads = [
             {"model": self.model, "query": query, "documents": documents, "top_k": len(documents)},
@@ -64,12 +71,12 @@ class RemoteHTTPRerankerAdapter:
         last_error: Exception | None = None
         for payload in payloads:
             try:
-                scores = _scores_from_response(_post_json(self.url, payload, headers=headers), len(hits))
-                if len(scores) >= len(hits):
-                    rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(hits)]
+                scores = _scores_from_response(_post_json(self.url, payload, headers=headers), len(active_hits))
+                if len(scores) >= len(active_hits):
+                    rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(active_hits)]
                     rescored.sort(key=lambda h: h.score, reverse=True)
-                    return rescored[:top_k]
-                last_error = RuntimeError(f"endpoint returned {len(scores)} scores for {len(hits)} documents")
+                    return rescored[: min(top_k, len(rescored))]
+                last_error = RuntimeError(f"endpoint returned {len(scores)} scores for {len(active_hits)} documents")
             except Exception as exc:
                 last_error = exc
         raise RuntimeError(f"Reranker endpoint failed for {self.name}: {last_error}")
