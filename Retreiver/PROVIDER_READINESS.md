@@ -11,7 +11,7 @@ Local/offline benchmark is complete. Real provider benchmark is partially blocke
 - `OPENAI_API_KEY`: present
 - `JINA_API_KEY`: present
 - Docker: available
-- Qdrant local service: reachable at `127.0.0.1:5001`
+- Qdrant local service: reachable at `127.0.0.1:6333`
 - Qdrant version: `1.17.1`
 
 ### Missing / blocked
@@ -21,14 +21,14 @@ Local/offline benchmark is complete. Real provider benchmark is partially blocke
   - `AWS_DEFAULT_REGION` / `AWS_REGION`: missing
   - cannot run Amazon Rerank production benchmark yet
 - PGVector:
-  - Postgres port `5003`: closed
+  - Postgres port `5432`: closed
   - `psql`: missing
   - `PGVECTOR_DSN` / `DATABASE_URL`: missing
 - Weaviate:
-  - `127.0.0.1:5004` readiness endpoint returned 404 / not ready
+  - `127.0.0.1:8080` readiness endpoint returned 404 / not ready
   - `WEAVIATE_URL`: missing
 - Qdrant API URL env:
-  - `QDRANT_URL`: missing, but local service is reachable directly at `http://127.0.0.1:5001`
+  - `QDRANT_URL`: missing, but local service is reachable directly at `http://127.0.0.1:6333`
 
 ## What this means
 
@@ -76,7 +76,7 @@ Use the same 506 query cases and compare against the local fallback output.
 Need:
 
 ```text
-Postgres running on 5003
+Postgres running on 5432
 pgvector extension installed
 PGVECTOR_DSN or DATABASE_URL configured
 psql installed for verification
@@ -108,11 +108,11 @@ Access to Amazon Rerank v1 / Bedrock rerank endpoint
 Current usable local endpoint:
 
 ```text
-http://127.0.0.1:5001
+http://127.0.0.1:6333
 ```
 
 Optional env to standardize scripts:
 
 ```bash
-export QDRANT_URL=http://127.0.0.1:5001
+export QDRANT_URL=http://127.0.0.1:6333
 ```

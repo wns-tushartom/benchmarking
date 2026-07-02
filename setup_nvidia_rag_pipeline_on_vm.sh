@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 run() {
-  echo "+ $*"
+  echo "+ $*" >&2
   if [[ "$DRY_RUN" != "1" ]]; then
     "$@"
   fi
@@ -133,8 +133,8 @@ text = path.read_text(encoding='utf-8')
 if new in text:
     raise SystemExit(0)
 if old not in text:
-    print(f"WARNING: pattern not found in {path}: {old}")
-    raise SystemExit(0)
+    print(f"ERROR: required port patch pattern not found in {path}: {old}", file=sys.stderr)
+    raise SystemExit(2)
 path.write_text(text.replace(old, new), encoding='utf-8')
 PY
 }
@@ -257,8 +257,10 @@ main() {
   patch_ports "$rag"
   write_envs "$rag" "$host"
   start_services "$rag"
-  if [[ "$DRY_RUN" != "1" ]]; then
-    python3 "$RETRIEVER_DIR/scripts/check_nvidia_rag_pipeline.py" --env-file "$RETRIEVER_DIR/.env.project-smiley-nvidia" --out "$RETRIEVER_DIR/data/nvidia_rag/health.json" || true
+  if [[ "$DRY_RUN" != "1" && "$SKIP_START" != "1" ]]; then
+    python3 "$RETRIEVER_DIR/scripts/check_nvidia_rag_pipeline.py" --env-file "$RETRIEVER_DIR/.env.project-smiley-nvidia" --out "$RETRIEVER_DIR/data/nvidia_rag/health.json"
+  elif [[ "$SKIP_START" == "1" ]]; then
+    echo "NVIDIA services configured only; health check skipped because --skip-start was set."
   fi
   cat > "$ROOT/NVIDIA_RAG_SETUP_RESULT.txt" <<EOF
 Project Smiley NVIDIA RAG setup

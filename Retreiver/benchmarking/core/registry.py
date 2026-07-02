@@ -30,6 +30,7 @@ def default_registry() -> Registry:
     from benchmarking.adapters.vector_qdrant import QdrantVectorStoreAdapter
     from benchmarking.adapters.vector_pgvector import PGVectorStoreAdapter
     from benchmarking.adapters.vector_weaviate import WeaviateVectorStoreAdapter
+    from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 
     r = Registry()
     r.register("chunker", "local_workbook", LocalChunkWorkbookAdapter)
@@ -40,6 +41,7 @@ def default_registry() -> Registry:
     r.register("vector_store", "qdrant", QdrantVectorStoreAdapter)
     r.register("vector_store", "pgvector", PGVectorStoreAdapter)
     r.register("vector_store", "weaviate", WeaviateVectorStoreAdapter)
+    r.register("vector_store", "faiss", FaissVectorStoreAdapter)
     r.register("reranker", "weighted_overlap", WeightedOverlapReranker)
     r.register("reranker", "amazon_bedrock", AmazonBedrockRerankerAdapter)
     r.register("reranker", "remote_http", RemoteHTTPRerankerAdapter)

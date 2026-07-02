@@ -13,6 +13,7 @@ from benchmarking.core.config import load_benchmark_config, generate_matrix, con
 from benchmarking.core.metrics import mrr, ndcg_at_k, precision_at_k, bootstrap_ci
 from benchmarking.core.registry import Registry
 from benchmarking.adapters.local import LocalChunkWorkbookAdapter, LocalHashEmbeddingAdapter, LocalVectorStoreAdapter, WeightedOverlapReranker
+from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 from benchmarking.core.runner import run_experiment
 
 
@@ -41,7 +42,7 @@ class ModularBenchmarkTests(unittest.TestCase):
         cfg = load_benchmark_config(Path("configs/benchmark.local.json"))
         matrix = generate_matrix(cfg)
         self.assertGreater(len(matrix), 0)
-        self.assertEqual(len(matrix), 135)
+        self.assertEqual(len(matrix), 180)
         self.assertIn("chunker", matrix[0])
         self.assertIn("index_type", matrix[0])
         self.assertIn("retrieval_method", matrix[0])
@@ -90,6 +91,26 @@ class ModularBenchmarkTests(unittest.TestCase):
         hits = store.search(embedder.embed("refund voucher"), top_k=1)
         reranked = WeightedOverlapReranker(name="unit_rerank").rerank("refund voucher", hits, top_k=1)
         self.assertEqual(len(reranked), 1)
+
+    def test_faiss_adapter_persists_and_searches(self):
+        try:
+            import faiss  # type: ignore[import-not-found]  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"faiss-cpu not installed: {exc}")
+        root = Path(__file__).resolve().parents[1]
+        chunks = LocalChunkWorkbookAdapter(root=root, sheet_name="semantic_split").chunk()[:3]
+        embedder = LocalHashEmbeddingAdapter(model_name="unit_model", dimensions=32)
+        vectors = embedder.embed_many([c.paragraph for c in chunks])
+        with tempfile.TemporaryDirectory() as td:
+            store = FaissVectorStoreAdapter(name="FAISS", index_dir=td, index_type="HNSW")
+            metrics = store.upsert(chunks, vectors)
+            self.assertEqual(metrics["vector_count"], len(chunks))
+            hits = store.search(vectors[0], top_k=2)
+            self.assertGreaterEqual(len(hits), 1)
+            loaded = FaissVectorStoreAdapter(name="FAISS", index_dir=td, load_existing=True)
+            persisted_hits = loaded.search(vectors[0], top_k=2)
+            self.assertGreaterEqual(len(persisted_hits), 1)
+            self.assertEqual(persisted_hits[0].chunk.pdf_name, chunks[0].pdf_name)
 
     def test_workbook_sheet_names_reads_xlsx_without_pandas(self):
         from scripts.run_complete_pipeline import workbook_sheet_names

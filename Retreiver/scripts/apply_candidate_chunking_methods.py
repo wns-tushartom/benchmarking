@@ -217,8 +217,15 @@ def verify_sheet(name: str, df: "pd.DataFrame") -> None:
         raise ValueError(f"{name}: missing required columns {missing}, got {list(df.columns)}")
     if df["id"].duplicated().any():
         raise ValueError(f"{name}: duplicate ids found")
-    if df["pdf_name"].isna().any() or df["paragraph"].isna().any():
-        raise ValueError(f"{name}: null pdf_name or paragraph found")
+    bad = (
+        df["pdf_name"].isna()
+        | df["paragraph"].isna()
+        | df["pdf_name"].astype(str).str.strip().eq("")
+        | df["paragraph"].astype(str).str.strip().eq("")
+    )
+    if bad.any():
+        examples = df.loc[bad, ["pdf_name", "paragraph"]].head(5).to_dict("records")
+        raise ValueError(f"{name}: null/blank pdf_name or paragraph found; examples={examples}")
     if df.empty:
         raise ValueError(f"{name}: no rows produced")
 
@@ -237,7 +244,7 @@ def main() -> None:
     if not input_path.exists():
         raise SystemExit(f"Input CSV not found: {input_path}")
 
-    df = pd.read_csv(input_path)
+    df = pd.read_csv(input_path, keep_default_na=False)
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise SystemExit(f"Input is missing required columns {missing}; available columns: {list(df.columns)}")
@@ -247,7 +254,7 @@ def main() -> None:
     sheets: Dict[str, pd.DataFrame] = {}
 
     if existing_path.exists():
-        existing = pd.read_excel(existing_path, sheet_name=None)
+        existing = pd.read_excel(existing_path, sheet_name=None, keep_default_na=False)
         for name, sheet_df in existing.items():
             keep = REQUIRED_COLUMNS + [col for col in OPTIONAL_METADATA_COLUMNS if col in sheet_df.columns]
             sheets[name] = sheet_df[keep].copy()
@@ -266,10 +273,12 @@ def main() -> None:
             f"avg_len={lengths.mean():.1f}"
         )
 
+    for name, sheet_df in sheets.items():
+        verify_sheet(name, sheet_df)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for name, sheet_df in sheets.items():
-            verify_sheet(name, sheet_df)
             sheet_df.to_excel(writer, sheet_name=name[:31], index=False)
 
     print("\nDone")

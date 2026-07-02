@@ -263,7 +263,7 @@ def read_nvidia_rag() -> dict:
         },
         "files": files,
         "configured": bool(health or smoke or ingestion or benchmark_report or baseline_report or reranked_report or os.getenv("NVIDIA_RAG_SERVER_URL") or os.getenv("NVIDIA_INGESTOR_URL")),
-        "note": "NVIDIA RAG metrics are service evidence only. They are separate from the 135-combination Project Smiley benchmark matrix.",
+        "note": "NVIDIA RAG metrics are service evidence only. They are separate from the 180-combination Project Smiley benchmark matrix.",
     }
 
 
@@ -717,7 +717,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "pdf_audit": pdf_audit,
                     "document_repository": document_repository,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
-                    "options_formula": "5 chunkers × 3 embeddings × 3 vector DBs × 1 retrieval × 3 rerankers = 135",
+                    "options_formula": "5 chunkers × 3 embeddings × 4 vector stores × 1 retrieval × 3 rerankers = 180",
                     "metrics_status": "Paused, no query ground-truth CSV requested yet",
                     "openai_status": "Pending OPENAI_API_KEY and cost approval",
                     "amazon_status": "Pending AWS/Bedrock credentials",

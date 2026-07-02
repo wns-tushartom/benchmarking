@@ -15,12 +15,13 @@ Use only host-facing ports `5000-5010`.
 - `5003`: PGVector/Postgres, container `5432`
 - `5004`: Weaviate HTTP, container `8080`
 - `5005`: Weaviate gRPC, container `50051`
+- FAISS: in-process local vector index, no host port
 
 ## Can all adapters use one port?
 
 For HTTP model adapters, yes. That is why Jina, GTE, Qwen rerank, and BGE rerank all sit behind one FastAPI service on port `5000` with different paths.
 
-For vector databases, no, not directly. Qdrant HTTP, Qdrant gRPC, Postgres/PGVector, and Weaviate are separate network protocols/services. They need separate host ports unless we add a real reverse proxy or gateway. Postgres is not HTTP, so a path-based proxy cannot share it with FastAPI.
+For vector databases, no, not directly. Qdrant HTTP, Qdrant gRPC, Postgres/PGVector, and Weaviate are separate network protocols/services. They need separate host ports unless we add a real reverse proxy or gateway. Postgres is not HTTP, so a path-based proxy cannot share it with FastAPI. FAISS is different: it is an in-process local vector index and does not expose a service port.
 
 Recommended setup: keep model adapters on one port, keep databases on separate ports. It is simpler and easier to debug.
 

@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const setText = (id, value) => { const el = $(id); if (el) el.textContent = value; };
 let state = { operational: {}, files: [], options: {} };
 let benchmarkOptions = {};
 
@@ -756,6 +757,26 @@ function renderDocumentRepository(repo) {
   ]);
 }
 
+function syncStatusDialog() {
+  const pairs = [
+    ['pdfStatus', 'dialogPdfStatus'],
+    ['pdfNote', 'dialogPdfNote'],
+    ['comboStatus', 'dialogComboStatus'],
+    ['comboNote', 'dialogComboNote'],
+    ['retrievalStatus', 'dialogRetrievalStatus'],
+    ['retrievalNote', 'dialogRetrievalNote'],
+  ];
+  pairs.forEach(([from, to]) => setText(to, $(from)?.textContent || '—'));
+}
+
+function openStatusDialog() {
+  const dialog = $('statusSummaryDialog');
+  if (!dialog) return;
+  syncStatusDialog();
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+}
+
 function renderOperational() {
   const op = state.operational || {};
   const ingestion = op.ingestion || {};
@@ -783,12 +804,13 @@ function renderOperational() {
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
   $('retrievalStatus').textContent = String(retrieval.length + rerank.length);
   $('retrievalNote').textContent = `${retrieval.length + rerank.length} loaded rows from ${op.retrieval_smoke_total || 0} retrieval + ${op.reranker_smoke_total || 0} reranker artifact files. Raw totals are generated evidence files, not query count.`;
-  $('bestR5Status').textContent = best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—';
-  $('bestConfigNote').textContent = best ? pipelineLabel(best) : 'best accuracy score';
-  $('bestLatencyStatus').textContent = fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—';
-  $('bestLatencyNote').textContent = fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency';
-  $('embeddingStatus').textContent = embeddings.length ? embeddings.join(' + ') : '—';
-  $('dbStatus').textContent = stores.length ? stores.join(' + ') : '—';
+  setText('bestR5Status', best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—');
+  setText('bestConfigNote', best ? pipelineLabel(best) : 'best accuracy score');
+  setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
+  setText('bestLatencyNote', fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency');
+  setText('embeddingStatus', embeddings.length ? embeddings.join(' + ') : '—');
+  setText('dbStatus', stores.length ? stores.join(' + ') : '—');
+  syncStatusDialog();
   $('ingestionHint').textContent = `${latest.length} latest successful component rows`;
   $('rerankHint').textContent = `${rerank.length} artifacts`;
   $('artifactHint').textContent = `${state.files.length} files`;
@@ -1008,7 +1030,7 @@ async function runAction(kind) {
   }
   if (kind === 'full') {
     p.set('top_k', $('runTopK')?.value || '10');
-    p.set('max_runs', String(benchmarkOptions.matrix_count || 135));
+    p.set('max_runs', String(benchmarkOptions.matrix_count || 180));
   }
   if (kind === 'rerank') {
     p.set('top_k', $('runTopK')?.value || '10');
@@ -1060,6 +1082,7 @@ document.addEventListener('click', e => {
   if (btn) setRunSelection(btn.dataset.sheet, btn.dataset.embedding, btn.dataset.store);
 });
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
+document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListener('click', openStatusDialog));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
 $('openTestOptionsBtn')?.addEventListener('click', () => $('testOptionsDialog')?.showModal());

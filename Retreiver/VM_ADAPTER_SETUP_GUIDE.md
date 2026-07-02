@@ -111,30 +111,30 @@ Start it:
 ```bash
 source .venv/bin/activate
 export EMBEDDING_DEVICE=cuda
-uvicorn embedding_service:app --host 0.0.0.0 --port 5000
+uvicorn embedding_service:app --host 0.0.0.0 --port 8100
 ```
 
 For CPU-only fallback:
 
 ```bash
 export EMBEDDING_DEVICE=cpu
-uvicorn embedding_service:app --host 0.0.0.0 --port 5000
+uvicorn embedding_service:app --host 0.0.0.0 --port 8100
 ```
 
 ## 5. Verify embedding endpoints from any machine that can reach VM
 
 ```bash
-curl http://VM_HOST:5000/health
+curl http://VM_HOST:8100/health
 ```
 
 ```bash
-curl -X POST http://VM_HOST:5000/embed/jina \
+curl -X POST http://VM_HOST:8100/embed/jina \
   -H "Content-Type: application/json" \
   -d '{"texts":["refund policy", "flight change"]}'
 ```
 
 ```bash
-curl -X POST http://VM_HOST:5000/embed/gte \
+curl -X POST http://VM_HOST:8100/embed/gte \
   -H "Content-Type: application/json" \
   -d '{"texts":["refund policy", "flight change"]}'
 ```
@@ -156,8 +156,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "5001:5001"
-      - "5002:5002"
+      - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
 
@@ -168,14 +168,14 @@ services:
       POSTGRES_PASSWORD: wns_password
       POSTGRES_DB: wns_benchmark
     ports:
-      - "5003:5003"
+      - "5432:5432"
     volumes:
       - pgvector_data:/var/lib/postgresql/data
 
   weaviate:
     image: semitechnologies/weaviate:latest
     ports:
-      - "5004:5004"
+      - "8080:8080"
     environment:
       QUERY_DEFAULTS_LIMIT: 25
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
@@ -200,9 +200,9 @@ docker compose -f docker-compose.vector-dbs.yml up -d
 Verify:
 
 ```bash
-curl http://VM_HOST:5001/
-curl http://VM_HOST:5004/v1/meta
-psql "postgresql://wns:wns_password@VM_HOST:5003/wns_benchmark" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+curl http://VM_HOST:6333/
+curl http://VM_HOST:8080/v1/meta
+psql "postgresql://wns:wns_password@VM_HOST:5432/wns_benchmark" -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ## 7. Benchmark `.env` values
@@ -211,17 +211,17 @@ Use VM URLs:
 
 ```env
 JINA_EMBEDDING_MODE=vm_remote
-JINA_EMBEDDING_URL=http://VM_HOST:5000/embed/jina
+JINA_EMBEDDING_URL=http://VM_HOST:8100/embed/jina
 JINA_API_KEY=
 
 GTE_EMBEDDING_MODE=vm_remote
-GTE_EMBEDDING_URL=http://VM_HOST:5000/embed/gte
+GTE_EMBEDDING_URL=http://VM_HOST:8100/embed/gte
 HF_TOKEN=
 
-QDRANT_URL=http://VM_HOST:5001
-PGVECTOR_DSN=postgresql://wns:wns_password@VM_HOST:5003/wns_benchmark
-DATABASE_URL=postgresql://wns:wns_password@VM_HOST:5003/wns_benchmark
-WEAVIATE_URL=http://VM_HOST:5004
+QDRANT_URL=http://VM_HOST:6333
+PGVECTOR_DSN=postgresql://wns:wns_password@VM_HOST:5432/wns_benchmark
+DATABASE_URL=postgresql://wns:wns_password@VM_HOST:5432/wns_benchmark
+WEAVIATE_URL=http://VM_HOST:8080
 ```
 
 ## 8. Adapter classes needed in benchmark repo

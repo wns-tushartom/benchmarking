@@ -45,7 +45,7 @@ Optional candidate methods still exist in config for experiments, but they are n
 ## Matrix size
 
 ```text
-5 chunking x 3 embeddings x 3 vector DBs x 1 index x 1 retrieval x 3 rerankers = 135 combinations
+5 chunking x 3 embeddings x 4 vector stores x 1 index x 1 retrieval x 3 rerankers = 180 combinations
 ```
 
 ## Dashboard usage
@@ -77,11 +77,11 @@ Then click:
 Run selected combo
 ```
 
-If all selectors are set to `All`, the modular runner executes the selected matrix, which is currently the full 135 combinations unless `Max runs` is set.
+If all selectors are set to `All`, the modular runner executes the selected matrix, which is currently the full 180 combinations unless `Max runs` is set.
 
 ## CLI usage
 
-Run all 135 local fallback combinations:
+Run all 180 local fallback combinations:
 
 ```bash
 python3 scripts/benchmark_cli.py run --limit-queries 0 --output-dir data/modular_runs/latest
@@ -125,7 +125,7 @@ Expected:
 {
   "ok": true,
   "experiment": "wns-rag-benchmark-selectable",
-  "matrix_count": 135
+  "matrix_count": 180
 }
 ```
 

@@ -53,6 +53,8 @@ def main() -> int:
     parser.add_argument("--mode", choices=["all", "missing", "chunk-only"], default="all")
     parser.add_argument("--pdf-dir", default="data/pdfs")
     parser.add_argument("--include-image-markers", action="store_true")
+    parser.add_argument("--allow-partial", action="store_true", help="Continue to chunking even when extraction audit has needs-review PDFs.")
+    parser.add_argument("--allow-text-only-fallback", action="store_true", help="Allow PyPDF2 text-only fallback during extraction. Use for recovery, not clean MinerU runs.")
     parser.add_argument("--no-backup", action="store_true")
     args = parser.parse_args()
 
@@ -66,6 +68,10 @@ def main() -> int:
             cmd.append("--only-missing")
         if args.include_image_markers:
             cmd.append("--include-image-markers")
+        if args.allow_partial:
+            cmd.append("--allow-partial")
+        if args.allow_text_only_fallback:
+            cmd.append("--allow-text-only-fallback")
         run(cmd)
 
     # The first script creates the four established chunker sheets.

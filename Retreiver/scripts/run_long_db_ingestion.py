@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
+from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 from benchmarking.adapters.vector_pgvector import PGVectorStoreAdapter
 from benchmarking.adapters.vector_qdrant import QdrantVectorStoreAdapter
 from benchmarking.adapters.vector_weaviate import WeaviateVectorStoreAdapter
@@ -63,7 +64,7 @@ DEFAULT_SHEETS = [
     "entity_heuristic_w4",
     "semantic_split",
 ]
-DEFAULT_STORES = ["Qdrant", "PGVector", "Weaviate"]
+DEFAULT_STORES = ["Qdrant", "PGVector", "Weaviate", "FAISS"]
 OPTIONAL_METADATA_COLUMNS = ["page_number", "source_type", "parser_method", "image_count", "table_count", "formula_count"]
 SUMMARY_FIELDS = [
     "status",
@@ -241,6 +242,9 @@ def make_store(store_name: str, sheet: str, embedding: str):
         return PGVectorStoreAdapter(name="PGVector", table_prefix=prefix)
     if store_name == "Weaviate":
         return WeaviateVectorStoreAdapter(name="Weaviate", class_prefix="Wns" + safe_name(sheet)[:20] + safe_name(embedding)[:10])
+    if store_name == "FAISS":
+        index_dir = ROOT / "data" / "faiss_indexes" / f"{safe_name(sheet)}_{safe_name(embedding)}"
+        return FaissVectorStoreAdapter(name="FAISS", index_dir=str(index_dir), index_type="HNSW")
     raise ValueError(f"unknown store: {store_name}")
 
 

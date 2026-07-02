@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
+from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 from benchmarking.adapters.vector_pgvector import _vec
 from scripts.wns_env import load_env_files
 
@@ -190,6 +191,16 @@ def search_weaviate(class_name: str, vector: list[float], top_k: int) -> list[di
     return out
 
 
+def search_faiss(index_dir: str, vector: list[float], top_k: int) -> list[dict[str, Any]]:
+    store = FaissVectorStoreAdapter(name="FAISS", index_dir=index_dir, load_existing=True)
+    hits = store.search(vector, top_k=top_k)
+    out = []
+    for i, hit in enumerate(hits, 1):
+        metadata = hit.chunk.metadata or {}
+        out.append(hit_payload(i, hit.score, hit.chunk.pdf_name, hit.chunk.id, hit.chunk.paragraph, metadata.get("page_number", ""), metadata.get("source_type", ""), metadata.get("parser_method", "")))
+    return out
+
+
 def run_one(row: dict[str, str], query: str, top_k: int) -> dict[str, Any]:
     vector = embed_query(query, row["embedding"])
     start = time.perf_counter()
@@ -201,6 +212,8 @@ def run_one(row: dict[str, str], query: str, top_k: int) -> dict[str, Any]:
         hits = search_pgvector(target, vector, top_k)
     elif store == "Weaviate":
         hits = search_weaviate(target, vector, top_k)
+    elif store == "FAISS":
+        hits = search_faiss(target, vector, top_k)
     else:
         raise RuntimeError(f"Unsupported store: {store}")
     return {
@@ -224,7 +237,7 @@ def main() -> int:
     parser.add_argument("--queries-file", default="", help="CSV/XLSX/TXT query list; uses query/question column when present")
     parser.add_argument("--sheets", nargs="*", default=["fixed_tok1200_ov150", "Heading_sections_l2", "semantic_split"])
     parser.add_argument("--embeddings", nargs="*", default=["gte_multilingual_base", "jina_v3"])
-    parser.add_argument("--stores", nargs="*", default=["Qdrant", "PGVector", "Weaviate"])
+    parser.add_argument("--stores", nargs="*", default=["Qdrant", "PGVector", "Weaviate", "FAISS"])
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-combos", type=int, default=18)
     parser.add_argument("--query-limit", type=int, default=0, help="0 = all queries from queries file")

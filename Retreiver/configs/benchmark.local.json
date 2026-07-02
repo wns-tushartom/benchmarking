@@ -12,7 +12,7 @@
   "matrix": {
     "chunkers": ["entity_heuristic_w6", "entity_heuristic_w5", "entity_heuristic_w4", "Heading_sections_l2", "fixed_tok1200_ov150"],
     "embeddings": ["jina_v3", "gte_multilingual_base", "openai_text-embedding-3-large"],
-    "vector_stores": ["Qdrant", "PGVector", "Weaviate"],
+    "vector_stores": ["Qdrant", "PGVector", "Weaviate", "FAISS"],
     "index_types": ["HNSW"],
     "retrieval_methods": ["Cosine Similarity"],
     "rerankers": ["Amazon Rerank v1", "Qwen3:4B Rerank", "bge-reranker-base"],
@@ -35,7 +35,8 @@
     "vector_stores": {
       "Qdrant": {"adapter": "qdrant", "provider_ready_env": "QDRANT_URL", "url_env": "QDRANT_URL", "api_key_env": "QDRANT_API_KEY"},
       "PGVector": {"adapter": "pgvector", "provider_ready_env": "PGVECTOR_DSN", "dsn_env": "PGVECTOR_DSN"},
-      "Weaviate": {"adapter": "weaviate", "provider_ready_env": "WEAVIATE_URL", "url_env": "WEAVIATE_URL"}
+      "Weaviate": {"adapter": "weaviate", "provider_ready_env": "WEAVIATE_URL", "url_env": "WEAVIATE_URL"},
+      "FAISS": {"adapter": "faiss", "execution_location": "in_process", "index_type": "HNSW", "hnsw_m": 16, "ef_construction": 100, "ef_search": 64}
     },
     "index_types": {
       "HNSW": {"adapter": "metadata_only", "provider_notes": "Real provider mode must create HNSW index or equivalent."}

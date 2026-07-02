@@ -10,7 +10,7 @@
   <main class="shell">
     <section class="hero panel-soft">
       <div class="hero-copy">
-        <div class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /><span>Benchmark review</span></div>
+        <div class="eyebrow"><img class="wns-logo" src="/wns-logo.svg" alt="WNS" /></div>
         <h1><span>Project Smiley</span><small>Integrated RAG Pipeline</small></h1>
         <p class="sub">Evidence-led benchmark workspace for Project Smiley's integrated RAG pipeline: chunking, embedding, vector database, reranking, quality, and latency.</p>
         <div class="hero-actions">
@@ -26,6 +26,12 @@
       </div>
     </section>
 
+    <section class="metrics-grid status-summary-row" aria-label="Project status summary">
+      <button class="metric-card status-card" type="button" data-status-card><span>Documents ready</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></button>
+      <button class="metric-card status-card" type="button" data-status-card><span>Pipeline combinations</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></button>
+      <button class="metric-card status-card" type="button" data-status-card><span>Retrieval checks</span><strong id="retrievalStatus">—</strong><small id="retrievalNote">retrieval and reranked artifacts</small></button>
+    </section>
+
     <nav class="page-tabs" aria-label="Benchmark pages">
       <button class="tab-btn active" data-page="overview" type="button">Overview</button>
       <button class="tab-btn" data-page="quality" type="button">Metrics</button>
@@ -39,15 +45,16 @@
       <button class="tab-btn" data-page="ops" type="button">Operations</button>
     </nav>
 
-    <section class="metrics-grid" aria-label="Live KPI metrics">
-      <div class="metric-card"><span>Documents ready</span><strong id="pdfStatus">—</strong><small id="pdfNote">from VM snapshot</small></div>
-      <div class="metric-card"><span>Pipeline combinations</span><strong id="comboStatus">—</strong><small id="comboNote">chunker × embedding × DB</small></div>
-      <div class="metric-card"><span>Retrieval checks</span><strong id="retrievalStatus">—</strong><small id="retrievalNote">retrieval and reranked artifacts</small></div>
-      <div class="metric-card"><span>Best R@5</span><strong id="bestR5Status">—</strong><small id="bestConfigNote">ground-truth winner</small></div>
-      <div class="metric-card"><span>Avg latency/query</span><strong id="bestLatencyStatus">—</strong><small id="bestLatencyNote">fastest evaluated config</small></div>
-      <div class="metric-card"><span>Embeddings</span><strong id="embeddingStatus">—</strong><small>configured component options</small></div>
-      <div class="metric-card"><span>Vector DBs</span><strong id="dbStatus">—</strong><small>Qdrant, PGVector, Weaviate, FAISS planned</small></div>
-    </section>
+    <dialog id="statusSummaryDialog" class="test-options-dialog status-summary-dialog">
+      <form method="dialog" class="dialog-card">
+        <div class="section-head"><div><h2>Project status</h2><p>Live readiness summary from the current VM artifacts.</p></div><button value="cancel" type="submit">Close</button></div>
+        <div class="status-dialog-grid">
+          <article><span>Documents ready</span><strong id="dialogPdfStatus">—</strong><small id="dialogPdfNote">from VM snapshot</small></article>
+          <article><span>Pipeline combinations</span><strong id="dialogComboStatus">—</strong><small id="dialogComboNote">chunker × embedding × DB</small></article>
+          <article><span>Retrieval checks</span><strong id="dialogRetrievalStatus">—</strong><small id="dialogRetrievalNote">retrieval and reranked artifacts</small></article>
+        </div>
+      </form>
+    </dialog>
 
     <section class="panel glossary-panel">
       <details>
@@ -63,7 +70,7 @@
           <article><strong>Avg sec/query</strong><p>Average retrieval latency per query for that one pipeline configuration. It is not the total time for all 500 rows. If the table says 120 queries, this value is averaged across those 120 query runs.</p></article>
           <article><strong>Chunker</strong><p>The document splitting method used before embedding, for example heading sections or fixed-token chunks.</p></article>
           <article><strong>Embedding</strong><p>The model that converts each text chunk and query into vectors for similarity search.</p></article>
-          <article><strong>Vector DB</strong><p>The database used to store and search vectors, currently Qdrant, PGVector, and Weaviate.</p></article>
+          <article><strong>Vector DB</strong><p>The vector store used to store and search vectors, currently Qdrant, PGVector, Weaviate, and FAISS.</p></article>
           <article><strong>Reranker</strong><p>Second-stage model that reorders retrieved chunks after vector search to improve relevance.</p></article>
           <article><strong>Ground truth</strong><p>The reference evaluation set used to decide whether retrieved chunks match the expected answer/evidence.</p></article>
         </div>
@@ -73,7 +80,7 @@
     <section class="page active" data-page-panel="overview">
       <section id="bestMethodSection" class="panel best-method-panel hidden">
         <div class="section-head">
-          <div><h2>Executive recommendation</h2><p>Current winners from real ground-truth evaluation. This is the page to start with for Peter.</p></div>
+          <div><h2>Executive recommendation</h2></div>
           <span class="mini-stat" id="bestMethodHint">Waiting for evaluation</span>
         </div>
         <div id="bestMethodGrid" class="best-method-grid"></div>
@@ -169,10 +176,10 @@
         <div class="table-wrap"><table id="runResultTable"></table></div>
         <details class="run-log" open><summary>Live execution output</summary><pre id="runOutput" class="run-output"></pre></details>
         <details class="advanced-run-actions">
-          <summary>Developer stage actions</summary>
-          <p>Collapsed by default for Karthik demos. Use only when debugging one broken stage.</p>
+          <summary>Advanced pipeline controls</summary>
+          <p>Use these controls for targeted troubleshooting of individual pipeline stages.</p>
           <div class="run-actions">
-            <button id="runParseMineruBtn" type="button">Parse PDFs, experimental</button>
+            <button id="runParseMineruBtn" type="button">Parse PDFs</button>
             <button id="runIngestBtn" type="button">Ingest selected components only</button>
             <button id="runSmokeBtn" type="button">Test selected query evidence only</button>
             <button id="runFullGtBtn" type="button">Run full GT retrieval only</button>

@@ -6,7 +6,7 @@ pipeline, outputs, frontend, and recall math work even before paid APIs or DB co
 are configured.
 
 Official default matrix:
-5 chunking × 3 embeddings × 3 vector DBs × 3 rerankers = 135 runs.
+5 chunking × 3 embeddings × 4 vector stores × 3 rerankers = 180 runs.
 
 Use --include-candidates to include semantic_split.
 Use --include-milvus to include Milvus as an extra baseline DB.
@@ -156,7 +156,7 @@ def run_fast_local_matrix(root: Path, args: argparse.Namespace) -> Tuple[List[Di
 
             # In local/offline fallback mode the DB labels use the same in-process vector
             # adapter. Search once per chunking+embedding pair, then reuse identical base
-            # hits across Qdrant/PGVector/Weaviate labels. Provider-mode adapters should
+            # hits across Qdrant/PGVector/Weaviate/FAISS labels. Provider-mode adapters should
             # benchmark each real DB independently; this optimization is only for local QA.
             shared_index = LocalVectorIndex("local_shared", INDEX_TYPE)
             upsert_latency_s = shared_index.upsert(chunks, chunk_vectors)

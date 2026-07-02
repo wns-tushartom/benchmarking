@@ -69,6 +69,14 @@ def pgvector_auth_check() -> tuple[bool, str]:
         return False, str(exc)
 
 
+def faiss_import_check() -> tuple[bool, str]:
+    try:
+        import faiss  # type: ignore[import-not-found]
+    except Exception as exc:
+        return False, f"faiss-cpu is not installed: {exc}"
+    return True, f"import OK version={getattr(faiss, '__version__', 'unknown')}"
+
+
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -97,6 +105,9 @@ def main() -> int:
 
     ok, msg = pgvector_auth_check()
     record("PGVector DSN auth", ok, msg, required=True, failures=failures)
+
+    ok, msg = faiss_import_check()
+    record("FAISS local index library", ok, msg, required=True, failures=failures)
 
     candidates = [weaviate_url + "/v1/.well-known/ready", weaviate_url + "/v1/meta"]
     weaviate_results = [http_check(u) for u in candidates]
@@ -135,7 +146,7 @@ def main() -> int:
     print("\nDocker hint")
     print("Run from CMD on Windows:")
     print("  docker compose -f docker-compose.benchmark.yml up -d qdrant postgres-pgvector weaviate")
-    print("Ports: model adapters 5000, Qdrant 5001/5002, PGVector 5003, Weaviate 5004/5005, dashboard 5009")
+    print("Ports: model adapters 5000, Qdrant 5001/5002, PGVector 5003, Weaviate 5004/5005, dashboard 5009. FAISS is in-process and has no port.")
     return 0 if not failures else 2
 
 

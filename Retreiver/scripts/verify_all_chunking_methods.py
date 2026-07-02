@@ -5,7 +5,7 @@ import pandas as pd
 
 WORKBOOK = "data/chunking_methods_output_v2.xlsx"
 
-xl = pd.ExcelFile(WORKBOOK)
+xl = pd.ExcelFile(WORKBOOK, engine="openpyxl")
 
 print("=" * 70)
 print("ALL CHUNKING METHODS VERIFICATION")
@@ -13,7 +13,7 @@ print("=" * 70)
 print(f"\nExcel file: {WORKBOOK}")
 print(f"Total sheets: {len(xl.sheet_names)}")
 
-sheets = {sheet: pd.read_excel(xl, sheet) for sheet in xl.sheet_names}
+sheets = {sheet: pd.read_excel(xl, sheet, keep_default_na=False) for sheet in xl.sheet_names}
 if "original_input" not in sheets:
     raise SystemExit("Missing required sheet: original_input")
 

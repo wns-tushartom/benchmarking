@@ -13,9 +13,12 @@ CLI bulk runner:
     python -m app.services.document_parser
 """
 import os
+import sys
 import uuid
 import asyncio
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import json
@@ -61,10 +64,17 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------- MinerU import ----------------
 try:
     from magic_pdf import pdf_parse_main  # type: ignore
-    MINERU_AVAILABLE = True
 except Exception:
     pdf_parse_main = None  # type: ignore
-    MINERU_AVAILABLE = False
+
+_cli_candidates = [
+    shutil.which("magic-pdf"),
+    shutil.which("mineru"),
+    str(Path(sys.executable).resolve().parent / "magic-pdf"),
+    str(Path(sys.executable).resolve().parent / "mineru"),
+]
+MAGIC_PDF_CLI = next((c for c in _cli_candidates if c and Path(c).exists()), None)
+MINERU_AVAILABLE = bool(pdf_parse_main is not None or MAGIC_PDF_CLI)
 
 # ---------------- PyPDF2 fallback ----------------
 try:
@@ -408,18 +418,49 @@ class DocumentParserService:
 
     def _run_mineru_parsing(self, file_path: str, output_path: str) -> None:
         """Run MinerU synchronously (called inside a thread)."""
-        if not MINERU_AVAILABLE or pdf_parse_main is None:
+        if not MINERU_AVAILABLE:
             raise RuntimeError("magic-pdf (MinerU) is not available")
         try:
-            # MinerU params pulled from config (resource_param)
-            pdf_parse_main(
-                pdf_path=file_path,
-                parse_method=MINERU_PARSE_METHOD,
-                model_json_path=MINERU_MODEL_JSON_PATH,
-                is_json_md_dump=True,
-                output_dir=output_path,
+            if pdf_parse_main is not None:
+                # Older MinerU API path.
+                pdf_parse_main(
+                    pdf_path=file_path,
+                    parse_method=MINERU_PARSE_METHOD,
+                    model_json_path=MINERU_MODEL_JSON_PATH,
+                    is_json_md_dump=True,
+                    output_dir=output_path,
+                )
+                logger.info("MinerU parsing completed for %s", file_path)
+                return
+
+            if not MAGIC_PDF_CLI:
+                raise RuntimeError("magic-pdf CLI is not available")
+            cmd = [
+                MAGIC_PDF_CLI,
+                "-p", file_path,
+                "-o", output_path,
+                "-m", str(MINERU_PARSE_METHOD or "auto"),
+            ]
+            timeout_seconds = int(resource_param.get("mineru_timeout_seconds", 3600))
+            env = os.environ.copy()
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            result = subprocess.run(
+                cmd,
+                cwd=str(APP_ROOT),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
             )
-            logger.info("MinerU parsing completed for %s", file_path)
+            if result.returncode != 0 or any(marker in result.stderr for marker in ("Traceback", "FileNotFoundError", "DownloadModelError")):
+                logger.error("MinerU CLI stdout:\n%s", result.stdout[-4000:])
+                logger.error("MinerU CLI stderr:\n%s", result.stderr[-4000:])
+                raise RuntimeError(f"MinerU CLI failed with exit code {result.returncode}")
+            if result.stdout:
+                logger.info("MinerU CLI stdout:\n%s", result.stdout[-2000:])
+            if result.stderr:
+                logger.info("MinerU CLI stderr:\n%s", result.stderr[-2000:])
+            logger.info("MinerU CLI parsing completed for %s", file_path)
         except Exception as e:
             logger.error("MinerU parsing failed: %s", e)
             raise

@@ -121,7 +121,7 @@ py scripts/benchmark_cli.py validate
 Expected matrix count:
 
 ```text
-135
+180
 ```
 
 ### 6. Run one selected smoke benchmark
@@ -164,7 +164,7 @@ Run selected combo
 
 ## Full local fallback benchmark
 
-Run all official 135 combinations:
+Run all official 180 combinations:
 
 ```bash
 python3 scripts/benchmark_cli.py run --limit-queries 0 --output-dir data/modular_runs/latest
@@ -193,9 +193,9 @@ Set environment variables:
 Linux/macOS/WSL:
 
 ```bash
-export QDRANT_URL=http://127.0.0.1:5001
-export PGVECTOR_DSN=postgresql://wns:wns_password@127.0.0.1:5003/wns_benchmark
-export WEAVIATE_URL=http://127.0.0.1:5004
+export QDRANT_URL=http://127.0.0.1:6333
+export PGVECTOR_DSN=postgresql://wns:wns_password@127.0.0.1:5432/wns_benchmark
+export WEAVIATE_URL=http://127.0.0.1:8080
 ```
 
 Windows CMD:
@@ -256,14 +256,15 @@ Open-source rerankers/embeddings:
 
 ### Done
 
-Exact official 135-combination WNS matrix
+Exact official 180-combination WNS matrix
 - dashboard selectors
 - selected combo runner
 - config-driven dimensions
 - local fallback adapters
 - metrics and reports
 - WNS logo dashboard
-- Docker compose scaffold for vector DB services
+- Docker compose scaffold for networked vector DB services
+- FAISS in-process vector store adapter
 
 ### Still needed for production-real results
 
@@ -282,7 +283,7 @@ Exact official 135-combination WNS matrix
 
 ## Recommended first production slice
 
-Do not start with all 135 real combinations.
+Do not start with all 180 real combinations.
 
 Start with this small slice:
 

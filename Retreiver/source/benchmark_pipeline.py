@@ -30,7 +30,7 @@ OFFICIAL_CHUNKING_METHODS = [
 ]
 CANDIDATE_CHUNKING_METHODS = ["semantic_split"]
 EMBEDDING_MODELS = ["jina_v3", "gte_multilingual_base", "openai_text-embedding-3-large"]
-VECTOR_DATABASES = ["Qdrant", "PGVector", "Weaviate"]
+VECTOR_DATABASES = ["Qdrant", "PGVector", "Weaviate", "FAISS"]
 RERANKING_MODELS = ["Amazon Rerank v1", "Qwen3:4B Rerank", "bge-reranker-base"]
 INDEX_TYPE = "HNSW"
 RETRIEVAL_METHOD = "Cosine Similarity"

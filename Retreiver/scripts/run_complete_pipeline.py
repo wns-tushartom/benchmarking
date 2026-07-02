@@ -45,6 +45,7 @@ GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 LIVE_EMBEDDINGS = ["gte_multilingual_base", "jina_v3"]
 LIVE_RERANKERS = ["bge-reranker-base", "qwen3_4b_rerank"]
 ARCHIVE_DIRS = [
+    "data/faiss_indexes",
     "data/retrieval_smoke",
     "data/reranker_smoke",
     "data/evaluation",
@@ -184,6 +185,14 @@ def pgvector_auth_ok() -> tuple[bool, str]:
         return False, repr(exc)
 
 
+def faiss_import_ok() -> tuple[bool, str]:
+    try:
+        import faiss  # type: ignore[import-not-found]
+    except Exception as exc:
+        return False, "faiss-cpu missing: " + repr(exc)
+    return True, f"faiss import OK version={getattr(faiss, '__version__', 'unknown')}"
+
+
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
     load_env()
     options = cfg_options()
@@ -268,6 +277,11 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         service_checks.append({"name": "pgvector", "url": "PGVECTOR_DSN/DATABASE_URL", "ok": ok, "note": note})
         if not ok:
             missing.append("PGVector selected but DSN/auth check failed: " + note)
+    if "FAISS" in stores:
+        ok, note = faiss_import_ok()
+        service_checks.append({"name": "faiss", "url": "in-process", "ok": ok, "note": note})
+        if not ok:
+            missing.append("FAISS selected but faiss-cpu import failed: " + note)
 
     combo_count = len(sheets) * len(embeddings) * len(stores)
     return {
