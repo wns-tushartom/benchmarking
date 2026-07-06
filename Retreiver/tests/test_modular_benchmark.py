@@ -184,6 +184,171 @@ class ModularBenchmarkTests(unittest.TestCase):
             self.assertEqual(rows[1]["collection_or_table"], "c1")
             self.assertEqual(rows[1]["search_hits"], "3")
 
+    def test_dashboard_reference_includes_archived_modular_runs_for_faiss(self):
+        import scripts.serve_benchmark_dashboard as dashboard
+
+        fields = [
+            "chunker",
+            "embedding",
+            "vector_store",
+            "reranker",
+            "query_count",
+            "recall_at_1",
+            "recall_at_3",
+            "recall_at_5",
+            "recall_at_10",
+            "mrr",
+            "precision_at_5",
+            "ndcg_at_10",
+            "avg_latency_ms",
+        ]
+
+        def write_summary(path: Path, row: dict):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(row)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            latest_dir = root / "data" / "modular_runs" / "latest"
+            faiss_dir = root / "data" / "modular_runs" / "faiss_noaws_complete_20260702"
+            smoke_dir = root / "data" / "modular_runs" / "selected_smoke"
+            full_dir = root / "data" / "full_benchmark"
+            write_summary(latest_dir / "modular_summary.csv", {
+                "chunker": "entity_heuristic_w6",
+                "embedding": "gte_multilingual_base",
+                "vector_store": "Qdrant",
+                "reranker": "bge-reranker-base",
+                "query_count": "500",
+                "recall_at_5": "0.50",
+                "mrr": "0.40",
+                "avg_latency_ms": "100",
+            })
+            write_summary(faiss_dir / "modular_summary.csv", {
+                "chunker": "entity_heuristic_w6",
+                "embedding": "gte_multilingual_base",
+                "vector_store": "FAISS",
+                "reranker": "bge-reranker-base",
+                "query_count": "500",
+                "recall_at_5": "0.55",
+                "mrr": "0.45",
+                "avg_latency_ms": "80",
+            })
+            write_summary(smoke_dir / "modular_summary.csv", {
+                "chunker": "entity_heuristic_w6",
+                "embedding": "gte_multilingual_base",
+                "vector_store": "Weaviate",
+                "reranker": "bge-reranker-base",
+                "query_count": "1",
+                "recall_at_5": "1.0",
+                "mrr": "1.0",
+                "avg_latency_ms": "1",
+            })
+            full_dir.mkdir(parents=True, exist_ok=True)
+
+            old_modular_dir = dashboard.MODULAR_DIR
+            old_full_dir = dashboard.FULL_DIR
+            try:
+                dashboard.MODULAR_DIR = latest_dir
+                dashboard.FULL_DIR = full_dir
+                reference = dashboard.read_benchmark_reference()
+            finally:
+                dashboard.MODULAR_DIR = old_modular_dir
+                dashboard.FULL_DIR = old_full_dir
+
+        stores = {row["store"] for row in reference["summary"]}
+        self.assertIn("Qdrant", stores)
+        self.assertIn("FAISS", stores)
+        self.assertNotIn("Weaviate", stores)
+        self.assertEqual(reference["report"]["faiss_rows"], 1)
+
+    def test_frontend_coverage_uses_metric_rows_for_faiss_results(self):
+        app_path = Path(__file__).resolve().parents[1] / "web" / "app.js"
+        node_script = f'''
+const fs = require('fs');
+const vm = require('vm');
+const elements = {{}};
+function makeElement(id) {{
+  return {{
+    id,
+    value: 'all',
+    textContent: '',
+    innerHTML: '',
+    classList: {{toggle(){{}}, add(){{}}, remove(){{}}}},
+    addEventListener(){{}},
+    querySelectorAll(){{ return []; }},
+    setAttribute(){{}},
+  }};
+}}
+const document = {{
+  getElementById(id) {{ return elements[id] || (elements[id] = makeElement(id)); }},
+  querySelectorAll() {{ return []; }},
+  addEventListener() {{}},
+  body: {{insertAdjacentHTML(){{}}}},
+}};
+const context = {{
+  console,
+  document,
+  window: {{confirm() {{ return true; }}}},
+  location: {{hash: '#overview'}},
+  history: {{replaceState(){{}}}},
+  fetch: async () => ({{ok: true, json: async () => ({{operational: {{}}, files: [], options: {{}}}}), text: async () => ''}}),
+  setTimeout(){{}},
+}};
+vm.createContext(context);
+let code = fs.readFileSync({str(app_path)!r}, 'utf8');
+code = code.replace(/loadOptions\(\)\.then\(refresh\)[\s\S]*$/, '');
+vm.runInContext(code + `
+benchmarkOptions = {{
+  chunkers: ['entity_heuristic_w6'],
+  embeddings: ['gte_multilingual_base'],
+  vector_stores: ['Qdrant', 'FAISS'],
+  rerankers: ['bge-reranker-base'],
+}};
+state = {{operational: {{evaluation: {{benchmark_reference: {{summary: [{{
+  sheet: 'entity_heuristic_w6',
+  embedding: 'gte_multilingual_base',
+  store: 'FAISS',
+  reranker: 'bge-reranker-base',
+  avg_latency_seconds: 0.08,
+  source: 'modular_run:faiss_noaws_complete_20260702',
+}}]}}}}}}}};
+renderCoverage([]);
+globalThis.__coverageHint = document.getElementById('coverageHint').textContent;
+globalThis.__coverageHtml = document.getElementById('coverageTable').innerHTML;
+`, context);
+if (!context.__coverageHtml.includes('metrics')) {{
+  console.error(context.__coverageHtml);
+  process.exit(1);
+}}
+if (!context.__coverageHint.includes('1/2')) {{
+  console.error(context.__coverageHint);
+  process.exit(2);
+}}
+'''
+        proc = subprocess.run(["node", "-e", node_script], text=True, capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_ingestion_supports_openai_embedding_adapter(self):
+        import scripts.run_long_db_ingestion as ingestion
+
+        old_key = os.environ.get("OPENAI_API_KEY")
+        try:
+            os.environ["OPENAI_API_KEY"] = "unit-secret"
+            cfg = ingestion.EMBEDDING_CONFIGS["openai_text-embedding-3-large"]
+            self.assertEqual(cfg["adapter"], "openai")
+            adapter = ingestion.make_embedding_adapter("openai_text-embedding-3-large", batch_size=2)
+            self.assertEqual(adapter.__class__.__name__, "OpenAIEmbeddingAdapter")
+            self.assertEqual(adapter.dimensions, 3072)
+            self.assertEqual(adapter.batch_size, 2)
+        finally:
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+
     def test_vector_batch_validation_rejects_partial_cached_vectors(self):
         from scripts.run_long_db_ingestion import validate_vectors_for_chunks
 

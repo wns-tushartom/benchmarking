@@ -130,14 +130,38 @@ function setRunSelection(sheet, embedding, store, reranker = 'all') {
   $('runOutput').textContent = `Selected: chunker=${sheet || 'all'}, embedding=${embedding || 'all'}, vector DB=${store || 'all'}, reranker=${reranker || 'all'}\nClick Preflight first, then Run selected pipeline.`;
 }
 
+function metricCoverageRows() {
+  const evaluation = state.operational?.evaluation || {};
+  return [
+    ...(evaluation.summary || []),
+    ...(evaluation.reranked?.summary || []),
+    ...(evaluation.benchmark_reference?.summary || []),
+  ].filter(r => r.sheet && r.embedding && r.store)
+    .map(r => ({
+      ...r,
+      status: 'metrics',
+      total_store_seconds: r.total_store_seconds || r.avg_latency_seconds || '',
+    }));
+}
+
+function coverageEvidenceRows(rows) {
+  const map = new Map();
+  latestRows(rows).forEach(r => map.set(`${r.sheet}|${r.embedding}|${r.store}`, r));
+  metricCoverageRows().forEach(r => {
+    const key = `${r.sheet}|${r.embedding}|${r.store}`;
+    if (!map.has(key)) map.set(key, r);
+  });
+  return [...map.values()];
+}
+
 function renderCoverage(rows) {
-  const latest = latestRows(rows);
+  const latest = coverageEvidenceRows(rows);
   const opts = matrixOptions();
   const stores = opts.stores.length ? opts.stores : uniq(latest, 'store');
   const chunkers = opts.chunkers.length ? opts.chunkers : uniq(latest, 'sheet');
   const embeddings = opts.embeddings.length ? opts.embeddings : uniq(latest, 'embedding');
   const expected = chunkers.length * embeddings.length * stores.length;
-  $('coverageHint').textContent = `${latest.length}/${expected || latest.length} chunker × embedding × vector DB combos run`;
+  $('coverageHint').textContent = `${latest.length}/${expected || latest.length} chunker × embedding × vector DB combos covered`;
   const latestMap = new Map(latest.map(r => [`${r.sheet}|${r.embedding}|${r.store}`, r]));
   const coverageRows = [];
   chunkers.forEach(sheet => embeddings.forEach(embedding => {
@@ -150,7 +174,11 @@ function renderCoverage(rows) {
     {key:'embedding', label:'Embedding'},
     ...stores.map(st => ({key:st, label:st, render:r => {
       const v = r.stores[st];
-      if (v) return `<span class="coverage-ok">ok</span> <code>${fmt(v.total_store_seconds, 2)}s</code>`;
+      if (v) {
+        const label = v.status === 'metrics' ? 'metrics' : 'ok';
+        const timing = v.total_store_seconds ? ` <code>${fmt(v.total_store_seconds, 2)}s</code>` : '';
+        return `<span class="coverage-ok">${label}</span>${timing}`;
+      }
       return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}">Run</button>`;
     }})),
     {key:'total', label:'DBs ready', render:r => `${Object.values(r.stores).filter(Boolean).length}/${stores.length}`}
@@ -507,9 +535,11 @@ function renderEvaluation(evaluation) {
   const section = $('qualitySection');
   if (!section) return;
   const report = evaluation?.report || {};
+  const reference = evaluation?.benchmark_reference || {};
   const baseRows = rows.map(r => ({...r, reranker: r.reranker || 'none'}));
   const rerankedRows = (evaluation?.reranked?.summary || []).map(r => ({...r, reranker: r.reranker || 'none'}));
-  const displayRows = [...baseRows, ...rerankedRows].sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
+  const referenceRows = (reference.summary || []).map(r => ({...r, reranker: r.reranker || 'none', source: r.source || 'benchmark_reference'}));
+  const displayRows = [...baseRows, ...rerankedRows, ...referenceRows].sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
   fillSelect('qualityComboFilter', [...new Set(displayRows.map(pipelineLabel))].sort(), 'All pipeline combinations');
   fillSelect('qualityChunkerFilter', uniq(displayRows, 'sheet'), 'All chunkers');
   fillSelect('qualityEmbeddingFilter', uniq(displayRows, 'embedding'), 'All embeddings');
@@ -524,7 +554,9 @@ function renderEvaluation(evaluation) {
   });
   const bestRow = filteredRows[0];
   section.classList.toggle('hidden', displayRows.length === 0);
-  $('qualityHint').textContent = filteredRows.length ? `${filteredRows.length}/${displayRows.length} configs · ${report.groundtruth_rows || evaluation?.reranked?.report?.groundtruth_rows || '—'} GT rows` : 'No matching configs';
+  const evidenceRows = report.groundtruth_rows || evaluation?.reranked?.report?.groundtruth_rows || reference?.report?.query_count || '—';
+  const referenceNote = referenceRows.length ? ` · ${referenceRows.length} benchmark artifact configs` : '';
+  $('qualityHint').textContent = filteredRows.length ? `${filteredRows.length}/${displayRows.length} configs · ${evidenceRows} rows${referenceNote}` : 'No matching configs';
   $('qualityInsight').innerHTML = bestRow ? `<strong>Current winner:</strong> ${esc(pipelineLabel(bestRow))} <span>Score ${displayScore(bestRow)} · R@5 ${(num(bestRow.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestRow.mrr,3)} · ${fmt(bestRow.avg_latency_seconds,3)}s avg/query across ${esc(bestRow.evaluated_queries || '—')} queries</span>` : '<span>No evaluated combination matches these filters.</span>';
   table($('qualityTable'), filteredRows.slice(0, 60), [
     {key:'serial', label:'S/No.', render:(r,i)=>String(i + 1)},
@@ -533,6 +565,7 @@ function renderEvaluation(evaluation) {
     {key:'embedding', label:'Embedding'},
     {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker', render:r=>esc(r.reranker || 'none')},
+    {key:'source', label:'Source', render:r=>esc(r.source || 'groundtruth_eval')},
     {key:'evaluated_queries', label:'Queries'},
     {key:'recall_at_1', label:'R@1'},
     {key:'recall_at_3', label:'R@3'},

@@ -28,7 +28,8 @@ from scripts.wns_env import load_env_files, service_base_from_endpoint
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 FULL_DIR = ROOT / "data" / "full_benchmark"
-MODULAR_DIR = ROOT / "data" / "modular_runs" / "latest"
+MODULAR_RUNS_DIR = ROOT / "data" / "modular_runs"
+MODULAR_DIR = MODULAR_RUNS_DIR / "latest"
 INGESTION_DIR = ROOT / "data" / "db_ingestion_runs"
 RERANKER_DIR = ROOT / "data" / "reranker_smoke"
 RETRIEVAL_DIR = ROOT / "data" / "retrieval_smoke"
@@ -283,9 +284,78 @@ def read_evaluation_dir(path: Path) -> dict:
 def read_evaluation() -> dict:
     base = read_evaluation_dir(EVAL_DIR)
     base["reranked"] = read_evaluation_dir(ROOT / "data" / "evaluation_reranked")
+    base["benchmark_reference"] = read_benchmark_reference()
     gt_files = sorted([str(p.relative_to(ROOT)) for p in GROUNDTRUTH_DIR.glob("*")]) if GROUNDTRUTH_DIR.exists() else []
     base["groundtruth_files"] = gt_files
     return base
+
+
+def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]:
+    latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms") or 0
+    try:
+        latency_s = float(latency_ms) / 1000.0
+    except (TypeError, ValueError):
+        latency_s = 0.0
+    return {
+        "source": source,
+        "sheet": row.get("chunker") or row.get("chunking_method") or row.get("sheet") or "",
+        "embedding": row.get("embedding") or row.get("embedding_model") or "",
+        "store": row.get("vector_store") or row.get("vector_database") or row.get("store") or "",
+        "reranker": row.get("reranker") or row.get("reranking_model") or "none",
+        "evaluated_queries": row.get("query_count") or row.get("evaluated_queries") or "",
+        "recall_at_1": row.get("recall_at_1") or "",
+        "recall_at_3": row.get("recall_at_3") or "",
+        "recall_at_5": row.get("recall_at_5") or "",
+        "recall_at_10": row.get("recall_at_10") or "",
+        "mrr": row.get("mrr") or "",
+        "precision_at_5": row.get("precision_at_5") or "",
+        "ndcg_at_5": row.get("ndcg_at_5") or row.get("ndcg_at_10") or "",
+        "avg_latency_seconds": latency_s,
+        "cost": "commercial" if re.search(r"openai|amazon", f"{row.get('embedding') or row.get('embedding_model') or ''} {row.get('reranker') or row.get('reranking_model') or ''}", re.I) else "oss",
+    }
+
+
+def benchmark_reference_sources() -> list[tuple[str, Path]]:
+    sources: list[tuple[str, Path]] = []
+    modular_runs_dir = MODULAR_DIR.parent
+    if modular_runs_dir.exists():
+        modular_paths = sorted(
+            modular_runs_dir.glob("*/modular_summary.csv"),
+            key=lambda p: (p.parent.name != "latest", p.parent.name),
+        )
+        for path in modular_paths:
+            run_id = path.parent.name
+            if run_id != "latest" and "smoke" in run_id.lower():
+                continue
+            source = "modular_matrix" if run_id == "latest" else f"modular_run:{run_id}"
+            sources.append((source, path))
+    elif (MODULAR_DIR / "modular_summary.csv").exists():
+        sources.append(("modular_matrix", MODULAR_DIR / "modular_summary.csv"))
+    sources.append(("legacy_full_matrix", FULL_DIR / "benchmark_summary.csv"))
+    return sources
+
+
+def read_benchmark_reference() -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for source, path in benchmark_reference_sources():
+        for row in sort_summary(read_csv(path)):
+            normalized = normalized_benchmark_row(row, source)
+            key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"], source)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(normalized)
+    return {
+        "summary": sort_summary(rows),
+        "report": {
+            "source": "modular/full benchmark artifacts",
+            "config_rows": len(rows),
+            "openai_rows": sum(1 for r in rows if "openai" in str(r.get("embedding", "")).lower()),
+            "faiss_rows": sum(1 for r in rows if str(r.get("store", "")).lower() == "faiss"),
+            "query_count": next((r.get("evaluated_queries") for r in rows if r.get("evaluated_queries")), ""),
+        },
+    }
 
 
 def read_hallucination() -> dict:
@@ -329,19 +399,24 @@ def read_pdf_audit() -> dict:
 
 
 
-def count_pdf_chunks(pdf_name: str) -> int:
+def read_pdf_chunk_counts() -> dict[str, int]:
     csv_path = ROOT / "data" / "benchmark_input.csv"
     if csv_path.exists():
         rows = read_csv(csv_path)
-        count = sum(1 for r in rows if r.get("pdf_name") == pdf_name)
-        if count:
-            return count
+        counts: dict[str, int] = {}
+        for row in rows:
+            name = row.get("pdf_name")
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        if counts:
+            return counts
     workbook = ROOT / "data" / "chunking_methods_output_v2.xlsx"
     if not workbook.exists():
-        return 0
+        return {}
     try:
         import zipfile as _zipfile
         import xml.etree.ElementTree as ET
+        counts: dict[str, int] = {}
         with _zipfile.ZipFile(workbook) as z:
             shared = []
             if "xl/sharedStrings.xml" in z.namelist():
@@ -359,12 +434,11 @@ def count_pdf_chunks(pdf_name: str) -> int:
                     target = relmap.get(sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"))
                     break
             if not target:
-                return 0
+                return {}
             xml_path = "xl/" + target.lstrip("/")
             ws = ET.fromstring(z.read(xml_path))
             rows = ws.findall(".//a:sheetData/a:row", ns)
             headers = []
-            total = 0
             for idx, row in enumerate(rows):
                 vals = []
                 for c in row.findall("a:c", ns):
@@ -377,11 +451,16 @@ def count_pdf_chunks(pdf_name: str) -> int:
                     headers = vals
                     continue
                 rec = dict(zip(headers, vals))
-                if rec.get("pdf_name") == pdf_name:
-                    total += 1
-            return total
+                name = rec.get("pdf_name")
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+            return counts
     except Exception:
-        return 0
+        return {}
+
+
+def count_pdf_chunks(pdf_name: str) -> int:
+    return read_pdf_chunk_counts().get(pdf_name, 0)
 
 
 def pdf_path_for_name(name: str) -> Path | None:
@@ -405,11 +484,12 @@ def read_document_repository() -> dict[str, Any]:
     audit_rows = read_csv(PDF_AUDIT_PATH)
     audit_missing = not PDF_AUDIT_PATH.exists()
     audit_by_name = {r.get("pdf_name") or r.get("file") or r.get("filename"): r for r in audit_rows}
+    chunk_counts = read_pdf_chunk_counts()
     files = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
     rows = []
     for f in files:
         audit = audit_by_name.get(f.name, {})
-        chunks = count_pdf_chunks(f.name)
+        chunks = chunk_counts.get(f.name, 0)
         status = audit.get("status") or ("audit_missing" if audit_missing else ("chunked" if chunks else "present"))
         needs_review = audit_missing or str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed", "text_only_review"}
         if (audit.get("parser_method") or "") == "PyPDF2_fallback":

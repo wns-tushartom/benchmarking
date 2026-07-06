@@ -56,6 +56,8 @@ def run_experiment(
     embedding_cache: Dict[Tuple[str, str], Any] = {}
 
     for idx, row in enumerate(matrix, 1):
+        combo_label = f"[{idx}/{len(matrix)}] {row['chunker']} | {row['embedding']} | {row['vector_store']} | {row['reranker']}"
+        print(f"START {combo_label}", flush=True)
         chunker_cfg = technique(cfg, "chunkers", row["chunker"])
         embedding_cfg = technique(cfg, "embeddings", row["embedding"])
         vector_cfg = technique(cfg, "vector_stores", row["vector_store"])
@@ -63,24 +65,32 @@ def run_experiment(
 
         chunk_key = row["chunker"]
         if chunk_key not in chunk_cache:
+            print(f"  chunking start: {row['chunker']}", flush=True)
             chunk_cls = registry.get("chunker", chunker_cfg["adapter"])
             chunk_params = {k: v for k, v in chunker_cfg.items() if k not in {"adapter", "sheet_name"}}
             chunk_cache[chunk_key] = chunk_cls(root=root, sheet_name=chunker_cfg.get("sheet_name", row["chunker"]), **chunk_params).chunk()
         chunks = chunk_cache[chunk_key]
+        print(f"  chunks ready: {len(chunks)}", flush=True)
 
         embed_key = (row["chunker"], row["embedding"])
         if embed_key not in embedding_cache:
+            print(f"  embedding start: {row['embedding']} chunks={len(chunks)} queries={len(queries)}", flush=True)
             embed_cls = registry.get("embedding", embedding_cfg["adapter"])
             embedder = embed_cls(model_name=row["embedding"], **embedding_cfg)
             embed_start = time.perf_counter()
             chunk_vectors = embedder.embed_many([c.paragraph for c in chunks])
             query_vectors = embedder.embed_many([q.query for q in queries])
             embedding_cache[embed_key] = (embedder, chunk_vectors, query_vectors, time.perf_counter() - embed_start)
+            print(f"  embedding done: {row['embedding']} seconds={embedding_cache[embed_key][3]:.2f}", flush=True)
+        else:
+            print(f"  embedding cached: {row['embedding']}", flush=True)
         embedder, chunk_vectors, query_vectors, embedding_latency_s = embedding_cache[embed_key]
 
+        print(f"  upsert start: {row['vector_store']} vectors={len(chunk_vectors)}", flush=True)
         vector_cls = registry.get("vector_store", vector_cfg["adapter"])
         store = vector_cls(name=row["vector_store"], **vector_cfg)
         upsert_metrics = store.upsert(chunks, chunk_vectors)
+        print(f"  upsert done: {row['vector_store']} seconds={float(upsert_metrics.get('upsert_latency_s', 0)):.2f}", flush=True)
         reranker_cls = registry.get("reranker", reranker_cfg["adapter"])
         reranker = reranker_cls(name=row["reranker"], **reranker_cfg)
         evaluator_cls = registry.get("evaluator", row["evaluator"])
@@ -92,7 +102,10 @@ def run_experiment(
         examples_missed = []
         examples_hit = []
 
-        for q, qv in zip(queries, query_vectors):
+        print(f"  queries start: {len(queries)} using {row['reranker']}", flush=True)
+        for query_idx, (q, qv) in enumerate(zip(queries, query_vectors), 1):
+            if query_idx == 1 or query_idx % 5 == 0 or query_idx == len(queries):
+                print(f"    query {query_idx}/{len(queries)}: {q.id}", flush=True)
             search_start = time.perf_counter()
             base_hits = store.search(qv, top_k=max(top_k, 20))
             reranked = reranker.rerank(q.query, base_hits, top_k=top_k)
