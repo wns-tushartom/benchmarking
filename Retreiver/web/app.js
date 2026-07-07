@@ -9,6 +9,48 @@ const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].
 const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
 const costLabel = (r) => /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 'commercial key/cost' : 'open-source/VM cost';
 
+function canonicalRerankerName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'none';
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (['none', 'no_reranker', 'baseline'].includes(normalized)) return 'none';
+  if (['qwen', 'qwen3', 'qwen3_4b', 'qwen3_4b_rerank', 'qwen3_4b_reranker', 'qwen3_reranker_4b_seq_cls'].includes(normalized)) return 'Qwen3:4B Rerank';
+  if (['bge', 'bge_reranker', 'bge_reranker_base'].includes(normalized)) return 'bge-reranker-base';
+  if (['amazon', 'amazon_rerank', 'amazon_rerank_v1', 'amazon_rerank_v1_0', 'amazon_bedrock_rerank', 'amazon_reranker'].includes(normalized)) return 'Amazon Rerank v1';
+  if (normalized.includes('amazon') && normalized.includes('rerank')) return 'Amazon Rerank v1';
+  if (normalized.includes('qwen') && normalized.includes('rerank')) return 'Qwen3:4B Rerank';
+  if (normalized.includes('bge') && normalized.includes('rerank')) return 'bge-reranker-base';
+  return raw;
+}
+
+function canonicalMetricRow(row, extra = {}) {
+  return {...row, ...extra, reranker: canonicalRerankerName(row?.reranker || row?.reranking_model || 'none')};
+}
+
+function metricRowKey(row) {
+  return `${row.sheet || ''}|${row.embedding || ''}|${row.store || ''}|${canonicalRerankerName(row.reranker || 'none')}`;
+}
+
+function dedupeMetricRows(rows) {
+  const map = new Map();
+  rows.map(r => canonicalMetricRow(r)).forEach(r => {
+    const key = metricRowKey(r);
+    if (!map.has(key)) map.set(key, r);
+  });
+  return [...map.values()];
+}
+
+function amazonStatusBlocksRun() {
+  const status = String(state.operational?.amazon_status || '').toLowerCase();
+  if (!status) return false;
+  if (/ok|ready|complete|available|granted/.test(status)) return false;
+  return /pending|block|denied|credential|permission|expired|not configured/.test(status);
+}
+
+function missingCoverageBlocked(reranker, store) {
+  return canonicalRerankerName(reranker) === 'Amazon Rerank v1' && String(store || '').toLowerCase() === 'faiss' && amazonStatusBlocksRun();
+}
+
 function positivePageNumber(value) {
   const raw = String(value ?? '').trim();
   if (!raw || raw === '—') return '';
@@ -132,23 +174,22 @@ function setRunSelection(sheet, embedding, store, reranker = 'all') {
 
 function metricCoverageRows() {
   const evaluation = state.operational?.evaluation || {};
-  return [
+  return dedupeMetricRows([
     ...(evaluation.summary || []),
     ...(evaluation.reranked?.summary || []),
     ...(evaluation.benchmark_reference?.summary || []),
   ].filter(r => r.sheet && r.embedding && r.store)
-    .map(r => ({
-      ...r,
+    .map(r => canonicalMetricRow(r, {
       status: 'metrics',
       total_store_seconds: r.total_store_seconds || r.avg_latency_seconds || '',
-    }));
+    })));
 }
 
 function coverageEvidenceRows(rows) {
   const map = new Map();
-  latestRows(rows).forEach(r => map.set(`${r.sheet}|${r.embedding}|${r.store}`, r));
+  latestRows(rows).map(r => canonicalMetricRow(r, {reranker: r.reranker || 'none'})).forEach(r => map.set(metricRowKey(r), r));
   metricCoverageRows().forEach(r => {
-    const key = `${r.sheet}|${r.embedding}|${r.store}`;
+    const key = metricRowKey(r);
     if (!map.has(key)) map.set(key, r);
   });
   return [...map.values()];
@@ -160,18 +201,25 @@ function renderCoverage(rows) {
   const stores = opts.stores.length ? opts.stores : uniq(latest, 'store');
   const chunkers = opts.chunkers.length ? opts.chunkers : uniq(latest, 'sheet');
   const embeddings = opts.embeddings.length ? opts.embeddings : uniq(latest, 'embedding');
-  const expected = chunkers.length * embeddings.length * stores.length;
-  $('coverageHint').textContent = `${latest.length}/${expected || latest.length} chunker × embedding × vector DB combos covered`;
-  const latestMap = new Map(latest.map(r => [`${r.sheet}|${r.embedding}|${r.store}`, r]));
+  const rerankers = opts.rerankers.length ? [...new Set(opts.rerankers.map(canonicalRerankerName))] : uniq(latest, 'reranker');
+  const expected = chunkers.length * embeddings.length * stores.length * Math.max(rerankers.length, 1);
+  const latestMap = new Map(latest.map(r => [metricRowKey(r), r]));
+  let covered = 0;
   const coverageRows = [];
-  chunkers.forEach(sheet => embeddings.forEach(embedding => {
+  chunkers.forEach(sheet => embeddings.forEach(embedding => rerankers.forEach(reranker => {
     const storeMap = {};
-    stores.forEach(store => { storeMap[store] = latestMap.get(`${sheet}|${embedding}|${store}`); });
-    coverageRows.push({ sheet, embedding, stores: storeMap });
-  }));
+    stores.forEach(store => {
+      const value = latestMap.get(`${sheet}|${embedding}|${store}|${reranker}`);
+      if (value) covered += 1;
+      storeMap[store] = value;
+    });
+    coverageRows.push({ sheet, embedding, reranker, stores: storeMap });
+  })));
+  $('coverageHint').textContent = `${covered}/${expected || covered} chunker × embedding × vector DB × reranker combos covered`;
   const cols = [
     {key:'sheet', label:'Chunker'},
     {key:'embedding', label:'Embedding'},
+    {key:'reranker', label:'Reranker'},
     ...stores.map(st => ({key:st, label:st, render:r => {
       const v = r.stores[st];
       if (v) {
@@ -179,7 +227,10 @@ function renderCoverage(rows) {
         const timing = v.total_store_seconds ? ` <code>${fmt(v.total_store_seconds, 2)}s</code>` : '';
         return `<span class="coverage-ok">${label}</span>${timing}`;
       }
-      return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}">Run</button>`;
+      if (missingCoverageBlocked(r.reranker, st)) {
+        return `<span class="badge warn" title="${esc(state.operational?.amazon_status || 'AWS Bedrock rerank blocked')}">blocked</span>`;
+      }
+      return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}" data-reranker="${esc(r.reranker)}">Run</button>`;
     }})),
     {key:'total', label:'DBs ready', render:r => `${Object.values(r.stores).filter(Boolean).length}/${stores.length}`}
   ];
@@ -201,7 +252,7 @@ function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
     }));
     return {
       ...r,
-      reranker: r.reranker || 'none',
+      reranker: canonicalRerankerName(r.reranker || 'none'),
       top_pdf: (hits[0] || {}).pdf_name || '—',
       top_page_number: (hits[0] || {}).page_number || '',
       evidence_snippet: hits[0]?.text || '',
@@ -536,10 +587,7 @@ function renderEvaluation(evaluation) {
   if (!section) return;
   const report = evaluation?.report || {};
   const reference = evaluation?.benchmark_reference || {};
-  const baseRows = rows.map(r => ({...r, reranker: r.reranker || 'none'}));
-  const rerankedRows = (evaluation?.reranked?.summary || []).map(r => ({...r, reranker: r.reranker || 'none'}));
-  const referenceRows = (reference.summary || []).map(r => ({...r, reranker: r.reranker || 'none', source: r.source || 'benchmark_reference'}));
-  const displayRows = [...baseRows, ...rerankedRows, ...referenceRows].sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
+  const displayRows = evaluatedRows(evaluation);
   fillSelect('qualityComboFilter', [...new Set(displayRows.map(pipelineLabel))].sort(), 'All pipeline combinations');
   fillSelect('qualityChunkerFilter', uniq(displayRows, 'sheet'), 'All chunkers');
   fillSelect('qualityEmbeddingFilter', uniq(displayRows, 'embedding'), 'All embeddings');
@@ -555,7 +603,8 @@ function renderEvaluation(evaluation) {
   const bestRow = filteredRows[0];
   section.classList.toggle('hidden', displayRows.length === 0);
   const evidenceRows = report.groundtruth_rows || evaluation?.reranked?.report?.groundtruth_rows || reference?.report?.query_count || '—';
-  const referenceNote = referenceRows.length ? ` · ${referenceRows.length} benchmark artifact configs` : '';
+  const referenceCount = dedupeMetricRows(reference.summary || []).length;
+  const referenceNote = referenceCount ? ` · ${referenceCount} benchmark artifact configs` : '';
   $('qualityHint').textContent = filteredRows.length ? `${filteredRows.length}/${displayRows.length} configs · ${evidenceRows} rows${referenceNote}` : 'No matching configs';
   $('qualityInsight').innerHTML = bestRow ? `<strong>Current winner:</strong> ${esc(pipelineLabel(bestRow))} <span>Score ${displayScore(bestRow)} · R@5 ${(num(bestRow.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestRow.mrr,3)} · ${fmt(bestRow.avg_latency_seconds,3)}s avg/query across ${esc(bestRow.evaluated_queries || '—')} queries</span>` : '<span>No evaluated combination matches these filters.</span>';
   table($('qualityTable'), filteredRows.slice(0, 60), [
@@ -607,7 +656,7 @@ function renderBestMethods(rows) {
   section.classList.toggle('hidden', !rows.length);
   if (!rows.length) return;
   const overall = [...rows].sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5))[0];
-  const fastest = [...rows].sort((a,b)=>num(a.avg_latency_seconds)-num(b.avg_latency_seconds))[0];
+  const fastest = [...rows].filter(r => num(r.avg_latency_seconds) > 0).sort((a,b)=>num(a.avg_latency_seconds)-num(b.avg_latency_seconds))[0] || overall;
   const bestR1 = [...rows].sort((a,b)=>num(b.recall_at_1)-num(a.recall_at_1) || num(b.mrr)-num(a.mrr))[0];
   const cards = [
     {step:'Overall best combination', value:`${overall.sheet} · ${overall.embedding} · ${overall.store}${overall.reranker && overall.reranker !== 'none' ? ' · ' + overall.reranker : ''}`, note:`Score ${displayScore(overall)} · R@5 ${(num(overall.recall_at_5)*100).toFixed(1)}% · ${fmt(overall.avg_latency_seconds,3)}s`, accent:'gold'},
@@ -623,8 +672,12 @@ function renderBestMethods(rows) {
 }
 
 function evaluatedRows(evaluation) {
-  return [...(evaluation?.summary || []), ...(evaluation?.reranked?.summary || [])]
-    .map(r => ({...r, reranker: r.reranker || 'none'}))
+  return dedupeMetricRows([
+    ...(evaluation?.summary || []),
+    ...(evaluation?.reranked?.summary || []),
+    ...(evaluation?.benchmark_reference?.summary || []),
+  ])
+    .map(r => canonicalMetricRow(r, {source: r.source || 'groundtruth_eval'}))
     .sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
 }
 
@@ -823,9 +876,9 @@ function renderOperational() {
   const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
   const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
   const evaluation = op.evaluation || {};
-  const evalRows = [...(evaluation.summary || []), ...(evaluation.reranked?.summary || [])].map(r => ({...r, reranker: r.reranker || 'none'})).sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
+  const evalRows = evaluatedRows(evaluation);
   const best = evalRows[0] || null;
-  const fastest = [...evalRows].sort((a,b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null;
+  const fastest = evalRows.filter(r => num(r.avg_latency_seconds) > 0).sort((a,b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null;
 
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
@@ -912,8 +965,10 @@ async function loadOptions() {
   const mainReranker = $('runRerankerMain');
   if (mainReranker) {
     const cur = mainReranker.value || 'all';
-    mainReranker.innerHTML = '<option value="all">All OSS rerankers</option><option value="qwen3_4b_rerank">qwen3_4b_rerank</option><option value="bge-reranker-base">bge-reranker-base</option><option value="none">No reranker baseline only</option>';
-    mainReranker.value = ['all','qwen3_4b_rerank','bge-reranker-base','none'].includes(cur) ? cur : 'all';
+    const rerankers = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
+    const values = ['all', ...rerankers, 'none'];
+    mainReranker.innerHTML = '<option value="all">All rerankers</option>' + rerankers.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('') + '<option value="none">No reranker baseline only</option>';
+    mainReranker.value = values.includes(canonicalRerankerName(cur)) ? canonicalRerankerName(cur) : (cur === 'all' ? 'all' : 'all');
   }
 }
 
@@ -1112,7 +1167,7 @@ $('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest
 $('runNvidiaBenchmarkBtn')?.addEventListener('click', () => runNvidiaAction('benchmark').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 document.addEventListener('click', e => {
   const btn = e.target.closest('.mini-run-btn');
-  if (btn) setRunSelection(btn.dataset.sheet, btn.dataset.embedding, btn.dataset.store);
+  if (btn) setRunSelection(btn.dataset.sheet, btn.dataset.embedding, btn.dataset.store, btn.dataset.reranker || 'all');
 });
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
 document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListener('click', openStatusDialog));

@@ -208,7 +208,7 @@ def live_service_health(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     model_base = service_base_from_endpoint(os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000"))
     checks = [
         ("model_adapter", model_base + "/health"),
-        ("qdrant", os.getenv("QDRANT_URL", "http://127.0.0.1:5001").rstrip("/") + "/healthz"),
+        ("qdrant", os.getenv("QDRANT_URL", "http://127.0.0.1:5019").rstrip("/") + "/healthz"),
         ("weaviate", os.getenv("WEAVIATE_URL", "http://127.0.0.1:5004").rstrip("/") + "/v1/.well-known/ready"),
     ]
     # Normalize endpoint URLs accidentally stored in env to the adapter base.
@@ -290,18 +290,42 @@ def read_evaluation() -> dict:
     return base
 
 
+def canonical_reranker_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "none"
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    if normalized in {"none", "no_reranker", "baseline"}:
+        return "none"
+    if normalized in {"qwen", "qwen3", "qwen3_4b", "qwen3_4b_rerank", "qwen3_4b_reranker", "qwen3_reranker_4b_seq_cls"}:
+        return "Qwen3:4B Rerank"
+    if normalized in {"bge", "bge_reranker", "bge_reranker_base"}:
+        return "bge-reranker-base"
+    if normalized in {"amazon", "amazon_rerank", "amazon_rerank_v1", "amazon_rerank_v1_0", "amazon_bedrock_rerank", "amazon_reranker"}:
+        return "Amazon Rerank v1"
+    if "amazon" in normalized and "rerank" in normalized:
+        return "Amazon Rerank v1"
+    if "qwen" in normalized and "rerank" in normalized:
+        return "Qwen3:4B Rerank"
+    if "bge" in normalized and "rerank" in normalized:
+        return "bge-reranker-base"
+    return raw
+
+
 def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]:
     latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms") or 0
     try:
         latency_s = float(latency_ms) / 1000.0
     except (TypeError, ValueError):
         latency_s = 0.0
+    embedding = row.get("embedding") or row.get("embedding_model") or ""
+    reranker = canonical_reranker_name(row.get("reranker") or row.get("reranking_model") or "none")
     return {
         "source": source,
         "sheet": row.get("chunker") or row.get("chunking_method") or row.get("sheet") or "",
-        "embedding": row.get("embedding") or row.get("embedding_model") or "",
+        "embedding": embedding,
         "store": row.get("vector_store") or row.get("vector_database") or row.get("store") or "",
-        "reranker": row.get("reranker") or row.get("reranking_model") or "none",
+        "reranker": reranker,
         "evaluated_queries": row.get("query_count") or row.get("evaluated_queries") or "",
         "recall_at_1": row.get("recall_at_1") or "",
         "recall_at_3": row.get("recall_at_3") or "",
@@ -311,7 +335,7 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
         "precision_at_5": row.get("precision_at_5") or "",
         "ndcg_at_5": row.get("ndcg_at_5") or row.get("ndcg_at_10") or "",
         "avg_latency_seconds": latency_s,
-        "cost": "commercial" if re.search(r"openai|amazon", f"{row.get('embedding') or row.get('embedding_model') or ''} {row.get('reranker') or row.get('reranking_model') or ''}", re.I) else "oss",
+        "cost": "commercial" if re.search(r"openai|amazon", f"{embedding} {reranker}", re.I) else "oss",
     }
 
 
@@ -319,15 +343,20 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
     sources: list[tuple[str, Path]] = []
     modular_runs_dir = MODULAR_DIR.parent
     if modular_runs_dir.exists():
+        def source_sort_key(path: Path) -> tuple[bool, bool, int, str]:
+            rel = path.relative_to(modular_runs_dir)
+            parts = rel.parts
+            return (path.parent.name != "latest", "archive" in parts, len(parts), str(rel))
         modular_paths = sorted(
-            modular_runs_dir.glob("*/modular_summary.csv"),
-            key=lambda p: (p.parent.name != "latest", p.parent.name),
+            modular_runs_dir.rglob("modular_summary.csv"),
+            key=source_sort_key,
         )
         for path in modular_paths:
+            run_path = path.parent.relative_to(modular_runs_dir)
             run_id = path.parent.name
-            if run_id != "latest" and "smoke" in run_id.lower():
+            if run_id != "latest" and "smoke" in str(run_path).lower():
                 continue
-            source = "modular_matrix" if run_id == "latest" else f"modular_run:{run_id}"
+            source = "modular_matrix" if run_id == "latest" else f"modular_run:{run_path}"
             sources.append((source, path))
     elif (MODULAR_DIR / "modular_summary.csv").exists():
         sources.append(("modular_matrix", MODULAR_DIR / "modular_summary.csv"))
@@ -337,11 +366,11 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
 
 def read_benchmark_reference() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for source, path in benchmark_reference_sources():
         for row in sort_summary(read_csv(path)):
             normalized = normalized_benchmark_row(row, source)
-            key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"], source)
+            key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
             if key in seen:
                 continue
             seen.add(key)
@@ -512,15 +541,11 @@ def read_document_repository() -> dict[str, Any]:
         for f in sorted(upload_dir.rglob("*")):
             if f.is_file() and f.suffix.lower() in {".pdf", ".csv", ".xlsx"}:
                 uploaded.append({"path": str(f.relative_to(ROOT)), "size_mb": f"{f.stat().st_size / (1024*1024):.2f}"})
-    chunked_count = sum(1 for r in rows if r["chunked_rows"])
-    review_count = sum(1 for r in rows if r["status"] == "review")
-    ready_count = sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review")
     return {
         "rows": rows,
         "total": len(rows),
-        "chunked_count": chunked_count,
-        "ready_count": ready_count,
-        "review_count": review_count,
+        "ready_count": sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review"),
+        "review_count": sum(1 for r in rows if r["status"] == "review"),
         "uploaded": uploaded[:100],
     }
 
@@ -757,8 +782,8 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:
                         pass
             ingestion_rows = read_ingestion_summaries()
-            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["60000"])[0])
-            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["60000"])[0])
+            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["120"])[0])
+            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["120"])[0])
             retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
             reranker_smokes = read_reranker_smokes(limit=reranker_limit)
             retrieval_total = retrieval_smoke_count()
@@ -796,8 +821,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "vm_snapshot": snapshot,
                     "service_health": live_service_health(snapshot),
                     "known_pdf_count": document_repository.get("total") or pdf_audit.get("total") or 0,
-                    "extracted_pdf_count": document_repository.get("chunked_count") or document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
-                    "failed_pdf_count": document_repository.get("review_count") or pdf_audit.get("needs_ocr_count") or 0,
+                    "extracted_pdf_count": document_repository.get("ready_count") or pdf_audit.get("ok_count") or 0,
+                    "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,
                     "pdf_audit": pdf_audit,
                     "document_repository": document_repository,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
@@ -984,7 +1009,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5011
     host = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
     server = ThreadingHTTPServer((host, port), Handler)
     shown_host = socket.gethostbyname(socket.gethostname()) if host == "0.0.0.0" else host

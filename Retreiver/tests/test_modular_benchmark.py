@@ -299,7 +299,7 @@ const context = {{
 }};
 vm.createContext(context);
 let code = fs.readFileSync({str(app_path)!r}, 'utf8');
-code = code.replace(/loadOptions\(\)\.then\(refresh\)[\s\S]*$/, '');
+code = code.split('loadOptions().then(refresh)')[0];
 vm.runInContext(code + `
 benchmarkOptions = {{
   chunkers: ['entity_heuristic_w6'],
@@ -327,6 +327,101 @@ if (!context.__coverageHint.includes('1/2')) {{
   console.error(context.__coverageHint);
   process.exit(2);
 }}
+'''
+        proc = subprocess.run(["node", "-e", node_script], text=True, capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_benchmark_reference_canonicalizes_rerankers_and_dedupes_sources(self):
+        import scripts.serve_benchmark_dashboard as dashboard
+
+        fields = ["chunker", "embedding", "vector_store", "reranker", "query_count", "recall_at_5", "mrr", "avg_latency_ms"]
+
+        def write_summary(path: Path, reranker: str):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow({
+                    "chunker": "entity_heuristic_w6",
+                    "embedding": "gte_multilingual_base",
+                    "vector_store": "Qdrant",
+                    "reranker": reranker,
+                    "query_count": "500",
+                    "recall_at_5": "0.50",
+                    "mrr": "0.40",
+                    "avg_latency_ms": "100",
+                })
+
+        old_modular_dir = dashboard.MODULAR_DIR
+        old_full_dir = dashboard.FULL_DIR
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                latest = root / "data" / "modular_runs" / "latest"
+                archived = root / "data" / "modular_runs" / "archived_full"
+                full_dir = root / "data" / "full_benchmark"
+                write_summary(latest / "modular_summary.csv", "qwen3_4b_rerank")
+                write_summary(archived / "modular_summary.csv", "Qwen3:4B Rerank")
+                full_dir.mkdir(parents=True)
+                dashboard.MODULAR_DIR = latest
+                dashboard.FULL_DIR = full_dir
+
+                reference = dashboard.read_benchmark_reference()
+        finally:
+            dashboard.MODULAR_DIR = old_modular_dir
+            dashboard.FULL_DIR = old_full_dir
+
+        self.assertEqual(len(reference["summary"]), 1)
+        self.assertEqual(reference["summary"][0]["reranker"], "Qwen3:4B Rerank")
+        self.assertEqual(reference["report"]["config_rows"], 1)
+
+    def test_frontend_evaluated_rows_merge_reference_canonicalize_and_dedupe(self):
+        app_path = Path(__file__).resolve().parents[1] / "web" / "app.js"
+        node_script = f'''
+const fs = require('fs');
+const vm = require('vm');
+const elements = {{}};
+function makeElement(id) {{ return {{id, value:'all', textContent:'', innerHTML:'', classList:{{toggle(){{}}, add(){{}}, remove(){{}}}}, addEventListener(){{}}, querySelectorAll(){{return [];}}, setAttribute(){{}}}}; }}
+const context = {{console, document: {{addEventListener(){{}}, querySelectorAll(){{return [];}}, getElementById(id){{return elements[id] || (elements[id] = makeElement(id));}}, body: {{insertAdjacentHTML(){{}}}}}}, window: {{}}, location: {{hash: '#overview'}}, history: {{replaceState(){{}}}}, fetch: async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}), setTimeout(){{}}}};
+vm.createContext(context);
+let code = fs.readFileSync({str(app_path)!r}, 'utf8');
+code = code.split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+const rows = evaluatedRows({{
+  summary: [{{sheet:'s', embedding:'e', store:'Qdrant', reranker:'qwen3_4b_rerank', recall_at_5:'0.5', mrr:'0.4', ndcg_at_5:'0.3', avg_latency_seconds:'0.2'}}],
+  reranked: {{summary: [{{sheet:'s', embedding:'e', store:'Qdrant', reranker:'Qwen3:4B Rerank', recall_at_5:'0.5', mrr:'0.4', ndcg_at_5:'0.3', avg_latency_seconds:'0.2'}}]}},
+  benchmark_reference: {{summary: [{{sheet:'s', embedding:'e', store:'FAISS', reranker:'bge-reranker-base', recall_at_5:'0.9', mrr:'0.8', ndcg_at_5:'0.7', avg_latency_seconds:'0.1'}}]}},
+}});
+globalThis.__rows = rows;
+`, context);
+const rows = context.__rows;
+if (rows.length !== 2) {{ console.error(JSON.stringify(rows)); process.exit(1); }}
+if (!rows.some(r => r.store === 'FAISS')) {{ console.error(JSON.stringify(rows)); process.exit(2); }}
+if (!rows.some(r => r.reranker === 'Qwen3:4B Rerank')) {{ console.error(JSON.stringify(rows)); process.exit(3); }}
+'''
+        proc = subprocess.run(["node", "-e", node_script], text=True, capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_frontend_marks_aws_faiss_missing_lane_blocked(self):
+        app_path = Path(__file__).resolve().parents[1] / "web" / "app.js"
+        node_script = f'''
+const fs = require('fs');
+const vm = require('vm');
+const elements = {{}};
+function makeElement(id) {{ return {{id, value:'all', textContent:'', innerHTML:'', classList:{{toggle(){{}}, add(){{}}, remove(){{}}}}, addEventListener(){{}}, querySelectorAll(){{return [];}}, setAttribute(){{}}}}; }}
+const document = {{getElementById(id){{return elements[id] || (elements[id] = makeElement(id));}}, querySelectorAll(){{return [];}}, addEventListener(){{}}, body:{{insertAdjacentHTML(){{}}}}}};
+const context = {{console, document, window:{{confirm(){{return true;}}}}, location:{{hash:'#overview'}}, history:{{replaceState(){{}}}}, fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}), setTimeout(){{}}}};
+vm.createContext(context);
+let code = fs.readFileSync({str(app_path)!r}, 'utf8');
+code = code.split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+benchmarkOptions = {{chunkers:['entity_heuristic_w6'], embeddings:['gte_multilingual_base'], vector_stores:['FAISS'], rerankers:['Amazon Rerank v1']}};
+state = {{operational: {{amazon_status: 'Pending AWS/Bedrock credentials', evaluation: {{benchmark_reference: {{summary: []}}}}}}}};
+renderCoverage([]);
+globalThis.__html = document.getElementById('coverageTable').innerHTML;
+`, context);
+if (!context.__html.includes('blocked')) {{ console.error(context.__html); process.exit(1); }}
+if (context.__html.includes('mini-run-btn')) {{ console.error(context.__html); process.exit(2); }}
 '''
         proc = subprocess.run(["node", "-e", node_script], text=True, capture_output=True, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

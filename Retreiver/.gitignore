@@ -17,6 +17,8 @@ __pycache__/
 
 # Generated benchmark/runtime artifacts
 data/db_ingestion_runs/
+data/modular_runs/
+data/full_benchmark/
 data/embedding_cache/
 data/retrieval_smoke/
 data/reranker_smoke/

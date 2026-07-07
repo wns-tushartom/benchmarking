@@ -49,7 +49,7 @@ It is not valid for:
 
 ## Recommended provider-mode order
 
-Do not start with all 135/162 real combinations. Start with a small high-signal slice:
+Do not start with all 180 real combinations. Start with a small high-signal slice:
 
 1. Qdrant + OpenAI embedding + available local/API reranker
 2. Qdrant + Jina/GTE embedding + available local/API reranker

@@ -3,6 +3,9 @@
 
 Run this on the WNS VM from the Retreiver repo root or from ~/benchmarking.
 It packages operational artifacts that the dashboard reads:
+- data/modular_runs/*/modular_summary.csv
+- data/full_benchmark/benchmark_summary.csv
+- data/evaluation*/ ground-truth and reranked metric files
 - data/db_ingestion_runs/*/summary.csv
 - data/reranker_smoke/*.json
 - data/retrieval_smoke/*.json
@@ -123,6 +126,21 @@ def main() -> int:
 
     out = Path.home() / f"wns_dashboard_artifacts_{stamp}.zip"
     patterns = [
+        "data/modular_runs/**/modular_summary.csv",
+        "data/modular_runs/**/analysis.json",
+        "data/modular_runs/**/status.json",
+        "data/full_benchmark/benchmark_summary.csv",
+        "data/full_benchmark/benchmark_report.json",
+        "data/evaluation/*.csv",
+        "data/evaluation/*.json",
+        "data/evaluation_reranked/*.csv",
+        "data/evaluation_reranked/*.json",
+        "data/reranker_analysis/*.csv",
+        "data/reranker_analysis/*.json",
+        "data/hallucination/*.csv",
+        "data/hallucination/*.json",
+        "data/nvidia_rag/*.csv",
+        "data/nvidia_rag/*.json",
         "data/db_ingestion_runs/*/summary.csv",
         "data/db_ingestion_runs/*/status.json",
         "data/db_ingestion_runs/*/config.json",

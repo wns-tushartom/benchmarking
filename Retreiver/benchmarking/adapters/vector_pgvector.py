@@ -24,6 +24,8 @@ class PGVectorStoreAdapter:
             raise RuntimeError(f"{dsn_env} or DATABASE_URL is required for PGVector")
         self.table = f"{table_prefix}_{os.getpid()}_{int(time.time())}"
         self.dimensions = 0
+        self.pg_vector_type = "vector"
+        self.pg_ops = "vector_cosine_ops"
 
     def reset_collection(self, schema: Any = None) -> None:
         with self.psycopg.connect(self.dsn, autocommit=True) as conn:
@@ -37,18 +39,21 @@ class PGVectorStoreAdapter:
         with self.psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             conn.execute(f'DROP TABLE IF EXISTS "{self.table}"')
-            conn.execute(f'CREATE TABLE "{self.table}" (id BIGINT PRIMARY KEY, chunk_id TEXT, pdf_name TEXT, paragraph TEXT, page_number TEXT, source_type TEXT, parser_method TEXT, embedding vector({self.dimensions}))')
+            self.pg_vector_type = "halfvec" if self.dimensions > 2000 else "vector"
+            self.pg_ops = "halfvec_cosine_ops" if self.pg_vector_type == "halfvec" else "vector_cosine_ops"
+            conn.execute(f'CREATE TABLE "{self.table}" (id BIGINT PRIMARY KEY, chunk_id TEXT, pdf_name TEXT, paragraph TEXT, page_number TEXT, source_type TEXT, parser_method TEXT, embedding {self.pg_vector_type}({self.dimensions}))')
             rows = []
             for i, (chunk, vector) in enumerate(zip(chunks, vectors), 1):
                 metadata = chunk.metadata or {}
                 rows.append((i, str(chunk.id), chunk.pdf_name, chunk.paragraph, str(metadata.get("page_number", "")), str(metadata.get("source_type", "")), str(metadata.get("parser_method", "")), _vec(vector)))
             with conn.cursor() as cur:
-                cur.executemany(f'INSERT INTO "{self.table}" (id, chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, embedding) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)', rows)
-            conn.execute(f'CREATE INDEX "{self.table}_hnsw" ON "{self.table}" USING hnsw (embedding vector_cosine_ops)')
+                cur.executemany(f'INSERT INTO "{self.table}" (id, chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, embedding) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::{self.pg_vector_type})', rows)
+            conn.execute(f'CREATE INDEX "{self.table}_hnsw" ON "{self.table}" USING hnsw (embedding {self.pg_ops})')
         return {"upsert_latency_s": time.perf_counter() - start, "vector_count": len(vectors)}
 
     def search(self, query_vector: List[float], top_k: int) -> List[SearchHit]:
-        sql = f'SELECT chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, 1 - (embedding <=> %s::vector) AS score FROM "{self.table}" ORDER BY embedding <=> %s::vector LIMIT %s'
+        cast_type = self.pg_vector_type
+        sql = f'SELECT chunk_id, pdf_name, paragraph, page_number, source_type, parser_method, 1 - (embedding <=> %s::{cast_type}) AS score FROM "{self.table}" ORDER BY embedding <=> %s::{cast_type} LIMIT %s'
         q = _vec(query_vector)
         with self.psycopg.connect(self.dsn) as conn:
             rows = conn.execute(sql, (q, q, top_k)).fetchall()

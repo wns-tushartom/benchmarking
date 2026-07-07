@@ -132,7 +132,7 @@ def hit_payload(rank: int, score: float, pdf_name: Any, chunk_id: Any, paragraph
 
 def search_qdrant(collection: str, vector: list[float], top_k: int) -> list[dict[str, Any]]:
     from qdrant_client import QdrantClient
-    url = os.environ.get("QDRANT_URL", "http://127.0.0.1:5001")
+    url = os.environ.get("QDRANT_URL", "http://127.0.0.1:5019")
     client = QdrantClient(url=url, api_key=os.environ.get("QDRANT_API_KEY") or None, timeout=60)
     if hasattr(client, "search"):
         results = client.search(collection_name=collection, query_vector=vector, limit=top_k, with_payload=True)

@@ -1,137 +1,120 @@
 # WNS Benchmark Pipeline Runbook
 
-## What is implemented
+## Current product shape
 
-This repo now has a complete, runnable local/offline benchmark pipeline for the requested matrix:
-
-```text
-4 chunking methods × 3 embedding labels × 3 vector DB labels × 1 HNSW index × 1 cosine retrieval × 3 rerankers = 108 configurations
-```
-
-It also has a working dashboard served by Python standard library.
-
-The chunking workbook reader includes a Python-standard-library `.xlsx` fallback, so `Run chunk recall` does **not** require `openpyxl` to be installed.
-
-## Important honesty note
-
-The current pipeline uses **local deterministic fallback adapters** for embeddings, vector DBs, and rerankers. This means:
-
-- It validates the full orchestration, matrix generation, recall calculation, CSV outputs, and frontend.
-- It gives useful relative signal for chunking and reranking behavior.
-- It is **not final production latency** for Jina/OpenAI/Qdrant/PGVector/Weaviate/Amazon/Qwen/BGE services.
-
-Production numbers require replacing the fallback adapters in `source/benchmark_pipeline.py` with real provider clients and DB containers/API services.
-
-## Main files added
+The product dashboard uses `configs/benchmark.local.json` as the default full matrix:
 
 ```text
-source/benchmark_pipeline.py
-scripts/run_full_benchmark_matrix.py
-scripts/compare_chunking_recall.py
-scripts/serve_benchmark_dashboard.py
-web/index.html
-web/styles.css
-web/app.js
-tests/test_benchmark_pipeline_core.py
-DESIGN.md
+5 chunkers × 3 embeddings × 4 vector stores × 1 HNSW index × 1 cosine retrieval × 3 rerankers = 180 configurations
 ```
 
-## Outputs produced
+The intentionally gated lane is `Amazon Rerank v1`, which requires AWS Bedrock credentials. Do not rerun OpenAI or launch AWS/Bedrock jobs for the final product unless credentials and cost approval are explicitly available.
 
-```text
-data/chunking_recall_results.csv
-data/chunking_recall_summary.csv
-data/full_benchmark/benchmark_summary.csv
-data/full_benchmark/benchmark_details.csv
-data/full_benchmark/benchmark_report.json
-```
+## Modes
 
-## Commands
+| Mode | Config | Count | Use |
+|---|---|---:|---|
+| Full product matrix | `configs/benchmark.local.json` | 180 | Dashboard default and final product view |
+| FAISS/OSS-only | `configs/benchmark.faiss-noaws.json` | 20 | Local/VM validation without OpenAI or AWS/Bedrock |
 
-### Run unit tests
+Validate both:
 
 ```bash
-python3 -m unittest tests.test_benchmark_pipeline_core -v
+python3 scripts/benchmark_cli.py validate configs/benchmark.local.json
+python3 scripts/benchmark_cli.py validate configs/benchmark.faiss-noaws.json
 ```
 
-### Compare chunking recall
+## One-command dashboard start
+
+From the Retreiver repo root:
 
 ```bash
-python3 scripts/compare_chunking_recall.py --limit 50
-```
-
-### Run official 135-combination matrix
-
-```bash
-python3 scripts/run_full_benchmark_matrix.py --limit 50
-```
-
-For a quick smoke test:
-
-```bash
-python3 scripts/run_full_benchmark_matrix.py --limit 10 --max-runs 6
-```
-
-Include extra candidate chunking methods:
-
-```bash
-python3 scripts/run_full_benchmark_matrix.py --limit 50 --include-candidates
-```
-
-Include Milvus as extra baseline DB:
-
-```bash
-python3 scripts/run_full_benchmark_matrix.py --limit 50 --include-milvus
-```
-
-### Start dashboard
-
-```bash
-python3 scripts/serve_benchmark_dashboard.py 8765
+python3 scripts/serve_benchmark_dashboard.py 5011
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8765
+http://127.0.0.1:5011
 ```
 
-## Verified run
+API smoke:
 
-Verification completed locally:
+```bash
+curl -s http://127.0.0.1:5011/api/results | python3 -m json.tool | head -80
+```
 
-- Unit tests: 6/6 passed
-- Chunking recall: completed across 6 chunking sheets with 20 query cases
-- Full official matrix: completed 108/108 configurations with 10 query cases
-- Output rows:
-  - `benchmark_summary.csv`: 108 rows
-  - `benchmark_details.csv`: 1080 rows
-- Errors in summary: 0
-- Dashboard API verified at `/api/results`
-- Dashboard run endpoint verified at `/api/run/chunking?limit=5`
+Expected JSON should include:
 
-## Current chunking result from smoke run
+```text
+operational.evaluation.benchmark_reference
+operational.known_matrix_count = 180
+options.matrix_count = 180
+```
 
-For candidate comparison:
+## Run selected benchmark combinations
 
-- `semantic_split`: Recall@5 = 0.85, Recall@10 = 0.90, 122 chunks
-- `fixed_tok1200_ov150`: Recall@5 = 0.70, Recall@10 = 0.80, 56 chunks
+Full product config, selected or bounded run:
 
-Current recommendation from local fallback recall: **semantic_split beats fixed_tok1200_ov150**.
+```bash
+python3 scripts/benchmark_cli.py run configs/benchmark.local.json \
+  --output-dir data/modular_runs/latest \
+  --max-runs 1 \
+  --limit-queries 25
+```
 
-## Next production-hardening steps
+FAISS/OSS-only mode:
 
-1. Add real embedding adapters:
-   - Jina v3
-   - GTE multilingual base
-   - OpenAI text-embedding-3-large
-2. Add real vector DB adapters/services:
-   - Qdrant HNSW
-   - PGVector HNSW
-   - Weaviate HNSW
-3. Add real rerank adapters:
-   - Amazon Rerank v1
-   - Qwen3:4B Rerank
-   - bge-reranker-base
-4. Re-run the same matrix with provider mode enabled.
-5. Compare provider results against the local fallback outputs.
+```bash
+python3 scripts/benchmark_cli.py run configs/benchmark.faiss-noaws.json \
+  --output-dir data/modular_runs/faiss_noaws_latest \
+  --limit-queries 25
+```
+
+## VM service defaults
+
+Local service ports used by the current runbooks:
+
+| Service | Port |
+|---|---:|
+| Dashboard | 5011 |
+| Model adapter | 5000 |
+| Qdrant HTTP | 5019 |
+| Qdrant gRPC | 5020 |
+| PGVector | 5003 |
+| Weaviate | 5004 |
+| NVIDIA rag-server | 5016 |
+| NVIDIA ingestor | 5017 |
+| NVIDIA frontend | 5018 |
+
+## Verification gate
+
+Run before claiming the dashboard product is fixed:
+
+```bash
+python3 -m py_compile scripts/serve_benchmark_dashboard.py scripts/run_retrieval_smoke_from_vm_dbs.py benchmarking/adapters/vector_pgvector.py benchmarking/adapters/remote_rerankers.py
+node --check web/app.js
+python3 -m pytest tests/test_dashboard_metrics.py tests/test_modular_benchmark.py -q
+python3 scripts/benchmark_cli.py validate configs/benchmark.local.json
+python3 scripts/benchmark_cli.py validate configs/benchmark.faiss-noaws.json
+```
+
+Expected:
+
+```text
+benchmark.local.json matrix_count = 180
+benchmark.faiss-noaws.json matrix_count = 20
+```
+
+## Modular run retention
+
+`data/modular_runs/` is runtime evidence. Keep `latest/`, keep one complete `full/` or named complete run, and sweep retry folders after their summary rows have been merged into the dashboard evidence.
+
+Recommended local sweep for noisy retry folders:
+
+```bash
+mkdir -p data/modular_runs/archive/faiss_noaws
+mv data/modular_runs/faiss_noaws_* data/modular_runs/archive/faiss_noaws/ 2>/dev/null || true
+```
+
+Do not commit generated experiment folders.

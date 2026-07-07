@@ -1,0 +1,58 @@
+{
+  "experiment": {
+    "name": "wns-rag-benchmark-faiss-noaws",
+    "description": "FAISS-only open-source reranker slice for local/VM validation without AWS Bedrock rerank or OpenAI embeddings",
+    "dataset": "data/qa_text_test.csv",
+    "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
+    "top_k": 10,
+    "mode": "faiss_noaws",
+    "random_seed": 42,
+    "repetitions": 1
+  },
+  "matrix": {
+    "chunkers": ["entity_heuristic_w6", "entity_heuristic_w5", "entity_heuristic_w4", "Heading_sections_l2", "fixed_tok1200_ov150"],
+    "embeddings": ["jina_v3", "gte_multilingual_base"],
+    "vector_stores": ["FAISS"],
+    "index_types": ["HNSW"],
+    "retrieval_methods": ["Cosine Similarity"],
+    "rerankers": ["Qwen3:4B Rerank", "bge-reranker-base"],
+    "evaluators": ["overlap_relevance"]
+  },
+  "techniques": {
+    "chunkers": {
+      "entity_heuristic_w6": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w6", "source_type": "provided"},
+      "entity_heuristic_w5": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w5", "source_type": "provided"},
+      "entity_heuristic_w4": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w4", "source_type": "provided"},
+      "Heading_sections_l2": {"adapter": "local_workbook", "sheet_name": "Heading_sections_l2", "source_type": "provided"},
+      "semantic_split": {"adapter": "local_workbook", "sheet_name": "semantic_split", "source_type": "candidate_optional"},
+      "fixed_tok1200_ov150": {"adapter": "local_workbook", "sheet_name": "fixed_tok1200_ov150", "source_type": "provided"}
+    },
+    "embeddings": {
+      "jina_v3": {"adapter": "remote_http", "dimensions": 1024, "license": "open_source", "execution_location": "vm_only", "endpoint_env": "JINA_EMBEDDING_URL", "api_key_env": "JINA_API_KEY", "batch_size": 32},
+      "gte_multilingual_base": {"adapter": "remote_http", "dimensions": 768, "license": "open_source", "execution_location": "vm_only", "endpoint_env": "GTE_EMBEDDING_URL", "api_key_env": "HF_TOKEN", "batch_size": 32},
+      "openai_text-embedding-3-large": {"adapter": "openai", "dimensions": 3072, "license": "commercial", "api_key_env": "OPENAI_API_KEY", "batch_size": 32}
+    },
+    "vector_stores": {
+      "Qdrant": {"adapter": "qdrant", "provider_ready_env": "QDRANT_URL", "url_env": "QDRANT_URL", "api_key_env": "QDRANT_API_KEY"},
+      "PGVector": {"adapter": "pgvector", "provider_ready_env": "PGVECTOR_DSN", "dsn_env": "PGVECTOR_DSN"},
+      "Weaviate": {"adapter": "weaviate", "provider_ready_env": "WEAVIATE_URL", "url_env": "WEAVIATE_URL"},
+      "FAISS": {"adapter": "faiss", "execution_location": "in_process", "index_type": "HNSW", "hnsw_m": 16, "ef_construction": 100, "ef_search": 64}
+    },
+    "index_types": {
+      "HNSW": {"adapter": "metadata_only", "provider_notes": "Real provider mode must create HNSW index or equivalent."}
+    },
+    "retrieval_methods": {
+      "Cosine Similarity": {"adapter": "local_cosine", "provider_notes": "Vector DB should use cosine/dot-compatible retrieval for real provider runs."}
+    },
+    "rerankers": {
+      "Amazon Rerank v1": {"adapter": "amazon_bedrock", "license": "commercial", "provider_ready_env": "AWS_REGION", "model_id_env": "AMAZON_RERANK_MODEL_ID"},
+      "Qwen3:4B Rerank": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "QWEN_RERANK_URL", "api_key_env": "QWEN_API_KEY", "model": "Qwen3:4B Rerank"},
+      "bge-reranker-base": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "BGE_RERANK_URL", "api_key_env": "HF_TOKEN", "model": "bge-reranker-base"}
+    }
+  },
+  "evaluation": {
+    "overlap_threshold": 0.22,
+    "metrics": ["recall_at_1", "recall_at_3", "recall_at_5", "recall_at_10", "mrr", "ndcg_at_10", "precision_at_5"],
+    "bootstrap_iterations": 200
+  }
+}

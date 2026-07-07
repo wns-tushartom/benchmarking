@@ -54,14 +54,7 @@ class RemoteHTTPRerankerAdapter:
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
 
     def rerank(self, query: str, hits: List[SearchHit], top_k: int) -> List[SearchHit]:
-        input_top_k = int(os.environ.get("RERANK_INPUT_TOP_K", str(top_k)) or top_k)
-        input_top_k = max(1, min(len(hits), input_top_k))
-        max_chars = int(os.environ.get("RERANK_MAX_CHARS", "0") or "0")
-        active_hits = hits[:input_top_k]
-        if max_chars > 0:
-            documents = [str(h.chunk.paragraph or "")[:max_chars] for h in active_hits]
-        else:
-            documents = [h.chunk.paragraph for h in active_hits]
+        documents = [h.chunk.paragraph for h in hits]
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         payloads = [
             {"model": self.model, "query": query, "documents": documents, "top_k": len(documents)},
@@ -71,12 +64,12 @@ class RemoteHTTPRerankerAdapter:
         last_error: Exception | None = None
         for payload in payloads:
             try:
-                scores = _scores_from_response(_post_json(self.url, payload, headers=headers), len(active_hits))
-                if len(scores) >= len(active_hits):
-                    rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(active_hits)]
+                scores = _scores_from_response(_post_json(self.url, payload, headers=headers), len(hits))
+                if len(scores) >= len(hits):
+                    rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(hits)]
                     rescored.sort(key=lambda h: h.score, reverse=True)
-                    return rescored[: min(top_k, len(rescored))]
-                last_error = RuntimeError(f"endpoint returned {len(scores)} scores for {len(active_hits)} documents")
+                    return rescored[:top_k]
+                last_error = RuntimeError(f"endpoint returned {len(scores)} scores for {len(hits)} documents")
             except Exception as exc:
                 last_error = exc
         raise RuntimeError(f"Reranker endpoint failed for {self.name}: {last_error}")
@@ -85,15 +78,21 @@ class RemoteHTTPRerankerAdapter:
 class AmazonBedrockRerankerAdapter:
     def __init__(self, name: str, model_id_env: str = "AMAZON_RERANK_MODEL_ID", region_env: str = "AWS_REGION", **_: Any):
         self.name = name
-        self.model_id = os.environ.get(model_id_env, "amazon.rerank-v1:0").strip()
         self.region = os.environ.get(region_env) or os.environ.get("AWS_DEFAULT_REGION")
         if not self.region:
             raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION is required for Amazon Rerank v1")
+        raw_model_id = os.environ.get(model_id_env, "amazon.rerank-v1:0").strip()
+        self.model_id = self._model_arn(raw_model_id)
         try:
             import boto3  # type: ignore
         except Exception as exc:
             raise RuntimeError("boto3 is required for Amazon Rerank v1. Install boto3 in the benchmark venv.") from exc
         self.client = boto3.client("bedrock-agent-runtime", region_name=self.region)
+
+    def _model_arn(self, model_id: str) -> str:
+        if model_id.startswith("arn:aws:bedrock:"):
+            return model_id
+        return f"arn:aws:bedrock:{self.region}::foundation-model/{model_id}"
 
     def rerank(self, query: str, hits: List[SearchHit], top_k: int) -> List[SearchHit]:
         sources = [{"type": "INLINE", "inlineDocumentSource": {"textDocument": {"text": h.chunk.paragraph}}} for h in hits]
