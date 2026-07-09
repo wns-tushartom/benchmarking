@@ -863,14 +863,19 @@ function openStatusDialog() {
   else dialog.setAttribute('open', '');
 }
 
+function operationalRerankRows() {
+  const op = state.operational || {};
+  return [...(op.reranker_smokes || []), ...(op.benchmark_detail_evidence || [])];
+}
+
 function renderOperational() {
   const op = state.operational || {};
   const ingestion = op.ingestion || {};
   const rows = ingestion.rows || [];
   const latest = latestRows(rows);
   const retrieval = op.retrieval_smokes || [];
+  const rerank = operationalRerankRows();
   const benchmarkEvidence = op.benchmark_detail_evidence || [];
-  const rerank = [...(op.reranker_smokes || []), ...benchmarkEvidence];
   const health = op.service_health || [];
   const snapshot = op.vm_snapshot || {};
   const optsForStatus = matrixOptions();
@@ -1156,7 +1161,7 @@ async function runAction(kind) {
   await refresh();
 }
 
-['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], state.operational?.reranker_smokes || [])));
+['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
 $('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));

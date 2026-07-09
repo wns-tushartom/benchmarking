@@ -173,3 +173,10 @@ def test_static_assets_are_cache_busted_and_render_errors_visible():
     assert 'src="/app.js?v=' in index
     assert "Cache-Control" in server and "no-store" in server
     assert "Dashboard render failed" in app
+
+
+def test_retrieval_filter_rerender_keeps_benchmark_detail_evidence():
+    app = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+    assert "function operationalRerankRows()" in app
+    assert "benchmark_detail_evidence" in app
+    assert "renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())" in app
