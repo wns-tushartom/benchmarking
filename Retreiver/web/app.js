@@ -953,10 +953,17 @@ function renderOperational() {
 
 async function refresh() {
   $('statusPill').textContent = 'Refreshing';
-  const data = await api('/api/results?retrieval_limit=0&reranker_limit=0&detail_evidence_limit=360&detail_evidence_per_combo=1');
-  state = { operational: data.operational || {}, files: data.files || [], options: data.options || {} };
-  renderOperational();
-  $('statusPill').textContent = 'Live';
+  try {
+    const data = await api('/api/results?retrieval_limit=0&reranker_limit=0&detail_evidence_limit=360&detail_evidence_per_combo=1');
+    state = { operational: data.operational || {}, files: data.files || [], options: data.options || {} };
+    renderOperational();
+    $('statusPill').textContent = 'Live';
+  } catch (e) {
+    $('statusPill').textContent = 'Error';
+    console.error('Dashboard render failed', e);
+    document.body.insertAdjacentHTML('afterbegin', `<pre class="fatal">Dashboard render failed: ${esc(e.stack || e.message || String(e))}</pre>`);
+    throw e;
+  }
 }
 
 async function loadOptions() {

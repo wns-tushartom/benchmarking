@@ -163,3 +163,13 @@ def test_smoke_counts_use_summary_without_loading_json_rows():
             assert dashboard.reranker_smoke_count() == 26251
         finally:
             dashboard.RETRIEVAL_DIR, dashboard.RERANKER_DIR = old
+
+
+def test_static_assets_are_cache_busted_and_render_errors_visible():
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
+    assert 'src="/app.js?v=' in index
+    assert "Cache-Control" in server and "no-store" in server
+    assert "Dashboard render failed" in app
