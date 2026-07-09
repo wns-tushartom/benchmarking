@@ -238,8 +238,8 @@ function renderCoverage(rows) {
 }
 
 function buildEvidenceRows(retrievalSmokes, rerankerSmokes) {
-  const base = (retrievalSmokes || []).map(r => ({...r, reranker: 'none', evidence_type: 'initial topK retrieval'}));
-  const reranked = (rerankerSmokes || []).map(r => ({...r, evidence_type: 'reranked final top3'}));
+  const base = (retrievalSmokes || []).map(r => ({...r, reranker: 'none', evidence_type: r.evidence_type || 'initial topK retrieval'}));
+  const reranked = (rerankerSmokes || []).map(r => ({...r, evidence_type: r.evidence_type || 'reranked final top3'}));
   return [...reranked, ...base].map(r => {
     const rawHits = r.hits || [];
     const hits = rawHits.map((hit, i) => ({
@@ -869,13 +869,15 @@ function renderOperational() {
   const rows = ingestion.rows || [];
   const latest = latestRows(rows);
   const retrieval = op.retrieval_smokes || [];
-  const rerank = op.reranker_smokes || [];
+  const benchmarkEvidence = op.benchmark_detail_evidence || [];
+  const rerank = [...(op.reranker_smokes || []), ...benchmarkEvidence];
   const health = op.service_health || [];
   const snapshot = op.vm_snapshot || {};
   const optsForStatus = matrixOptions();
   const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
   const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
   const evaluation = op.evaluation || {};
+  const repo = op.document_repository || {};
   const evalRows = evaluatedRows(evaluation);
   const best = evalRows[0] || null;
   const fastest = evalRows.filter(r => num(r.avg_latency_seconds) > 0).sort((a,b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null;
@@ -884,12 +886,12 @@ function renderOperational() {
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   $('groundTruthStatus').textContent = evaluation?.report?.groundtruth_rows ? `${evaluation.report.groundtruth_rows} rows evaluated` : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending');
-  $('pdfStatus').textContent = `${op.extracted_pdf_count || 0}/${op.known_pdf_count || 0}`;
-  $('pdfNote').textContent = 'chunked or ready in repository';
+  $('pdfStatus').textContent = `${repo.total || op.known_pdf_count || 0}/${repo.total || op.known_pdf_count || 0}`;
+  $('pdfNote').textContent = `${repo.ready_count || op.extracted_pdf_count || 0} clean chunked · ${repo.review_count || 0} review/text-only`;
   $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
   $('retrievalStatus').textContent = String(retrieval.length + rerank.length);
-  $('retrievalNote').textContent = `${retrieval.length + rerank.length} loaded rows from ${op.retrieval_smoke_total || 0} retrieval + ${op.reranker_smoke_total || 0} reranker artifact files. Raw totals are generated evidence files, not query count.`;
+  $('retrievalNote').textContent = `${retrieval.length + rerank.length} loaded rows from ${op.retrieval_smoke_total || 0} retrieval + ${op.reranker_smoke_total || 0} reranker artifact files + ${benchmarkEvidence.length} benchmark detail rows. Raw totals are generated evidence files, not query count.`;
   setText('bestR5Status', best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—');
   setText('bestConfigNote', best ? pipelineLabel(best) : 'best accuracy score');
   setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
@@ -951,7 +953,7 @@ function renderOperational() {
 
 async function refresh() {
   $('statusPill').textContent = 'Refreshing';
-  const data = await api('/api/results');
+  const data = await api('/api/results?retrieval_limit=60000&reranker_limit=60000');
   state = { operational: data.operational || {}, files: data.files || [], options: data.options || {} };
   renderOperational();
   $('statusPill').textContent = 'Live';

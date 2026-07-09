@@ -23,6 +23,7 @@ from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import generate_matrix, load_benchmark_config
+from source.benchmark_pipeline import load_chunks_from_workbook
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,7 @@ CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
 load_env_files(ROOT)
+CHUNK_LOOKUP_CACHE: dict[str, dict[int, Any]] = {}
 
 
 def benchmark_options() -> dict:
@@ -364,13 +366,26 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
     return sources
 
 
+def official_matrix_keys() -> set[tuple[str, str, str, str]]:
+    cfg = load_benchmark_config(CONFIG_PATH)
+    return {
+        (row["chunker"], row["embedding"], row["vector_store"], canonical_reranker_name(row["reranker"]))
+        for row in generate_matrix(cfg)
+    }
+
+
 def read_benchmark_reference() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
+    official_keys = official_matrix_keys()
+    skipped_non_official = 0
     for source, path in benchmark_reference_sources():
         for row in sort_summary(read_csv(path)):
             normalized = normalized_benchmark_row(row, source)
             key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
+            if key not in official_keys:
+                skipped_non_official += 1
+                continue
             if key in seen:
                 continue
             seen.add(key)
@@ -380,11 +395,100 @@ def read_benchmark_reference() -> dict[str, Any]:
         "report": {
             "source": "modular/full benchmark artifacts",
             "config_rows": len(rows),
+            "official_matrix_rows": len(official_keys),
+            "skipped_non_official_rows": skipped_non_official,
             "openai_rows": sum(1 for r in rows if "openai" in str(r.get("embedding", "")).lower()),
             "faiss_rows": sum(1 for r in rows if str(r.get("store", "")).lower() == "faiss"),
             "query_count": next((r.get("evaluated_queries") for r in rows if r.get("evaluated_queries")), ""),
         },
     }
+
+
+def benchmark_detail_sources() -> list[tuple[str, Path]]:
+    sources: list[tuple[str, Path]] = []
+    modular_runs_dir = MODULAR_DIR.parent
+    if not modular_runs_dir.exists():
+        return sources
+    def source_sort_key(path: Path) -> tuple[bool, bool, int, str]:
+        rel = path.relative_to(modular_runs_dir)
+        parts = rel.parts
+        return (path.parent.name != "latest", "archive" in parts, len(parts), str(rel))
+    for path in sorted(modular_runs_dir.rglob("modular_details.csv"), key=source_sort_key):
+        run_path = path.parent.relative_to(modular_runs_dir)
+        run_id = path.parent.name
+        if run_id != "latest" and "smoke" in str(run_path).lower():
+            continue
+        source = "modular_details" if run_id == "latest" else f"modular_details:{run_path}"
+        sources.append((source, path))
+    return sources
+
+
+def chunk_lookup_for_sheet(sheet: str) -> dict[int, Any]:
+    if sheet in CHUNK_LOOKUP_CACHE:
+        return CHUNK_LOOKUP_CACHE[sheet]
+    try:
+        cfg = load_benchmark_config(CONFIG_PATH)
+        workbook = cfg.get("experiment", {}).get("corpus_workbook", "data/chunking_methods_output_v2.xlsx")
+        chunks = load_chunks_from_workbook(ROOT / workbook, sheet)
+        CHUNK_LOOKUP_CACHE[sheet] = {int(c.id): c for c in chunks}
+    except Exception:
+        CHUNK_LOOKUP_CACHE[sheet] = {}
+    return CHUNK_LOOKUP_CACHE[sheet]
+
+
+def benchmark_detail_evidence(limit_per_combo: int = 3, max_rows: int = 2000) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    per_combo: dict[tuple[str, str, str, str], int] = {}
+    official_keys = official_matrix_keys()
+    for source, path in benchmark_detail_sources():
+        for row in read_csv(path):
+            normalized = normalized_benchmark_row(row, source)
+            key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
+            if key not in official_keys or per_combo.get(key, 0) >= limit_per_combo:
+                continue
+            top_ids = [v for v in str(row.get("top_ids") or "").split("|") if v]
+            if not top_ids:
+                continue
+            top_scores = str(row.get("top_scores") or "").split("|")
+            chunks = chunk_lookup_for_sheet(normalized["sheet"])
+            hits = []
+            for i, chunk_id_raw in enumerate(top_ids[:5], 1):
+                try:
+                    chunk_id = int(chunk_id_raw)
+                except ValueError:
+                    continue
+                chunk = chunks.get(chunk_id)
+                if not chunk:
+                    continue
+                hits.append({
+                    "rank": i,
+                    "chunk_id": chunk_id,
+                    "pdf_name": getattr(chunk, "pdf_name", ""),
+                    "paragraph": getattr(chunk, "paragraph", ""),
+                    "score": top_scores[i - 1] if i - 1 < len(top_scores) else "",
+                    "source_type": "modular_details",
+                })
+            if not hits:
+                continue
+            per_combo[key] = per_combo.get(key, 0) + 1
+            try:
+                artifact = str(path.relative_to(ROOT))
+            except ValueError:
+                artifact = str(path)
+            rows.append({
+                **normalized,
+                "query": row.get("query") or "",
+                "query_id": row.get("query_id") or "",
+                "category": row.get("category") or "",
+                "created_at": row.get("created_at") or "",
+                "artifact": artifact,
+                "hits": hits,
+                "retrieved_count": len(hits),
+                "evidence_type": "benchmark final top5 evidence",
+            })
+            if len(rows) >= max_rows:
+                return rows
+    return rows
 
 
 def read_hallucination() -> dict:
@@ -782,10 +886,11 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:
                         pass
             ingestion_rows = read_ingestion_summaries()
-            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["120"])[0])
-            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["120"])[0])
+            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["60000"])[0])
+            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["60000"])[0])
             retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
             reranker_smokes = read_reranker_smokes(limit=reranker_limit)
+            benchmark_evidence = benchmark_detail_evidence()
             retrieval_total = retrieval_smoke_count()
             reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
@@ -809,6 +914,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "operational": {
                     "ingestion": summarize_ingestion(ingestion_rows),
                     "reranker_smokes": reranker_smokes,
+                    "benchmark_detail_evidence": benchmark_evidence,
+                    "benchmark_detail_evidence_loaded": len(benchmark_evidence),
                     "reranker_smoke_total": reranker_total,
                     "reranker_smoke_loaded": len(reranker_smokes),
                     "retrieval_smokes": retrieval_smokes,
