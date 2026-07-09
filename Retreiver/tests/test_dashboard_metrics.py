@@ -193,3 +193,13 @@ def test_evidence_browser_wording_is_clear_about_display_rows_vs_raw_artifacts()
     assert "Not total document chunks" in app
     assert "Retrieved evidence excerpts" in app
     assert "Benchmark final top 5 evidence" in app
+
+
+def test_document_repository_page_does_not_show_summary_cards():
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "documentRepositoryCards" not in index
+    assert "Repository PDFs" not in app
+    assert "Chunked documents" not in app
+    assert "Review queue" not in app

@@ -834,12 +834,6 @@ function renderDocumentRepository(repo) {
   const rows = repo?.rows || [];
   const hint = $('documentRepositoryHint');
   if (hint) hint.textContent = rows.length ? `${repo.ready_count || 0}/${repo.total || rows.length} chunked · ${repo.review_count || 0} in review` : 'No repository scan yet';
-  const cards = $('documentRepositoryCards');
-  if (cards) {
-    cards.innerHTML = `<article class="run-result-card ok"><span>Repository PDFs</span><strong>${esc(repo.total || rows.length || 0)}</strong><small>from data/pdfs</small></article>
-      <article class="run-result-card"><span>Chunked documents</span><strong>${esc(repo.ready_count || 0)}</strong><small>present in benchmark workbook</small></article>
-      <article class="run-result-card warn"><span>Review queue</span><strong>${esc(repo.review_count || 0)}</strong><small>shown only in repository/audit views</small></article>`;
-  }
   table($('documentRepositoryTable'), rows, [
     {key:'pdf_name', label:'PDF', render:r=>pdfLink(r.pdf_name, (r.pdf_name || '').slice(0, 88) || '—')},
     {key:'status', label:'Readiness'},
