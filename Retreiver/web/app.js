@@ -7,6 +7,7 @@ const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&
 const num = (v) => Number.parseFloat(v || 0) || 0;
 const uniq = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
 const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
+const fmtInt = (v) => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : '0';
 const costLabel = (r) => /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 'commercial key/cost' : 'open-source/VM cost';
 
 function canonicalRerankerName(value) {
@@ -274,11 +275,19 @@ function shortEvidenceLabel(row) {
   return `${pdf}${text}`.slice(0, 110);
 }
 
+function evidenceStageLabel(type) {
+  const normalized = String(type || '').toLowerCase();
+  if (normalized.includes('benchmark final')) return 'Benchmark final top 5 evidence';
+  if (normalized.includes('reranked')) return 'Smoke reranked final top 3';
+  if (normalized.includes('initial')) return 'Initial vector top K retrieval';
+  return type || 'Evidence row';
+}
+
 function renderEvidenceDetails(row) {
   const limit = row.evidence_type === 'reranked final top3' ? 3 : 5;
   const hits = (row.evidence_hits || []).filter(h => h.text).slice(0, limit);
   if (!hits.length) return '<span class="muted-text">No paragraph returned in artifact</span>';
-  const stage = row.evidence_type === 'reranked final top3' ? 'Final reranked evidence' : 'Initial vector top 5 evidence';
+  const stage = evidenceStageLabel(row.evidence_type);
   const body = hits.map((h, i) => `<article class="evidence-hit ${i < 3 ? 'final-hit' : ''}">
     <div><strong>${esc(stage)} · Rank ${esc(h.rank)}</strong><span>${pdfLink(h.pdf_name || '—', '', h.page_number)}${h.score !== '' ? ` · score ${esc(fmt(h.score, 4))}` : ''}</span></div>
     <p>${esc(h.text)}</p>
@@ -310,9 +319,9 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'store', label:'Vector DB'},
     {key:'reranker', label:'Reranker'},
     {key:'top_pdf', label:'Top PDF/source', render:r=>pdfLink(r.top_pdf, (r.top_pdf || '').slice(0, 58) || '—', r.top_page_number)},
-    {key:'initial_topk_count', label:'Initial K'},
-    {key:'evidence_type', label:'Stage'},
-    {key:'evidence_snippet', label:'Top 5 hits to rerank to top 3 evidence', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
+    {key:'initial_topk_count', label:'Hits shown'},
+    {key:'evidence_type', label:'Evidence source', render:r=>esc(evidenceStageLabel(r.evidence_type))},
+    {key:'evidence_snippet', label:'Retrieved evidence excerpts', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
   ]);
@@ -895,8 +904,9 @@ function renderOperational() {
   $('pdfNote').textContent = `${repo.ready_count || op.extracted_pdf_count || 0} clean chunked · ${repo.review_count || 0} review/text-only`;
   $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
-  $('retrievalStatus').textContent = String(retrieval.length + rerank.length);
-  $('retrievalNote').textContent = `${retrieval.length + rerank.length} loaded rows from ${op.retrieval_smoke_total || 0} retrieval + ${op.reranker_smoke_total || 0} reranker artifact files + ${benchmarkEvidence.length} benchmark detail rows. Raw totals are generated evidence files, not query count.`;
+  const evidenceRowsLoaded = retrieval.length + rerank.length;
+  $('retrievalStatus').textContent = String(evidenceRowsLoaded);
+  $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
   setText('bestR5Status', best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—');
   setText('bestConfigNote', best ? pipelineLabel(best) : 'best accuracy score');
   setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');

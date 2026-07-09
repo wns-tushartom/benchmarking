@@ -180,3 +180,16 @@ def test_retrieval_filter_rerender_keeps_benchmark_detail_evidence():
     assert "function operationalRerankRows()" in app
     assert "benchmark_detail_evidence" in app
     assert "renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())" in app
+
+
+def test_evidence_browser_wording_is_clear_about_display_rows_vs_raw_artifacts():
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "Evidence browser" in index
+    assert "Retrieval checks" not in index
+    assert "evidence display rows loaded" in app
+    assert "Raw artifacts on disk" in app
+    assert "Not total document chunks" in app
+    assert "Retrieved evidence excerpts" in app
+    assert "Benchmark final top 5 evidence" in app
