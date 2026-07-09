@@ -953,7 +953,7 @@ function renderOperational() {
 
 async function refresh() {
   $('statusPill').textContent = 'Refreshing';
-  const data = await api('/api/results?retrieval_limit=60000&reranker_limit=60000');
+  const data = await api('/api/results?retrieval_limit=0&reranker_limit=0&detail_evidence_limit=360&detail_evidence_per_combo=1');
   state = { operational: data.operational || {}, files: data.files || [], options: data.options || {} };
   renderOperational();
   $('statusPill').textContent = 'Live';

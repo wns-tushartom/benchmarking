@@ -131,3 +131,35 @@ def test_benchmark_details_generate_aws_faiss_top5_evidence_rows():
     assert evidence[0]["reranker"] == "Amazon Rerank v1"
     assert len(evidence[0]["hits"]) == 5
     assert evidence[0]["hits"][0]["pdf_name"] == "doc14.pdf"
+
+
+def test_frontend_initial_load_uses_lazy_evidence_limits():
+    app = Path(__file__).resolve().parents[1] / "web" / "app.js"
+    text = app.read_text(encoding="utf-8")
+    assert "retrieval_limit=0" in text
+    assert "reranker_limit=0" in text
+    assert "detail_evidence_limit=360" in text
+    assert "retrieval_limit=60000" not in text
+    assert "reranker_limit=60000" not in text
+
+
+def test_smoke_counts_use_summary_without_loading_json_rows():
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        retrieval = root / "retrieval_smoke"
+        reranker = root / "reranker_smoke"
+        retrieval.mkdir()
+        reranker.mkdir()
+        (retrieval / "summary.json").write_text(json.dumps({"result_count": 13050}), encoding="utf-8")
+        (reranker / "summary.json").write_text(json.dumps({"result_count": 26251}), encoding="utf-8")
+        old = dashboard.RETRIEVAL_DIR, dashboard.RERANKER_DIR
+        dashboard.RETRIEVAL_DIR, dashboard.RERANKER_DIR = retrieval, reranker
+        try:
+            assert dashboard.read_retrieval_smokes(limit=0) == []
+            assert dashboard.read_reranker_smokes(limit=0) == []
+            assert dashboard.retrieval_smoke_count() == 13050
+            assert dashboard.reranker_smoke_count() == 26251
+        finally:
+            dashboard.RETRIEVAL_DIR, dashboard.RERANKER_DIR = old

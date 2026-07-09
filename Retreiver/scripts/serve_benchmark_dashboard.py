@@ -123,7 +123,7 @@ def summarize_ingestion(rows: list[dict]) -> dict:
 
 def read_reranker_smokes(limit: int = 250) -> list[dict]:
     smokes: list[dict] = []
-    if not RERANKER_DIR.exists():
+    if limit <= 0 or not RERANKER_DIR.exists():
         return smokes
     paths = [p for p in RERANKER_DIR.glob("*.json") if p.name != "summary.json"]
     paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -141,7 +141,7 @@ def read_reranker_smokes(limit: int = 250) -> list[dict]:
 
 def read_retrieval_smokes(limit: int = 250) -> list[dict[str, Any]]:
     smokes: list[dict[str, Any]] = []
-    if not RETRIEVAL_DIR.exists():
+    if limit <= 0 or not RETRIEVAL_DIR.exists():
         return smokes
     paths = [p for p in RETRIEVAL_DIR.glob("*.json") if p.name != "summary.json"]
     paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -157,16 +157,32 @@ def read_retrieval_smokes(limit: int = 250) -> list[dict[str, Any]]:
     return smokes
 
 
-def retrieval_smoke_count() -> int:
-    if not RETRIEVAL_DIR.exists():
+def smoke_summary_count(path: Path) -> int | None:
+    summary = path / "summary.json"
+    if not summary.exists():
+        return None
+    try:
+        value = json.loads(summary.read_text(encoding="utf-8")).get("result_count")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def smoke_count(path: Path) -> int:
+    if not path.exists():
         return 0
-    return sum(1 for p in RETRIEVAL_DIR.glob("*.json") if p.name != "summary.json")
+    summary_count = smoke_summary_count(path)
+    if summary_count is not None:
+        return summary_count
+    return sum(1 for p in path.glob("*.json") if p.name != "summary.json")
+
+
+def retrieval_smoke_count() -> int:
+    return smoke_count(RETRIEVAL_DIR)
 
 
 def reranker_smoke_count() -> int:
-    if not RERANKER_DIR.exists():
-        return 0
-    return sum(1 for p in RERANKER_DIR.glob("*.json") if p.name != "summary.json")
+    return smoke_count(RERANKER_DIR)
 
 
 def read_snapshot() -> dict:
@@ -886,11 +902,14 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:
                         pass
             ingestion_rows = read_ingestion_summaries()
-            retrieval_limit = int(parse_qs(parsed.query).get("retrieval_limit", ["60000"])[0])
-            reranker_limit = int(parse_qs(parsed.query).get("reranker_limit", ["60000"])[0])
+            qs = parse_qs(parsed.query)
+            retrieval_limit = min(int(qs.get("retrieval_limit", ["0"])[0]), 5000)
+            reranker_limit = min(int(qs.get("reranker_limit", ["0"])[0]), 5000)
+            detail_evidence_limit = min(int(qs.get("detail_evidence_limit", ["360"])[0]), 2000)
+            detail_evidence_per_combo = min(int(qs.get("detail_evidence_per_combo", ["1"])[0]), 5)
             retrieval_smokes = read_retrieval_smokes(limit=retrieval_limit)
             reranker_smokes = read_reranker_smokes(limit=reranker_limit)
-            benchmark_evidence = benchmark_detail_evidence()
+            benchmark_evidence = benchmark_detail_evidence(limit_per_combo=detail_evidence_per_combo, max_rows=detail_evidence_limit)
             retrieval_total = retrieval_smoke_count()
             reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
