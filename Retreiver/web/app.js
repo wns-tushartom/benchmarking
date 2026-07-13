@@ -129,6 +129,51 @@ function fillRunSelect(id, values, allLabel = 'All') {
   el.value = cur === 'all' || values.includes(cur) ? cur : 'all';
 }
 
+function fillRunMultiSelect(id, values, allLabel = 'All') {
+  const el = $(id); if (!el) return;
+  const previous = selectedValues(id);
+  const options = ['all', ...values];
+  el.innerHTML = `<option value="all">${esc(allLabel)}</option>` + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  const keep = previous.filter(v => options.includes(v));
+  const active = keep.length ? keep : ['all'];
+  [...el.options].forEach(opt => { opt.selected = active.includes(opt.value); });
+}
+
+function selectedValues(id) {
+  const el = $(id); if (!el) return ['all'];
+  const values = [...(el.selectedOptions || [])].map(o => o.value).filter(Boolean);
+  return values.length ? values : ['all'];
+}
+
+function selectOnly(id, value) {
+  const el = $(id); if (!el) return;
+  [...el.options].forEach(opt => { opt.selected = opt.value === value; });
+}
+
+function expandedSelection(id, values) {
+  const picked = selectedValues(id);
+  if (picked.includes('all')) return values || [];
+  return picked;
+}
+
+function selectedMatrixComboCount() {
+  const opts = benchmarkOptions || {};
+  const chunkers = expandedSelection('runSheet', opts.chunkers || []);
+  const embeddings = expandedSelection('runEmbedding', opts.embeddings || []);
+  const stores = expandedSelection('runStore', opts.vector_stores || []);
+  const officialRerankers = [...new Set((opts.rerankers || []).map(canonicalRerankerName))];
+  const pickedRerankers = selectedValues('runRerankerMain');
+  const rerankers = pickedRerankers.includes('all') ? officialRerankers : pickedRerankers;
+  return Math.max(chunkers.length, 0) * Math.max(embeddings.length, 0) * Math.max(stores.length, 0) * Math.max(rerankers.length, 0);
+}
+
+function updateSelectedMatrixCount() {
+  const count = selectedMatrixComboCount();
+  const el = $('selectedMatrixCount');
+  if (el) el.textContent = `${fmtInt(count)} selected combinations`;
+  return count;
+}
+
 function latestRows(rows) {
   const ok = rows.filter(r => r.status === 'ok' && r.store && r.embedding && r.sheet);
   const map = new Map();
@@ -165,10 +210,11 @@ function matrixOptions() {
 
 function setRunSelection(sheet, embedding, store, reranker = 'all') {
   showPage('run');
-  if ($('runSheet')) $('runSheet').value = sheet || 'all';
-  if ($('runEmbedding')) $('runEmbedding').value = embedding || 'all';
-  if ($('runStore')) $('runStore').value = store || 'all';
-  if ($('runRerankerMain')) $('runRerankerMain').value = reranker || 'all';
+  selectOnly('runSheet', sheet || 'all');
+  selectOnly('runEmbedding', embedding || 'all');
+  selectOnly('runStore', store || 'all');
+  selectOnly('runRerankerMain', reranker || 'all');
+  updateSelectedMatrixCount();
   $('runStatus').textContent = 'Selected missing benchmark option';
   $('runOutput').textContent = `Selected: chunker=${sheet || 'all'}, embedding=${embedding || 'all'}, vector DB=${store || 'all'}, reranker=${reranker || 'all'}\nClick Preflight first, then Run selected pipeline.`;
 }
@@ -533,42 +579,6 @@ function renderRunResult(kind, payload) {
   $('runOutput').textContent = output.slice(0, 8000);
 }
 
-function renderQwenAnalysis(analysis) {
-  const hint = $('qwenAnalysisHint');
-  const cards = $('qwenAnalysisCards');
-  const tbl = $('qwenAnalysisTable');
-  if (!hint || !cards || !tbl) return;
-  const report = analysis?.report || {};
-  const summary = analysis?.summary || [];
-  const details = analysis?.details || [];
-  const totalPaired = Number(report.paired_rows || 0);
-  const totalWorse = details.filter(r => r.verdict === 'worse').length;
-  const totalImproved = details.filter(r => r.verdict === 'improved').length;
-  const worst = summary[0] || null;
-  hint.textContent = totalPaired ? `${totalPaired} paired rows` : 'Waiting for paired run';
-  if (!totalPaired) {
-    const causes = report.likely_causes || ['Run the complete pipeline with Qwen selected to create paired baseline and reranked artifacts.'];
-    cards.innerHTML = `<div class="empty-state">${causes.map(esc).join('<br>')}</div>`;
-  } else {
-    cards.innerHTML = `<article class="run-result-card ${totalWorse ? 'warn' : 'ok'}"><span>Qwen demotions</span><strong>${totalWorse}</strong><small>Relevant hit moved lower than baseline</small></article>
-      <article class="run-result-card ok"><span>Qwen improvements</span><strong>${totalImproved}</strong><small>Relevant hit moved higher</small></article>
-      <article class="run-result-card"><span>Worst pipeline</span><strong>${worst ? esc(`${worst.sheet} · ${worst.embedding} · ${worst.store}`) : '—'}</strong><small>Avg ΔMRR ${worst ? fmt(worst.avg_delta_mrr,3) : '—'}</small></article>`;
-  }
-  const rows = details.filter(r => r.verdict === 'worse').slice(0, 40);
-  table(tbl, rows.length ? rows : details.slice(0, 40), [
-    {key:'verdict', label:'Verdict', render:r=>`<span class="badge ${r.verdict === 'worse' ? 'warn' : 'ok'}">${esc(r.verdict || '')}</span>`},
-    {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 90))},
-    {key:'sheet', label:'Chunker'},
-    {key:'embedding', label:'Embedding'},
-    {key:'store', label:'Vector DB'},
-    {key:'base_rank', label:'Base rank'},
-    {key:'reranked_rank', label:'Qwen rank'},
-    {key:'delta_mrr', label:'ΔMRR'},
-    {key:'expected_pdf', label:'Expected PDF', render:r=>esc((r.expected_pdf || '').slice(0, 60))},
-    {key:'reranked_top_pdf', label:'Qwen top PDF', render:r=>esc((r.reranked_top_pdf || '').slice(0, 60))},
-  ]);
-}
-
 function pipelineLabel(r) {
   return `${r.sheet || '—'} · ${r.embedding || '—'} · ${r.store || '—'} · ${r.reranker || 'none'}`;
 }
@@ -815,18 +825,80 @@ async function uploadDataset(ev) {
   const file = $('datasetFile')?.files?.[0];
   if (!file) {
     $('uploadStatus').textContent = 'Choose file';
-    $('uploadOutput').textContent = 'Select a PDF, ZIP, CSV, or XLSX first.';
+    $('uploadOutput').textContent = 'Select a PDF, ZIP, CSV, XLSX, TXT, or MD first.';
     return;
   }
   const form = new FormData();
   form.append('file', file);
   form.append('label', $('datasetLabel')?.value || file.name.replace(/\.[^.]+$/, ''));
   $('uploadStatus').textContent = 'Uploading';
-  $('uploadOutput').textContent = `Uploading ${file.name}...`;
+  $('uploadOutput').textContent = `Uploading ${file.name} into isolated project...`;
   const res = await fetch('/api/upload-dataset', {method: 'POST', body: form});
   const payload = await res.json();
-  $('uploadStatus').textContent = res.ok ? 'Uploaded' : 'Error';
+  $('uploadStatus').textContent = res.ok ? 'Uploaded project' : 'Error';
   $('uploadOutput').textContent = JSON.stringify(payload, null, 2);
+  if (res.ok) {
+    await refresh();
+    if ($('projectSelect') && payload.project_id) $('projectSelect').value = payload.project_id;
+  }
+}
+
+function renderUserProjects(projects) {
+  const el = $('projectSelect');
+  if (!el) return;
+  const current = el.value;
+  if (!projects || !projects.length) {
+    el.innerHTML = '<option value="">Upload a project first</option>';
+    return;
+  }
+  el.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.label || p.project_id)} · ${fmtInt(p.chunk_count || 0)} chunks</option>`).join('');
+  el.value = projects.some(p => p.project_id === current) ? current : projects[0].project_id;
+}
+
+function renderProjectQuery(payload) {
+  const status = $('projectQueryStatus');
+  const created = payload.created_at ? new Date(payload.created_at).toLocaleString() : '—';
+  if (status) status.textContent = payload.mode === 'lexical_preview'
+    ? `Lexical preview · ${fmtInt((payload.hits || []).length)} hits · ${created}`
+    : 'Unexpected query mode';
+  const rows = (payload.hits || []).map(hit => ({
+    ...hit,
+    source: hit.pdf_name || '—',
+    page: hit.page_number || '—',
+    snippet: hit.paragraph || '',
+  }));
+  table($('projectQueryTable'), rows, [
+    {key:'rank', label:'Rank'},
+    {key:'source', label:'Source'},
+    {key:'page', label:'Page'},
+    {key:'score', label:'Lexical score', render:r=>fmt(r.score, 4)},
+    {key:'snippet', label:'Project evidence', render:r=>esc((r.snippet || payload.message || '').slice(0, 500))},
+  ]);
+}
+
+async function runProjectQuery() {
+  const projectId = $('projectSelect')?.value || '';
+  const query = ($('projectQueryInput')?.value || '').trim();
+  const topK = Number($('projectQueryTopK')?.value || 5);
+  if (!projectId || !query) {
+    $('projectQueryStatus').textContent = 'Choose an active project and enter a query';
+    return;
+  }
+  if (!Number.isInteger(topK) || topK < 1 || topK > 50) {
+    $('projectQueryStatus').textContent = 'Hits shown must be between 1 and 50';
+    return;
+  }
+  $('projectQueryStatus').textContent = 'Searching active project';
+  const payload = await api('/api/project-query', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      project_id: projectId,
+      query,
+      top_k: topK,
+    }),
+  });
+  renderProjectQuery(payload);
 }
 
 
@@ -922,8 +994,9 @@ function renderOperational() {
   renderPipelineComparison(op.evaluation);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
-  renderQwenAnalysis(op.reranker_analysis || {});
   renderDocumentRepository(op.document_repository || {});
+  renderUserProjects(op.user_projects || []);
+  updateSelectedMatrixCount();
 
   table($('ingestionTable'), latest.slice(0, 18), [
     {key:'run_id', label:'Run'},
@@ -977,26 +1050,20 @@ async function refresh() {
 
 async function loadOptions() {
   benchmarkOptions = await api('/api/options');
-  fillRunSelect('runSheet', benchmarkOptions.chunkers || [], 'All chunkers');
-  fillRunSelect('runEmbedding', benchmarkOptions.embeddings || [], 'All embeddings');
-  fillRunSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
-  const mainReranker = $('runRerankerMain');
-  if (mainReranker) {
-    const cur = mainReranker.value || 'all';
-    const rerankers = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
-    const values = ['all', ...rerankers, 'none'];
-    mainReranker.innerHTML = '<option value="all">All rerankers</option>' + rerankers.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('') + '<option value="none">No reranker baseline only</option>';
-    mainReranker.value = values.includes(canonicalRerankerName(cur)) ? canonicalRerankerName(cur) : (cur === 'all' ? 'all' : 'all');
-  }
+  fillRunMultiSelect('runSheet', benchmarkOptions.chunkers || [], 'All chunkers');
+  fillRunMultiSelect('runEmbedding', benchmarkOptions.embeddings || [], 'All embeddings');
+  fillRunMultiSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
+  const rerankers = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
+  fillRunMultiSelect('runRerankerMain', [...rerankers, 'none'], 'All rerankers');
+  updateSelectedMatrixCount();
 }
 
 function selectedParams() {
   const p = new URLSearchParams();
-  if ($('runSheet')?.value) p.append('sheet', $('runSheet').value);
-  if ($('runEmbedding')?.value) p.append('embedding', $('runEmbedding').value);
-  if ($('runStore')?.value) p.append('store', $('runStore').value);
-  const reranker = $('runRerankerMain')?.value;
-  if (reranker) p.append('reranker', reranker);
+  selectedValues('runSheet').forEach(v => p.append('sheet', v));
+  selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
+  selectedValues('runStore').forEach(v => p.append('store', v));
+  selectedValues('runRerankerMain').forEach(v => p.append('reranker', v));
   const limit = $('runLimit')?.value || '0';
   p.set('limit', limit);
   p.set('chunk_limit', limit);
@@ -1004,7 +1071,7 @@ function selectedParams() {
   p.set('top_k', $('runTopK')?.value || '10');
   p.set('groundtruth', $('runGroundtruth')?.value || 'data/groundtruth/groundtruth_500.csv');
   if ($('runFresh')?.checked) p.set('fresh_run', '1');
-  p.set('max_runs', '1');
+  p.set('max_runs', String(Math.max(updateSelectedMatrixCount(), 1)));
   return p;
 }
 
@@ -1141,14 +1208,12 @@ async function runAction(kind) {
   if (kind === 'rerank') {
     p.set('top_k', $('runTopK')?.value || '10');
     p.set('limit', $('rerankerLimit')?.value || '100');
-    const mainChoice = $('runRerankerMain')?.value || 'qwen3_4b_rerank';
+    const mainChoices = selectedValues('runRerankerMain');
     let selected = [];
-    if (mainChoice === 'all') {
-      selected = ['bge-reranker-base', 'qwen3_4b_rerank'];
-    } else if (mainChoice && mainChoice !== 'none') {
-      selected = [mainChoice];
+    if (mainChoices.includes('all')) {
+      selected = (benchmarkOptions.rerankers || ['bge-reranker-base', 'qwen3_4b_rerank', 'Amazon Rerank v1']).map(canonicalRerankerName);
     } else {
-      selected = [...($('runReranker')?.selectedOptions || [])].map(o=>o.value);
+      selected = mainChoices.filter(v => v && v !== 'none');
     }
     selected.forEach(r => p.append('reranker', r));
   }
@@ -1167,6 +1232,7 @@ async function runAction(kind) {
 
 ['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
+['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
 $('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
@@ -1191,5 +1257,5 @@ document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click
 document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListener('click', openStatusDialog));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
-$('openTestOptionsBtn')?.addEventListener('click', () => $('testOptionsDialog')?.showModal());
+$('projectQueryBtn')?.addEventListener('click', () => runProjectQuery().catch(err => { $('projectQueryStatus').textContent='Error'; table($('projectQueryTable'), [{error:String(err)}], [{key:'error', label:'Error'}]); }));
 loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

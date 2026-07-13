@@ -8,6 +8,7 @@ import urllib.request
 from typing import Any, Dict, List
 
 from benchmarking.core.schemas import Chunk, SearchHit
+from benchmarking.adapters.vector_namespace import safe_weaviate_namespace
 
 
 def _request(method: str, url: str, payload: dict[str, Any] | None = None, timeout: int = 60) -> dict[str, Any]:
@@ -25,16 +26,32 @@ def _request(method: str, url: str, payload: dict[str, Any] | None = None, timeo
 
 
 class WeaviateVectorStoreAdapter:
-    def __init__(self, name: str, url_env: str = "WEAVIATE_URL", class_prefix: str = "WnsBenchmark", **_: Any):
+    def __init__(
+        self,
+        name: str,
+        url_env: str = "WEAVIATE_URL",
+        class_prefix: str = "WnsBenchmark",
+        namespace: str | None = None,
+        **_: Any,
+    ):
         self.name = name
         self.url = os.environ.get(url_env, "http://127.0.0.1:5004").rstrip("/")
-        self.class_name = f"{class_prefix}{os.getpid()}{int(time.time())}"
+        self.class_name = (
+            safe_weaviate_namespace(namespace)
+            if namespace is not None
+            else f"{class_prefix}{os.getpid()}{int(time.time())}"
+        )
+        self.physical_namespace = self.class_name
 
     def reset_collection(self, schema: Any = None) -> None:
         try:
             _request("DELETE", f"{self.url}/v1/schema/{self.class_name}")
         except Exception:
             pass
+
+    def drop_namespace(self) -> None:
+        """Idempotently remove this adapter's physical class."""
+        self.reset_collection()
 
     def upsert(self, chunks: List[Chunk], vectors: List[List[float]]) -> Dict[str, float]:
         start = time.perf_counter()

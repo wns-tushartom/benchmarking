@@ -44,11 +44,26 @@ def _scores_from_response(response: dict[str, Any], count: int) -> List[float]:
     raise RuntimeError(f"Rerank endpoint response did not contain scores. Keys: {sorted(response.keys())}")
 
 
+def _response_metadata(response: dict[str, Any]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key in ("request_id", "requestId", "id", "model"):
+        value = response.get(key)
+        if isinstance(value, (str, int)) and str(value):
+            metadata[key] = str(value)[:512]
+    provider = response.get("ResponseMetadata")
+    if isinstance(provider, dict):
+        request_id = provider.get("RequestId")
+        if isinstance(request_id, (str, int)) and str(request_id):
+            metadata["request_id"] = str(request_id)[:512]
+    return metadata
+
+
 class RemoteHTTPRerankerAdapter:
     def __init__(self, name: str, endpoint_env: str, api_key_env: str | None = None, model: str | None = None, **_: Any):
         self.name = name
         self.model = model or name
         self.url = os.environ.get(endpoint_env, "").strip()
+        self.last_response_metadata: dict[str, str] = {}
         if not self.url:
             raise RuntimeError(f"{endpoint_env} is required for reranker {name}. Open-source rerankers must run from the VM endpoint, not local fallback.")
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
@@ -64,7 +79,9 @@ class RemoteHTTPRerankerAdapter:
         last_error: Exception | None = None
         for payload in payloads:
             try:
-                scores = _scores_from_response(_post_json(self.url, payload, headers=headers), len(hits))
+                response = _post_json(self.url, payload, headers=headers)
+                self.last_response_metadata = _response_metadata(response)
+                scores = _scores_from_response(response, len(hits))
                 if len(scores) >= len(hits):
                     rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(hits)]
                     rescored.sort(key=lambda h: h.score, reverse=True)
@@ -78,6 +95,7 @@ class RemoteHTTPRerankerAdapter:
 class AmazonBedrockRerankerAdapter:
     def __init__(self, name: str, model_id_env: str = "AMAZON_RERANK_MODEL_ID", region_env: str = "AWS_REGION", **_: Any):
         self.name = name
+        self.last_response_metadata: dict[str, str] = {}
         self.region = os.environ.get(region_env) or os.environ.get("AWS_DEFAULT_REGION")
         if not self.region:
             raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION is required for Amazon Rerank v1")
@@ -95,12 +113,13 @@ class AmazonBedrockRerankerAdapter:
         return f"arn:aws:bedrock:{self.region}::foundation-model/{model_id}"
 
     def rerank(self, query: str, hits: List[SearchHit], top_k: int) -> List[SearchHit]:
-        sources = [{"type": "INLINE", "inlineDocumentSource": {"textDocument": {"text": h.chunk.paragraph}}} for h in hits]
+        sources = [{"type": "INLINE", "inlineDocumentSource": {"type": "TEXT", "textDocument": {"text": h.chunk.paragraph}}} for h in hits]
         response = self.client.rerank(
             queries=[{"type": "TEXT", "textQuery": {"text": query}}],
             sources=sources,
             rerankingConfiguration={"type": "BEDROCK_RERANKING_MODEL", "bedrockRerankingConfiguration": {"modelConfiguration": {"modelArn": self.model_id}, "numberOfResults": min(len(hits), max(top_k, 1))}},
         )
+        self.last_response_metadata = _response_metadata(response)
         results = response.get("results", [])
         rescored: List[SearchHit] = []
         for item in results:

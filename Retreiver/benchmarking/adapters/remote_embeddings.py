@@ -5,10 +5,6 @@ import os
 import urllib.error
 import urllib.request
 from typing import Any, Iterable, List
-OPENAI_MODEL_ALIASES = {
-    "openai_text-embedding-3-large": "text-embedding-3-large",
-    "openai_text_embedding_3_large": "text-embedding-3-large",
-}
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None, timeout: int = 120) -> dict[str, Any]:
@@ -40,38 +36,48 @@ def _extract_embeddings(response: dict[str, Any]) -> List[List[float]]:
     raise RuntimeError(f"Embedding endpoint response did not contain embeddings. Keys: {sorted(response.keys())}")
 
 
+def _response_metadata(response: dict[str, Any]) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key in ("request_id", "requestId", "id", "model"):
+        value = response.get(key)
+        if isinstance(value, (str, int)) and str(value):
+            metadata[key] = str(value)[:512]
+    provider = response.get("ResponseMetadata")
+    if isinstance(provider, dict):
+        request_id = provider.get("RequestId")
+        if isinstance(request_id, (str, int)) and str(request_id):
+            metadata["request_id"] = str(request_id)[:512]
+    return metadata
+
+
 class OpenAIEmbeddingAdapter:
-    def __init__(self, model_name: str, dimensions: int = 1536, batch_size: int = 32, api_key_env: str = "OPENAI_API_KEY", url: str = "https://api.openai.com/v1/embeddings", **_: Any):
+    def __init__(self, model_name: str, dimensions: int = 3072, batch_size: int = 32, api_key_env: str = "OPENAI_API_KEY", url: str = "https://api.openai.com/v1/embeddings", **_: Any):
         self.name = model_name
         self.model_name = model_name
-        self.api_model_name = OPENAI_MODEL_ALIASES.get(model_name, model_name)
         self.dimensions = int(dimensions)
         self.batch_size = int(batch_size)
         self.url = url
+        self.last_response_metadata: dict[str, str] = {}
         self.api_key = os.environ.get(api_key_env, "").strip()
         if not self.api_key:
             raise RuntimeError(f"{api_key_env} is required for {model_name}. Put it in .env or the process environment.")
+
     def embed_many(self, texts: Iterable[str]) -> List[List[float]]:
         items = [str(t or "") for t in texts]
         out: List[List[float]] = []
         headers = {"Authorization": f"Bearer {self.api_key}"}
         for i in range(0, len(items), self.batch_size):
             batch = items[i : i + self.batch_size]
-            payload = {
-                "model": self.api_model_name,
-                "input": batch,
-                "dimensions": self.dimensions,
-            }
-            response = _post_json(self.url, payload, headers=headers)
+            response = _post_json(self.url, {"model": self.model_name, "input": batch}, headers=headers)
+            self.last_response_metadata = _response_metadata(response)
             vectors = _extract_embeddings(response)
             if len(vectors) != len(batch):
                 raise RuntimeError(f"OpenAI returned {len(vectors)} embeddings for {len(batch)} inputs")
             out.extend(vectors)
         if out:
-            actual_dim = len(out[0])
-            if actual_dim != self.dimensions:
-                raise RuntimeError(f"OpenAI returned dimension {actual_dim}, expected {self.dimensions}")
+            self.dimensions = len(out[0])
         return out
+
     def embed(self, text: str) -> List[float]:
         return self.embed_many([text])[0]
 
@@ -80,10 +86,10 @@ class RemoteHTTPEmbeddingAdapter:
     def __init__(self, model_name: str, endpoint_env: str, dimensions: int = 768, batch_size: int = 32, api_key_env: str | None = None, **_: Any):
         self.name = model_name
         self.model_name = model_name
-        self.api_model_name = OPENAI_MODEL_ALIASES.get(model_name, model_name)
         self.dimensions = int(dimensions)
         self.batch_size = int(batch_size)
         self.url = os.environ.get(endpoint_env, "").strip()
+        self.last_response_metadata: dict[str, str] = {}
         if not self.url:
             raise RuntimeError(f"{endpoint_env} is required for {model_name}. Open-source embeddings must run from the VM endpoint, not local fallback.")
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
@@ -102,7 +108,9 @@ class RemoteHTTPEmbeddingAdapter:
             last_error: Exception | None = None
             for payload in payloads:
                 try:
-                    vectors = _extract_embeddings(_post_json(self.url, payload, headers=headers))
+                    response = _post_json(self.url, payload, headers=headers)
+                    self.last_response_metadata = _response_metadata(response)
+                    vectors = _extract_embeddings(response)
                     if len(vectors) == len(batch):
                         out.extend(vectors)
                         break

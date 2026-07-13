@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import cgi
+import hashlib
 import json
 import os
 import re
@@ -17,13 +18,28 @@ import zipfile
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import generate_matrix, load_benchmark_config
 from source.benchmark_pipeline import load_chunks_from_workbook
+from source.services.project_documents import (
+    ProjectDocumentStorageError,
+    ProjectDocumentValidationError,
+    extract_project_documents,
+    write_project_documents,
+)
+from source.services.project_workspace import (
+    ProjectWorkspace,
+    UnsupportedUploadError,
+    UploadError,
+    UploadLimits,
+    UploadStorageError,
+    UploadTooLargeError,
+    UploadValidationError,
+)
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,12 +56,106 @@ HALLUCINATION_DIR = ROOT / "data" / "hallucination"
 NVIDIA_RAG_DIR = ROOT / "data" / "nvidia_rag"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 PDF_DIR = ROOT / "data" / "pdfs"
+USER_PROJECTS_DIR = ROOT / "data" / "user_projects"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
 JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
 load_env_files(ROOT)
 CHUNK_LOOKUP_CACHE: dict[str, dict[int, Any]] = {}
+
+
+def _nonnegative_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    if re.fullmatch(r"[0-9]+", raw or "") is None:
+        return default
+    return int(raw)
+
+
+def dashboard_upload_limits() -> UploadLimits:
+    """Build upload limits from documented nonnegative dashboard settings."""
+    max_upload = _nonnegative_env_int("DASHBOARD_MAX_UPLOAD_MB", 100) * 1024 * 1024
+    return UploadLimits(
+        max_upload_bytes=max_upload,
+        max_json_bytes=_nonnegative_env_int("DASHBOARD_MAX_JSON_KB", 1024) * 1024,
+        max_zip_entries=_nonnegative_env_int("DASHBOARD_MAX_ZIP_FILES", 500),
+        max_zip_entry_bytes=max_upload,
+        max_zip_expanded_bytes=_nonnegative_env_int("DASHBOARD_MAX_ZIP_EXPANDED_MB", 500) * 1024 * 1024,
+        max_zip_ratio=_nonnegative_env_int("DASHBOARD_MAX_ZIP_RATIO", 100),
+    )
+
+
+def api_error(code: str, message: str, request_id: str) -> dict:
+    """Return the one public error envelope used by the upload endpoint."""
+    return {"error": {"code": code, "message": message, "request_id": request_id}}
+
+
+_MAX_CONTENT_LENGTH_DIGITS = 20
+
+
+class _BoundedRequestReader:
+    """Expose at most the declared request bytes without buffering or read-ahead."""
+
+    def __init__(self, source: Any, limit: int):
+        self.source = source
+        self.remaining = limit
+        self.consumed = 0
+        self.truncated = False
+        self.tail = b""
+
+    def _size(self, requested: int | None) -> int:
+        if requested is None or requested < 0:
+            return self.remaining
+        return min(requested, self.remaining)
+
+    def _record(self, chunk: bytes, allowed: int) -> bytes:
+        if not isinstance(chunk, bytes) or len(chunk) > allowed:
+            raise OSError("invalid bounded request stream")
+        self.remaining -= len(chunk)
+        self.consumed += len(chunk)
+        self.tail = (self.tail + chunk)[-256:]
+        if not chunk and self.remaining:
+            self.truncated = True
+        return chunk
+
+    def read(self, size: int | None = -1) -> bytes:
+        allowed = self._size(size)
+        if allowed <= 0:
+            return b""
+        return self._record(self.source.read(allowed), allowed)
+
+    def readline(self, size: int | None = -1) -> bytes:
+        allowed = self._size(size)
+        if allowed <= 0:
+            return b""
+        return self._record(self.source.readline(allowed), allowed)
+
+
+def _header_values(headers: Any, name: str) -> list[Any]:
+    """Return every instance of a header when the headers object supports it."""
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all(name)
+        if values is None:
+            return []
+        if isinstance(values, (list, tuple)):
+            return list(values)
+        return [values]
+    value = headers.get(name)
+    return [] if value is None else [value]
+
+
+def _parse_content_length(headers: Any) -> int | None:
+    values = _header_values(headers, "Content-Length")
+    if len(values) != 1 or not isinstance(values[0], str):
+        return None
+    raw = values[0]
+    if len(raw) > _MAX_CONTENT_LENGTH_DIGITS or re.fullmatch(r"[0-9]+", raw) is None:
+        return None
+    try:
+        return int(raw)
+    except (OverflowError, ValueError):
+        return None
 
 
 def benchmark_options() -> dict:
@@ -770,36 +880,337 @@ def sort_summary(rows: list[dict]) -> list[dict]:
 
 def safe_label(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
-    return value.strip(".-_")[:80] or "dataset"
+    return value.strip(".-_").lower()[:80] or "dataset"
 
 
-def safe_extract_zip(zip_path: Path, target_dir: Path) -> list[str]:
-    extracted: list[str] = []
-    with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
-            if info.is_dir():
+def new_project_id(label: str) -> str:
+    return ProjectWorkspace(USER_PROJECTS_DIR).new_project_id(label)
+
+
+def project_root(project_id: str) -> Path:
+    return ProjectWorkspace(USER_PROJECTS_DIR).project_root(project_id)
+
+
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def project_storage_layout(root: Path) -> dict[str, str]:
+    return {
+        "root": display_path(root),
+        "raw_uploads": display_path(root / "raw_uploads"),
+        "extracted_text": display_path(root / "extracted_text"),
+        "chunks": display_path(root / "chunks"),
+        "vector_indexes": display_path(root / "vector_indexes"),
+        "questions": display_path(root / "questions"),
+        "runs": display_path(root / "runs"),
+    }
+
+
+def read_text_upload(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".txt", ".md", ".csv"}:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            raise UploadStorageError(UploadStorageError.public_message) from None
+        try:
+            reader = PdfReader(str(path))
+            pages = []
+            for i, page in enumerate(reader.pages, 1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"[page {i}]\n{text}")
+        except Exception:
+            raise UploadValidationError(UploadValidationError.public_message) from None
+        extracted = "\n\n".join(pages)
+        if not extracted.strip():
+            raise UploadValidationError(UploadValidationError.public_message)
+        return extracted
+    return ""
+
+
+def split_project_chunks(text: str, source_name: str) -> list[dict[str, Any]]:
+    cleaned = re.sub(r"\s+", " ", text or " ").strip()
+    if not cleaned:
+        return []
+    raw_parts = [p.strip() for p in re.split(r"\n\s*\n|(?<=[.!?])\s+(?=[A-Z0-9])", text) if p and p.strip()]
+    if not raw_parts:
+        raw_parts = [cleaned]
+    chunks: list[dict[str, Any]] = []
+    chunk_id = 1
+    for part in raw_parts:
+        part = re.sub(r"\s+", " ", part).strip()
+        if not part:
+            continue
+        # Keep small uploaded demo docs searchable, but avoid pathological giant rows.
+        for start in range(0, len(part), 1400):
+            paragraph = part[start:start + 1400].strip()
+            if not paragraph:
                 continue
-            name = Path(info.filename)
-            if name.is_absolute() or ".." in name.parts:
+            page_match = re.search(r"\[page\s+(\d+)\]", paragraph, re.I)
+            chunks.append({
+                "id": chunk_id,
+                "chunk_id": chunk_id,
+                "pdf_name": source_name,
+                "paragraph": paragraph,
+                "page_number": page_match.group(1) if page_match else "",
+                "source_type": "uploaded_document",
+                "parser_method": "dashboard_upload_text_index",
+            })
+            chunk_id += 1
+    return chunks
+
+
+def write_project_workbook(
+    project_dir: Path,
+    chunks: list[dict[str, Any]],
+    display_project_dir: Path | None = None,
+) -> str:
+    if not chunks:
+        return ""
+    try:
+        import pandas as pd  # type: ignore
+    except Exception:
+        return ""
+    out = project_dir / "chunks" / "chunking_methods_output_v2.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["id", "pdf_name", "paragraph", "page_number", "source_type", "parser_method"]
+    rows = [{field: c.get(field, "") for field in fields} for c in chunks]
+    sheet_names = benchmark_options().get("chunkers", []) or ["uploaded_chunks"]
+    try:
+        with pd.ExcelWriter(out) as writer:
+            for sheet in sheet_names:
+                pd.DataFrame(rows).to_excel(writer, sheet_name=sheet[:31], index=False)
+    except Exception:
+        return ""
+    display_root = display_project_dir or project_dir
+    return display_path(display_root / out.relative_to(project_dir))
+
+
+def rebuild_project_search_index(
+    project_dir: Path,
+    display_project_dir: Path | None = None,
+) -> dict[str, Any]:
+    raw_dir = project_dir / "raw_uploads"
+    extracted_text_dir = project_dir / "extracted_text"
+    extracted_text_dir.mkdir(parents=True, exist_ok=True)
+    candidates = [p for p in raw_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".pdf", ".txt", ".md", ".csv"}]
+    chunks: list[dict[str, Any]] = []
+    source_files: list[str] = []
+    for path in sorted(candidates):
+        text = read_text_upload(path)
+        if not text.strip():
+            continue
+        rel_name = path.name
+        source_relative = path.relative_to(project_dir)
+        source_files.append(str(source_relative))
+        text_relative = path.relative_to(raw_dir).with_suffix(".txt")
+        text_path = extracted_text_dir / text_relative
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(text, encoding="utf-8")
+        for chunk in split_project_chunks(text, rel_name):
+            chunk["id"] = len(chunks) + 1
+            chunk["chunk_id"] = chunk["id"]
+            chunk["project_source_path"] = str(source_relative)
+            chunks.append(chunk)
+    index_path = project_dir / "search_index.json"
+    index = {
+        "created_at": datetime.now().isoformat(),
+        "chunk_count": len(chunks),
+        "source_files": source_files,
+        "chunks": chunks,
+        "workbook": write_project_workbook(project_dir, chunks, display_project_dir),
+    }
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+    return index
+
+
+def create_user_project_upload(
+    original_name: str,
+    content: bytes,
+    label: str = "",
+    limits: UploadLimits | None = None,
+) -> dict[str, Any]:
+    if Path(original_name).suffix.lower() not in {".txt", ".pdf", ".zip"}:
+        raise UnsupportedUploadError(UnsupportedUploadError.public_message)
+    workspace = ProjectWorkspace(USER_PROJECTS_DIR, limits or dashboard_upload_limits())
+    finalized_context: dict[str, Any] = {}
+
+    def finalize_upload(staging: Path, final_root: Path, published: dict) -> dict:
+        saved_relative = Path(published["saved_path"])
+        saved_path = staging / saved_relative
+        if staging not in saved_path.resolve().parents:
+            raise UploadValidationError(UploadValidationError.public_message)
+        final_saved_path = final_root / saved_relative
+
+        # Keep the historical dashboard layout alias while the strict service uses indexes/.
+        (staging / "vector_indexes").mkdir()
+        extracted_relative = [Path(relative) for relative in published.get("extracted_files", [])]
+        for relative in extracted_relative:
+            candidate = staging / relative
+            if staging not in candidate.resolve().parents:
+                raise UploadValidationError(UploadValidationError.public_message)
+        extracted = [display_path(final_root / relative) for relative in extracted_relative]
+
+        saved_suffix = saved_path.suffix.lower()
+        document_sources: list[Path] = []
+        if saved_suffix in {".txt", ".pdf"}:
+            document_sources = [saved_path]
+        elif saved_suffix == ".zip":
+            if not extracted_relative or any(
+                relative.suffix.lower() not in {".txt", ".pdf"}
+                for relative in extracted_relative
+            ):
+                raise UploadValidationError(UploadValidationError.public_message)
+            document_sources = [staging / relative for relative in extracted_relative]
+
+        if not document_sources:
+            raise UploadValidationError(UploadValidationError.public_message)
+
+        documents = []
+        source_records: list[dict[str, Any]] = []
+        extraction_failures: list[dict[str, str]] = []
+        for source_path in sorted(
+            document_sources,
+            key=lambda path: path.relative_to(staging / "raw_uploads").as_posix(),
+        ):
+            relative = source_path.relative_to(staging / "raw_uploads")
+            if relative.parts and relative.parts[0] == "extracted":
+                relative = Path(*relative.parts[1:])
+            source_name = relative.as_posix()
+            try:
+                raw_source = source_path.read_bytes()
+            except OSError:
+                raise UploadStorageError(UploadStorageError.public_message) from None
+            source_record = {
+                "source_name": source_name,
+                "raw_sha256": hashlib.sha256(raw_source).hexdigest(),
+                "raw_size_bytes": len(raw_source),
+                "parser_versions": [],
+                "page_count": 0,
+            }
+            try:
+                source_documents = extract_project_documents(staging, [source_path])
+            except ProjectDocumentStorageError:
+                raise UploadStorageError(UploadStorageError.public_message) from None
+            except ProjectDocumentValidationError:
+                source_records.append({**source_record, "status": "failed"})
+                extraction_failures.append(
+                    {"source_name": source_name, "code": "extraction_failed"}
+                )
                 continue
-            suffix = name.suffix.lower()
-            if suffix not in {".pdf", ".csv", ".xlsx", ".txt", ".md"}:
-                continue
-            dest = target_dir / "extracted" / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, dest.open("wb") as out:
-                shutil.copyfileobj(src, out)
-            extracted.append(str(dest.relative_to(ROOT)))
-    return extracted
+            documents.extend(source_documents)
+            source_records.append(
+                {
+                    **source_record,
+                    "status": "complete",
+                    "parser_versions": sorted(
+                        {
+                            str(document.metadata["parser_method"])
+                            for document in source_documents
+                        }
+                    ),
+                    "page_count": len(source_documents),
+                }
+            )
+
+        if extraction_failures:
+            corpus_manifest: dict[str, Any] = {
+                "ok": False,
+                "extraction_status": "failed",
+                "document_count": 0,
+                "source_count": len(document_sources),
+                "page_count": sum(record["page_count"] for record in source_records),
+                "corpus_sha256": None,
+                "parser_versions": [],
+                "sources": source_records,
+                "extraction_failures": extraction_failures,
+            }
+        else:
+            corpus_manifest = {
+                **write_project_documents(
+                    staging / "extracted_text" / "documents.jsonl",
+                    documents,
+                ),
+                "extraction_status": "complete",
+                "page_count": len(documents),
+                "parser_versions": sorted(
+                    {str(document.metadata["parser_method"]) for document in documents}
+                ),
+                "sources": source_records,
+                "extraction_failures": [],
+            }
+
+        manifest = {
+            **published,
+            "saved_path": display_path(final_saved_path),
+            "extracted_files": extracted[:200],
+            "storage_layout": project_storage_layout(final_root),
+            "question_file": "",
+            "search_index": "",
+            "canonical_corpus": (
+                display_path(final_root / "extracted_text" / "documents.jsonl")
+                if corpus_manifest["extraction_status"] == "complete"
+                else ""
+            ),
+            **corpus_manifest,
+            "chunk_count": 0,
+            "workbook": "",
+            "manifest_path": display_path(final_root / "manifest.json"),
+        }
+        finalized_context.update(
+            saved_path=final_saved_path,
+            root=final_root,
+            extracted=extracted,
+        )
+        return manifest
+
+    published = workspace.create_upload(
+        original_name=original_name,
+        content=content,
+        label=label,
+        finalizer=finalize_upload,
+    )
+    return {
+        **published,
+        "next_steps": upload_next_steps(
+            finalized_context["saved_path"],
+            finalized_context["root"],
+            finalized_context["extracted"],
+        ),
+    }
+
+
+def list_user_projects() -> list[dict[str, Any]]:
+    if not USER_PROJECTS_DIR.exists():
+        return []
+    projects: list[dict[str, Any]] = []
+    for manifest_path in sorted(USER_PROJECTS_DIR.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            manifest = {"project_id": manifest_path.parent.name, "error": str(exc)}
+        projects.append(manifest)
+    return projects
+
+
+def query_user_project(project_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
+    return ProjectWorkspace(USER_PROJECTS_DIR).lexical_preview(project_id, query, top_k)
 
 
 def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str]) -> list[str]:
-    rel_dir = str(dataset_dir.relative_to(ROOT))
+    rel_dir = display_path(dataset_dir)
     steps = [
         f"Review uploaded files under {rel_dir}",
-        "If this is a new corpus, copy PDFs into data/pdfs or update the extraction script to read this upload folder.",
-        "Prepare/attach a ground-truth CSV with id, query, expected_pdf or expected text span before claiming quality metrics.",
-        "Run ingestion and retrieval only after ground truth and chunking inputs are ready.",
+        "Frontend project storage is isolated under data/user_projects/<project_id>/, not mixed with Nora/WNS official benchmark data.",
+        "Use Run pipeline to choose adapter combinations, or use the uploaded-project query box for evidence-only checks.",
+        "If a questions file has ground_truth, run scored mode; without ground_truth the dashboard must stay evidence-only.",
     ]
     if saved_path.suffix.lower() == ".zip":
         steps.insert(1, f"ZIP extracted {len(extracted)} supported files under {rel_dir}/extracted")
@@ -922,6 +1333,7 @@ class Handler(SimpleHTTPRequestHandler):
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
             document_repository = read_document_repository()
+            user_projects = list_user_projects()
             nvidia_rag = read_nvidia_rag()
             reranker_analysis = read_reranker_analysis()
             snapshot = read_snapshot()
@@ -957,6 +1369,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,
                     "pdf_audit": pdf_audit,
                     "document_repository": document_repository,
+                    "user_projects": user_projects,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
                     "options_formula": "5 chunkers × 3 embeddings × 4 vector stores × 1 retrieval × 3 rerankers = 180",
                     "metrics_status": "Paused, no query ground-truth CSV requested yet",
@@ -972,36 +1385,246 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/api/upload-dataset":
+            request_id = uuid.uuid4().hex
+            content_length = _parse_content_length(self.headers)
+            if content_length is None:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+
             try:
-                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")})
+                limits = dashboard_upload_limits()
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            if content_length > limits.max_upload_bytes:
+                self.close_connection = True
+                self.send_json(
+                    api_error(
+                        "upload_too_large",
+                        "Upload exceeds the configured size limit",
+                        request_id,
+                    ),
+                    413,
+                )
+                return
+
+            raw_content_type = self.headers.get("Content-Type", "")
+            try:
+                media_type, content_params = cgi.parse_header(raw_content_type)
+            except (TypeError, ValueError):
+                media_type = ""
+                content_params = {}
+            if media_type.lower() != "multipart/form-data":
+                self.close_connection = True
+                self.send_json(
+                    api_error(
+                        "unsupported_media_type",
+                        "Content-Type must be multipart/form-data",
+                        request_id,
+                    ),
+                    415,
+                )
+                return
+
+            boundary = content_params.get("boundary")
+            if (
+                not isinstance(boundary, str)
+                or not boundary
+                or len(boundary) > 70
+                or any(ord(char) < 33 or ord(char) > 126 for char in boundary)
+            ):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+            terminal_boundary = b"\r\n--" + boundary.encode("ascii") + b"--"
+
+            bounded_reader = _BoundedRequestReader(self.rfile, content_length)
+            try:
+                form = cgi.FieldStorage(
+                    fp=cast(Any, bounded_reader),
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": raw_content_type,
+                        "CONTENT_LENGTH": str(content_length),
+                    },
+                )
+                if bounded_reader.remaining != 0 or not (
+                    bounded_reader.tail.endswith(terminal_boundary)
+                    or bounded_reader.tail.endswith(terminal_boundary + b"\r\n")
+                ):
+                    raise ValueError("truncated multipart request")
                 file_item = form["file"] if "file" in form else None
-                if file_item is None or not getattr(file_item, "filename", ""):
-                    self.send_json({"error": "No file uploaded"}, 400)
-                    return
-                original = Path(file_item.filename).name
-                suffix = Path(original).suffix.lower()
-                if suffix not in {".pdf", ".zip", ".csv", ".xlsx"}:
-                    self.send_json({"error": "Supported uploads: .pdf, .zip, .csv, .xlsx"}, 400)
+                original = getattr(file_item, "filename", "") if file_item is not None else ""
+                file_object = getattr(file_item, "file", None) if file_item is not None else None
+                if not isinstance(original, str) or not original or file_object is None:
+                    raise ValueError("missing upload file")
+                content = file_object.read(limits.max_upload_bytes + 1)
+                if not isinstance(content, bytes):
+                    raise ValueError("upload content must be bytes")
+                if len(content) > limits.max_upload_bytes:
+                    self.send_json(
+                        api_error(
+                            "upload_too_large",
+                            "Upload exceeds the configured size limit",
+                            request_id,
+                        ),
+                        413,
+                    )
                     return
                 label_field = form.getfirst("label", Path(original).stem)
-                label = safe_label(str(label_field))
-                dataset_dir = ROOT / "data" / "uploads" / label
-                dataset_dir.mkdir(parents=True, exist_ok=True)
-                saved_path = dataset_dir / original
-                with saved_path.open("wb") as out:
-                    shutil.copyfileobj(file_item.file, out)
-                extracted = safe_extract_zip(saved_path, dataset_dir) if suffix == ".zip" else []
-                self.send_json({
-                    "ok": True,
-                    "dataset": label,
-                    "saved_path": str(saved_path.relative_to(ROOT)),
-                    "bytes": saved_path.stat().st_size,
-                    "extracted_files": extracted[:200],
-                    "extracted_count": len(extracted),
-                    "next_steps": upload_next_steps(saved_path, dataset_dir, extracted),
-                })
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, 500)
+            except (AttributeError, EOFError, KeyError, OSError, TypeError, ValueError):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+            except Exception:
+                self.close_connection = True
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            try:
+                payload = create_user_project_upload(
+                    original_name=original,
+                    content=content,
+                    label=str(label_field),
+                )
+            except UploadTooLargeError:
+                self.send_json(
+                    api_error(
+                        "upload_too_large",
+                        "Upload exceeds the configured size limit",
+                        request_id,
+                    ),
+                    413,
+                )
+                return
+            except UnsupportedUploadError:
+                self.send_json(
+                    api_error("unsupported_media_type", "Unsupported upload type", request_id),
+                    415,
+                )
+                return
+            except UploadValidationError:
+                self.send_json(
+                    api_error("upload_validation_failed", "Upload validation failed", request_id),
+                    422,
+                )
+                return
+            except UploadStorageError:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            except UploadError:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            self.send_json(payload)
+            return
+        if parsed.path == "/api/project-query":
+            request_id = uuid.uuid4().hex
+            content_length = _parse_content_length(self.headers)
+            if content_length is None:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
+                )
+                return
+            media_type = str(self.headers.get("Content-Type", "")).partition(";")[0].strip().lower()
+            if media_type != "application/json":
+                self.send_json(
+                    api_error("unsupported_media_type", "Project query request must be JSON", request_id),
+                    415,
+                )
+                return
+            try:
+                limits = dashboard_upload_limits()
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            if content_length > limits.max_json_bytes:
+                self.close_connection = True
+                self.send_json(
+                    api_error("request_too_large", "Project query request is too large", request_id),
+                    413,
+                )
+                return
+
+            reader = _BoundedRequestReader(self.rfile, content_length)
+            body = reader.read(content_length)
+            if reader.remaining != 0:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
+                )
+                return
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                if (
+                    not isinstance(payload, dict)
+                    or not set(payload).issubset({"project_id", "query", "top_k"})
+                ):
+                    raise ValueError("invalid project query request")
+                project_id = payload.get("project_id")
+                query = payload.get("query")
+                top_k = payload.get("top_k", 5)
+                if (
+                    not isinstance(project_id, str)
+                    or not isinstance(query, str)
+                    or isinstance(top_k, bool)
+                    or not isinstance(top_k, int)
+                ):
+                    raise ValueError("invalid project query fields")
+                result = query_user_project(
+                    project_id=project_id,
+                    query=query,
+                    top_k=top_k,
+                )
+            except FileNotFoundError:
+                self.send_json(
+                    api_error("project_not_found", "Project was not found", request_id),
+                    404,
+                )
+                return
+            except (UnicodeError, json.JSONDecodeError):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
+                )
+                return
+            except ValueError:
+                self.send_json(
+                    api_error("invalid_request", "Invalid project query request", request_id),
+                    400,
+                )
+                return
+            except UploadValidationError:
+                self.send_json(
+                    api_error("project_data_invalid", "Project data is invalid", request_id),
+                    422,
+                )
+                return
+            except UploadError:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            self.send_json(result)
             return
         qs = parse_qs(parsed.query)
         limit = qs.get("limit", ["50"])[0]
@@ -1097,7 +1720,6 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/run/reranker-smoke":
                 cmd = [sys.executable, "scripts/run_reranker_smoke_from_retrieval.py", "--top-k", qs.get("top_k", ["10"])[0]]
                 rerankers = qs.get("reranker", []) or benchmark_options().get("rerankers", [])
-                rerankers = [r for r in rerankers if r not in {"Amazon Rerank v1", "amazon_bedrock"}]
                 add_multi(cmd, "--rerankers", rerankers or ["bge-reranker-base", "qwen3_4b_rerank"])
                 if limit and limit != "0":
                     cmd += ["--limit-artifacts", limit]

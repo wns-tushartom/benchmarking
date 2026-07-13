@@ -22,8 +22,15 @@ from __future__ import annotations
 import argparse
 import csv
 import re
+import sys
 from pathlib import Path
 from typing import Iterable, List, Dict, Any
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from source.services.project_chunking import fixed_token_chunks
 
 try:
     import pandas as pd
@@ -92,34 +99,6 @@ def jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
-
-
-def fixed_token_chunks(
-    text: str,
-    chunk_tokens: int = 1200,
-    overlap_tokens: int = 150,
-    min_chars: int = 50,
-) -> List[str]:
-    """Fixed token chunking: 1200-token windows with 150-token overlap."""
-    text = normalize_text(text)
-    tokens = tokenize(text)
-    if not tokens:
-        return []
-    if len(tokens) <= chunk_tokens:
-        return [text] if len(text) >= min_chars else []
-
-    chunks: List[str] = []
-    step = max(1, chunk_tokens - overlap_tokens)
-    start = 0
-    while start < len(tokens):
-        window = tokens[start : start + chunk_tokens]
-        chunk = detokenize(window)
-        if len(chunk) >= min_chars:
-            chunks.append(chunk)
-        if start + chunk_tokens >= len(tokens):
-            break
-        start += step
-    return chunks
 
 
 def semantic_split_chunks(

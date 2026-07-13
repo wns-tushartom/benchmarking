@@ -5,6 +5,7 @@ import time
 from typing import Any, List
 
 from benchmarking.core.schemas import Chunk, SearchHit
+from benchmarking.adapters.vector_namespace import safe_lower_namespace
 
 
 def _vec(values: List[float]) -> str:
@@ -12,7 +13,14 @@ def _vec(values: List[float]) -> str:
 
 
 class PGVectorStoreAdapter:
-    def __init__(self, name: str, dsn_env: str = "PGVECTOR_DSN", table_prefix: str = "wns_benchmark", **_: Any):
+    def __init__(
+        self,
+        name: str,
+        dsn_env: str = "PGVECTOR_DSN",
+        table_prefix: str = "wns_benchmark",
+        namespace: str | None = None,
+        **_: Any,
+    ):
         try:
             import psycopg
         except Exception as exc:
@@ -22,7 +30,12 @@ class PGVectorStoreAdapter:
         self.dsn = os.environ.get(dsn_env) or os.environ.get("DATABASE_URL")
         if not self.dsn:
             raise RuntimeError(f"{dsn_env} or DATABASE_URL is required for PGVector")
-        self.table = f"{table_prefix}_{os.getpid()}_{int(time.time())}"
+        self.table = (
+            safe_lower_namespace(namespace)
+            if namespace is not None
+            else f"{table_prefix}_{os.getpid()}_{int(time.time())}"
+        )
+        self.physical_namespace = self.table
         self.dimensions = 0
         self.pg_vector_type = "vector"
         self.pg_ops = "vector_cosine_ops"
@@ -30,6 +43,10 @@ class PGVectorStoreAdapter:
     def reset_collection(self, schema: Any = None) -> None:
         with self.psycopg.connect(self.dsn, autocommit=True) as conn:
             conn.execute(f'DROP TABLE IF EXISTS "{self.table}"')
+
+    def drop_namespace(self) -> None:
+        """Idempotently remove this adapter's physical table."""
+        self.reset_collection()
 
     def upsert(self, chunks: List[Chunk], vectors: List[List[float]]) -> dict[str, float]:
         if not vectors:

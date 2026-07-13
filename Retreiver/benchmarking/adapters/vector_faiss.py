@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -8,6 +9,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from benchmarking.core.schemas import Chunk, SearchHit
+from benchmarking.adapters.vector_namespace import create_faiss_namespace
 
 
 class FaissVectorStoreAdapter:
@@ -27,6 +29,8 @@ class FaissVectorStoreAdapter:
         hnsw_m: int = 16,
         ef_construction: int = 100,
         ef_search: int = 64,
+        namespace: str | None = None,
+        index_root: str | None = None,
         **_: Any,
     ):
         try:
@@ -40,8 +44,19 @@ class FaissVectorStoreAdapter:
         self.hnsw_m = int(hnsw_m)
         self.ef_construction = int(ef_construction)
         self.ef_search = int(ef_search)
-        self.index_dir = Path(index_dir) if index_dir else None
+        self._explicit_namespace = namespace is not None
+        if namespace is not None:
+            if index_dir is not None or index_root is None:
+                raise ValueError(
+                    "explicit FAISS namespace requires index_root and forbids index_dir"
+                )
+            self.index_dir = create_faiss_namespace(index_root, namespace)
+        else:
+            if index_root is not None:
+                raise ValueError("index_root requires an explicit FAISS namespace")
+            self.index_dir = Path(index_dir) if index_dir else None
         self.collection = str(self.index_dir) if self.index_dir else f"faiss_{int(time.time())}"
+        self.physical_namespace = self.collection
         self.index: Any | None = None
         self.chunks: List[Chunk] = []
         self.dimensions = 0
@@ -58,6 +73,23 @@ class FaissVectorStoreAdapter:
                 path = self.index_dir / filename
                 if path.exists():
                     path.unlink()
+
+    def drop_namespace(self) -> None:
+        """Idempotently remove this adapter's persisted index namespace."""
+        self.index = None
+        self.chunks = []
+        self.dimensions = 0
+        if not self.index_dir or not self.index_dir.exists():
+            return
+        if self.index_dir.is_symlink():
+            raise ValueError("FAISS index namespace must not be a symlink")
+        if self._explicit_namespace:
+            shutil.rmtree(self.index_dir)
+            return
+        for filename in ("index.faiss", "chunks.json"):
+            path = self.index_dir / filename
+            if path.exists() and not path.is_symlink():
+                path.unlink()
 
     def _normalized(self, vectors: List[List[float]]) -> np.ndarray:
         arr = np.asarray(vectors, dtype="float32")

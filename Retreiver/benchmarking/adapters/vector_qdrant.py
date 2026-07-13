@@ -5,10 +5,19 @@ import time
 from typing import Any, Dict, List
 
 from benchmarking.core.schemas import Chunk, SearchHit
+from benchmarking.adapters.vector_namespace import safe_lower_namespace
 
 
 class QdrantVectorStoreAdapter:
-    def __init__(self, name: str, url_env: str = "QDRANT_URL", api_key_env: str = "QDRANT_API_KEY", collection_prefix: str = "wns_benchmark", **_: Any):
+    def __init__(
+        self,
+        name: str,
+        url_env: str = "QDRANT_URL",
+        api_key_env: str = "QDRANT_API_KEY",
+        collection_prefix: str = "wns_benchmark",
+        namespace: str | None = None,
+        **_: Any,
+    ):
         try:
             from qdrant_client import QdrantClient
             from qdrant_client.http import models
@@ -19,7 +28,12 @@ class QdrantVectorStoreAdapter:
         self.url = os.environ.get(url_env, "http://127.0.0.1:5001")
         self.api_key = os.environ.get(api_key_env) or None
         self.client = QdrantClient(url=self.url, api_key=self.api_key, timeout=300)
-        self.collection = f"{collection_prefix}_{os.getpid()}_{int(time.time())}"
+        self.collection = (
+            safe_lower_namespace(namespace)
+            if namespace is not None
+            else f"{collection_prefix}_{os.getpid()}_{int(time.time())}"
+        )
+        self.physical_namespace = self.collection
         self.chunks: Dict[str, Chunk] = {}
 
     def reset_collection(self, schema: Any = None) -> None:
@@ -27,6 +41,10 @@ class QdrantVectorStoreAdapter:
             self.client.delete_collection(self.collection)
         except Exception:
             pass
+
+    def drop_namespace(self) -> None:
+        """Idempotently remove this adapter's physical collection."""
+        self.reset_collection()
 
     def upsert(self, chunks: List[Chunk], vectors: List[List[float]]) -> Dict[str, float]:
         if not vectors:

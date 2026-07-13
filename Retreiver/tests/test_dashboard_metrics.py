@@ -203,3 +203,118 @@ def test_document_repository_page_does_not_show_summary_cards():
     assert "Repository PDFs" not in app
     assert "Chunked documents" not in app
     assert "Review queue" not in app
+
+
+def test_user_project_upload_is_isolated_and_creates_manifest_and_canonical_corpus():
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    with tempfile.TemporaryDirectory() as td:
+        old = dashboard.USER_PROJECTS_DIR
+        dashboard.USER_PROJECTS_DIR = Path(td) / "user_projects"
+        try:
+            project = dashboard.create_user_project_upload(
+                original_name="policy.txt",
+                content=b"Refund policy: passengers can rebook cancelled flights or request refund.",
+                label="Karthik Demo Data",
+            )
+        finally:
+            dashboard.USER_PROJECTS_DIR = old
+
+        project_root = Path(td) / "user_projects" / project["project_id"]
+        assert project["ok"] is True
+        assert project["project_id"].startswith("karthik-demo-data_")
+        assert (project_root / "raw_uploads" / "policy.txt").exists()
+        assert (project_root / "manifest.json").exists()
+        assert (project_root / "extracted_text" / "documents.jsonl").exists()
+        assert not (project_root / "search_index.json").exists()
+        manifest = json.loads((project_root / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["storage_layout"]["runs"].endswith("/runs")
+        assert "data/uploads" not in json.dumps(manifest)
+
+
+def test_project_query_uses_uploaded_text_without_fake_matrix_rows():
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    with tempfile.TemporaryDirectory() as td:
+        old = dashboard.USER_PROJECTS_DIR
+        dashboard.USER_PROJECTS_DIR = Path(td) / "user_projects"
+        try:
+            project = dashboard.create_user_project_upload(
+                original_name="refund.txt",
+                content=b"Refund desk note. Cancelled flight customers may choose a full refund or rebooking.",
+                label="Refund Demo",
+            )
+            result = dashboard.query_user_project(
+                project["project_id"],
+                "cancelled flight refund",
+                top_k=3,
+            )
+        finally:
+            dashboard.USER_PROJECTS_DIR = old
+
+        assert result["ok"] is True
+        assert result["mode"] == "lexical_preview"
+        assert "combo_count" not in result
+        assert "rows" not in result
+        assert "selections" not in result
+        assert result["query"] == "cancelled flight refund"
+        assert result["hits"][0]["pdf_name"] == "refund.txt"
+        assert "Cancelled flight customers" in result["hits"][0]["paragraph"]
+        run_root = Path(td) / "user_projects" / project["project_id"] / "runs" / result["run_id"]
+        manifest = json.loads((run_root / "manifest.json").read_text())
+        assert manifest["mode"] == "lexical_preview"
+        assert "selections" not in manifest
+
+
+def test_frontend_has_multi_select_controls_project_query_and_matrix_count():
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app_path = root / "web" / "app.js"
+    app = app_path.read_text(encoding="utf-8")
+    assert 'id="runSheet" multiple' in index
+    assert 'id="runEmbedding" multiple' in index
+    assert 'id="runStore" multiple' in index
+    assert 'id="runRerankerMain" multiple' in index
+    assert "selectedValues(" in app
+    assert "updateSelectedMatrixCount" in app
+    assert "/api/project-query" in app
+    assert "projectQueryTable" in index
+    assert "Lexical preview" in index
+    assert "Search this project" in index
+    assert "projectSelections()" not in app
+    assert "lexical_preview" in app
+    assert "selections: projectSelections()" not in app
+    assert "Type a specific test query" in index
+    assert "id=\"runQueries\"" in index
+    assert "Qwen vs no-reranker diagnosis" not in index
+    assert "qwenAnalysis" not in index
+    assert "renderQwenAnalysis" not in app
+
+    js = f"""
+const fs=require('fs'), vm=require('vm');
+const elements={{}};
+function select(id, selected) {{
+  elements[id] = {{id, selectedOptions: selected.map(value => ({{value}})), textContent:'', innerHTML:'', classList:{{toggle(){{}}}}, addEventListener(){{}}, querySelectorAll(){{return [];}}, setAttribute(){{}}}};
+}}
+['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => select(id, ['all']));
+const context={{console,document:{{getElementById(id){{return elements[id] || (elements[id]={{id,value:'',selectedOptions:[],textContent:'',innerHTML:'',classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}});}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app_path)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+benchmarkOptions={{
+  chunkers:['c1','c2','c3','c4','c5'],
+  embeddings:['e1','e2','e3'],
+  vector_stores:['Qdrant','PGVector','Weaviate','FAISS'],
+  rerankers:['Amazon Rerank v1','Qwen3:4B Rerank','bge-reranker-base'],
+}};
+globalThis.__defaultCount=selectedMatrixComboCount();
+document.getElementById('runRerankerMain').selectedOptions=[{{value:'none'}}];
+globalThis.__noneCount=selectedMatrixComboCount();
+`, context);
+if (context.__defaultCount !== 180 || context.__noneCount !== 60) {{
+  console.error(JSON.stringify({{defaultCount: context.__defaultCount, noneCount: context.__noneCount}}));
+  process.exit(1);
+}}
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
