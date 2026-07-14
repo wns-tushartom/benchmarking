@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import asdict
+from datetime import datetime, timezone
 import hashlib
 from io import StringIO
 import itertools
@@ -29,7 +30,12 @@ from source.services.project_questions import (
     ProjectQuestion,
     parse_typed_question,
 )
-from source.services.project_relevance import hit_is_relevant, label_applies
+from source.services.project_relevance import (
+    hit_is_relevant,
+    label_applies,
+    relevant_corpus_count,
+)
+from source.services.project_run_metrics import QueryMetricInput, summarize_query_metrics
 from source.services.project_workspace import ProjectWorkspace
 
 
@@ -46,6 +52,7 @@ _SUMMARY_FIELDS = (
     "run_id",
     "combo_id",
     "status",
+    "summary_schema_version",
     "chunker_id",
     "embedding_id",
     "vector_store_id",
@@ -55,6 +62,17 @@ _SUMMARY_FIELDS = (
     "labelled_queries",
     "unlabelled_queries",
     "recall_at_k",
+    "mrr_at_k",
+    "ndcg_at_k",
+    "retrieval_latency_s",
+    "rerank_latency_s",
+    "avg_query_latency_s",
+    "evidence_count",
+    "embedding_input_tokens",
+    "embedding_usage_scope",
+    "embedding_usage_key",
+    "rerank_search_units",
+    "rerank_usage_scope",
     "error_code",
 )
 
@@ -65,6 +83,10 @@ class ProjectMatrixRunnerError(RuntimeError):
 
 class ProjectMatrixRequestError(ValueError):
     """The immutable run request is invalid or no longer matches its fingerprint."""
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -206,6 +228,75 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _jsonl(rows: Iterable[Mapping[str, Any]]) -> bytes:
     return b"".join(_canonical_bytes(row) + b"\n" for row in rows)
+
+
+_EVIDENCE_PART_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _write_evidence_index(
+    run_layout: Mapping[str, Path],
+    *,
+    project_id: str,
+    run_id: str,
+    mode: str,
+    summary_rows: Iterable[Mapping[str, Any]],
+    evidence_rows: Iterable[Mapping[str, Any]],
+) -> str:
+    rows_by_combo: dict[str, list[Mapping[str, Any]]] = {}
+    for evidence_row in evidence_rows:
+        rows_by_combo.setdefault(str(evidence_row.get("combo_id") or ""), []).append(evidence_row)
+    entries: list[dict[str, Any]] = []
+    for summary in summary_rows:
+        combo_id = str(summary["combo_id"])
+        serialized = [_canonical_bytes(row) + b"\n" for row in rows_by_combo.get(combo_id, [])]
+        parts: list[dict[str, Any]] = []
+        current: list[bytes] = []
+        current_size = 0
+
+        def flush_part() -> None:
+            nonlocal current, current_size
+            if not current:
+                return
+            part_number = len(parts)
+            relative_path = f"reranking/{combo_id}.evidence.{part_number:05d}.jsonl"
+            content = b"".join(current)
+            _atomic_write(run_layout["root"] / relative_path, content)
+            parts.append(
+                {
+                    "path": relative_path,
+                    "row_count": len(current),
+                    "size_bytes": len(content),
+                    "sha256": _sha256_bytes(content),
+                }
+            )
+            current = []
+            current_size = 0
+
+        for line in serialized:
+            if len(line) > _EVIDENCE_PART_MAX_BYTES:
+                raise ValueError("one evidence row exceeds the indexed part limit")
+            if current and current_size + len(line) > _EVIDENCE_PART_MAX_BYTES:
+                flush_part()
+            current.append(line)
+            current_size += len(line)
+        flush_part()
+        entries.append(
+            {
+                "combo_id": combo_id,
+                "row_count": len(serialized),
+                "parts": parts,
+            }
+        )
+    payload = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "run_id": run_id,
+        "mode": mode,
+        "entries": entries,
+    }
+    content = _canonical_bytes(payload) + b"\n"
+    _atomic_write(run_layout["root"] / "evidence_index.json", content)
+    return _sha256_bytes(content)
 
 
 def _load_catalog(path: Path) -> tuple[dict[str, Any], str]:
@@ -419,6 +510,7 @@ class ProjectMatrixRunner:
         )
 
     def run(self, project_id: str, run_id: str) -> dict[str, Any]:
+        created_at = _utc_now()
         run_layout = self.workspace.run_layout(project_id, run_id)
         validated = self._load_request(project_id, run_id, run_layout["root"])
         request = validated.request
@@ -457,6 +549,16 @@ class ProjectMatrixRunner:
                 "failures": chunk_failures,
             },
         )
+        relevant_chunk_counts = {
+            (chunker_id, question.question_id): relevant_corpus_count(
+                question,
+                chunks_by_id.get(chunker_id, ()),
+                chunker_id,
+            )
+            for chunker_id in request.chunkers
+            for question in questions
+            if label_applies(question, chunker_id)
+        }
 
         summary_rows: list[dict[str, Any]] = []
         details_rows: list[dict[str, Any]] = []
@@ -469,7 +571,12 @@ class ProjectMatrixRunner:
         ] = {}
         retrieval_cache: dict[
             tuple[str, str, str],
-            tuple[Any, dict[str, list[SearchHit]], dict[str, Any]],
+            tuple[
+                Any,
+                dict[str, list[SearchHit]],
+                dict[str, float],
+                dict[str, Any],
+            ],
         ] = {}
 
         selections = itertools.product(
@@ -507,8 +614,25 @@ class ProjectMatrixRunner:
             physical_namespace = ""
             embedding_adapter: Any | None = None
             vector_adapter: Any | None = None
+            reranker: Any = None
             retrieval_by_question: dict[str, list[SearchHit]] = {}
+            retrieval_latency_by_question: dict[str, float] = {}
             retrieval_receipt: dict[str, Any] = {}
+            embedding_input_tokens: int | None = None
+            embedding_usage_scope = (
+                "shared_embedding"
+                if embedding_id == "openai_text-embedding-3-large"
+                else None
+            )
+            embedding_usage_key = (
+                f"{chunker_id}|{embedding_id}"
+                if embedding_usage_scope is not None
+                else None
+            )
+            rerank_search_units: int | None = None
+            rerank_usage_scope = (
+                "combination" if reranker_id == "Amazon Rerank v1" else None
+            )
             failure_stage: str | None = None
             started = time.perf_counter()
             try:
@@ -590,6 +714,9 @@ class ProjectMatrixRunner:
                         hits = vector_adapter.search(query_vector, request.top_k)
                         retrieval_latency = time.perf_counter() - retrieval_start
                         retrieval_by_question[question.question_id] = hits
+                        retrieval_latency_by_question[
+                            question.question_id
+                        ] = retrieval_latency
                         for rank, hit in enumerate(hits, 1):
                             retrieval_rows.append(
                                 {
@@ -639,12 +766,14 @@ class ProjectMatrixRunner:
                     retrieval_cache[retrieval_key] = (
                         vector_adapter,
                         retrieval_by_question,
+                        retrieval_latency_by_question,
                         retrieval_receipt,
                     )
                 else:
                     (
                         vector_adapter,
                         retrieval_by_question,
+                        retrieval_latency_by_question,
                         retrieval_receipt,
                     ) = retrieval_cache[retrieval_key]
                     embedding_adapter = embedding_cache[
@@ -654,13 +783,24 @@ class ProjectMatrixRunner:
                         "physical_namespace"
                     ]
 
+                measured_embedding_tokens = retrieval_receipt["embedding"][
+                    "provider_metadata"
+                ].get("embedding_input_tokens")
+                if (
+                    embedding_usage_scope is not None
+                    and isinstance(measured_embedding_tokens, int)
+                    and not isinstance(measured_embedding_tokens, bool)
+                    and measured_embedding_tokens >= 0
+                ):
+                    embedding_input_tokens = measured_embedding_tokens
+
                 failure_stage = "reranker"
                 reranker = self._new_reranker(
                     reranker_id, reranker_config, classes
                 )
                 combo_detail_rows: list[dict[str, Any]] = []
                 combo_evidence_rows: list[dict[str, Any]] = []
-                relevant_queries = 0
+                query_metric_inputs: list[QueryMetricInput] = []
                 for question in questions:
                     base_hits = retrieval_by_question[question.question_id]
                     base_scores = {
@@ -668,19 +808,26 @@ class ProjectMatrixRunner:
                         for hit in base_hits
                     }
                     rerank_start = time.perf_counter()
+                    failure_stage = "reranker"
                     reranked = reranker.rerank(
                         question.query, base_hits, request.top_k
                     )
                     rerank_latency = time.perf_counter() - rerank_start
-                    question_relevant = False
+                    if reranker_id == "Amazon Rerank v1":
+                        rerank_search_units = int(rerank_search_units or 0)
+                        if base_hits:
+                            rerank_search_units += math.ceil(len(base_hits) / 100)
+                    failure_stage = "combination"
+                    applies = label_applies(question, chunker_id)
+                    relevant_ranks: list[int] = []
                     for rank, hit in enumerate(reranked, 1):
                         relevant = (
                             hit_is_relevant(question, hit, chunker_id)
-                            if label_applies(question, chunker_id)
+                            if applies
                             else None
                         )
                         if relevant:
-                            question_relevant = True
+                            relevant_ranks.append(rank)
                         metadata = hit.chunk.metadata or {}
                         detail = {
                             "project_id": project_id,
@@ -717,18 +864,42 @@ class ProjectMatrixRunner:
                                 "base_score": detail["base_score"],
                                 "rerank_score": detail["rerank_score"],
                                 "latency_s": rerank_latency,
+                                "rank": rank,
                             }
                         )
-                    if question_relevant:
-                        relevant_queries += 1
+                    query_metric_inputs.append(
+                        QueryMetricInput(
+                            query_id=question.question_id,
+                            label_applies=applies,
+                            relevant_ranks=tuple(relevant_ranks),
+                            relevant_corpus_count=relevant_chunk_counts.get(
+                                (chunker_id, question.question_id), 0
+                            ),
+                            retrieval_latency_s=retrieval_latency_by_question[
+                                question.question_id
+                            ],
+                            rerank_latency_s=rerank_latency,
+                        )
+                    )
                 reranking_artifact = run_layout["reranking"] / f"{combo_id}.jsonl"
                 reranking_content = _jsonl(combo_detail_rows)
-                _atomic_write(reranking_artifact, reranking_content)
-                details_rows.extend(combo_detail_rows)
-                evidence_rows.extend(combo_evidence_rows)
-                recall = (
-                    relevant_queries / labelled_queries
-                    if labelled_queries > 0
+                failure_stage = "combination"
+                query_metrics = summarize_query_metrics(
+                    query_metric_inputs,
+                    k=request.top_k,
+                )
+                retrieval_latency_s = (
+                    math.fsum(
+                        metric.retrieval_latency_s for metric in query_metric_inputs
+                    )
+                    / len(query_metric_inputs)
+                    if query_metric_inputs
+                    else None
+                )
+                rerank_latency_s = (
+                    math.fsum(metric.rerank_latency_s for metric in query_metric_inputs)
+                    / len(query_metric_inputs)
+                    if query_metric_inputs
                     else None
                 )
                 summary = {
@@ -736,15 +907,22 @@ class ProjectMatrixRunner:
                     "run_id": run_id,
                     "combo_id": combo_id,
                     "status": "completed",
+                    "summary_schema_version": 2,
                     "chunker_id": chunker_id,
                     "embedding_id": embedding_id,
                     "vector_store_id": vector_store_id,
                     "reranker_id": reranker_id,
                     "physical_namespace": physical_namespace,
-                    "query_count": len(questions),
-                    "labelled_queries": labelled_queries,
-                    "unlabelled_queries": unlabelled_queries,
-                    "recall_at_k": recall,
+                    "query_count": len(query_metric_inputs),
+                    "labelled_queries": query_metrics["labelled_queries"],
+                    "unlabelled_queries": query_metrics["unlabelled_queries"],
+                    "recall_at_k": query_metrics["recall_at_k"],
+                    "mrr_at_k": query_metrics["mrr_at_k"],
+                    "ndcg_at_k": query_metrics["ndcg_at_k"],
+                    "retrieval_latency_s": retrieval_latency_s,
+                    "rerank_latency_s": rerank_latency_s,
+                    "avg_query_latency_s": query_metrics["avg_query_latency_s"],
+                    "evidence_count": len(combo_evidence_rows),
                     "error_code": "",
                 }
                 receipt = {
@@ -781,13 +959,19 @@ class ProjectMatrixRunner:
                     },
                     "latency_s": time.perf_counter() - started,
                 }
+                _atomic_write(reranking_artifact, reranking_content)
+                details_rows.extend(combo_detail_rows)
+                evidence_rows.extend(combo_evidence_rows)
             except Exception:
+                if failure_stage == "reranker":
+                    rerank_search_units = None
                 error_code = _safe_error_code(failure_stage or "combination")
                 summary = {
                     "project_id": project_id,
                     "run_id": run_id,
                     "combo_id": combo_id,
                     "status": "failed",
+                    "summary_schema_version": 2,
                     "chunker_id": chunker_id,
                     "embedding_id": embedding_id,
                     "vector_store_id": vector_store_id,
@@ -797,6 +981,12 @@ class ProjectMatrixRunner:
                     "labelled_queries": labelled_queries,
                     "unlabelled_queries": unlabelled_queries,
                     "recall_at_k": None,
+                    "mrr_at_k": None,
+                    "ndcg_at_k": None,
+                    "retrieval_latency_s": None,
+                    "rerank_latency_s": None,
+                    "avg_query_latency_s": None,
+                    "evidence_count": 0,
                     "error_code": error_code,
                 }
                 receipt = {
@@ -839,6 +1029,15 @@ class ProjectMatrixRunner:
                     "artifacts": {},
                     "latency_s": time.perf_counter() - started,
                 }
+            usage = {
+                "embedding_input_tokens": embedding_input_tokens,
+                "embedding_usage_scope": embedding_usage_scope,
+                "embedding_usage_key": embedding_usage_key,
+                "rerank_search_units": rerank_search_units,
+                "rerank_usage_scope": rerank_usage_scope,
+            }
+            summary.update(usage)
+            receipt["usage"] = usage
             receipt_path = run_layout["reranking"] / f"{combo_id}.receipt.json"
             receipt["receipt_path"] = receipt_path.relative_to(
                 run_layout["root"]
@@ -868,6 +1067,19 @@ class ProjectMatrixRunner:
         succeeded = sum(row["status"] == "completed" for row in summary_rows)
         failed = len(summary_rows) - succeeded
         state = "completed" if failed == 0 else "failed" if succeeded == 0 else "partial"
+        scoring_mode = (
+            "retrieval_labels"
+            if any(row["labelled_queries"] > 0 for row in summary_rows)
+            else "evidence_only"
+        )
+        evidence_index_sha256 = _write_evidence_index(
+            run_layout,
+            project_id=project_id,
+            run_id=run_id,
+            mode=scoring_mode,
+            summary_rows=summary_rows,
+            evidence_rows=evidence_rows,
+        )
         _atomic_write(run_layout["root"] / "details.jsonl", _jsonl(details_rows))
         _atomic_json(
             run_layout["root"] / "evidence.json",
@@ -875,11 +1087,7 @@ class ProjectMatrixRunner:
                 "schema_version": 1,
                 "project_id": project_id,
                 "run_id": run_id,
-                "mode": (
-                    "retrieval_labels"
-                    if any(row["labelled_queries"] > 0 for row in summary_rows)
-                    else "evidence_only"
-                ),
+                "mode": scoring_mode,
                 "rows": evidence_rows,
             },
         )
@@ -897,6 +1105,7 @@ class ProjectMatrixRunner:
             run_layout["root"] / "summary.csv",
             csv_buffer.getvalue().encode("utf-8"),
         )
+        completed_at = _utc_now()
         scored_rows = [
             {
                 "combo_id": row["combo_id"],
@@ -907,6 +1116,12 @@ class ProjectMatrixRunner:
                 "labelled_queries": row["labelled_queries"],
                 "unlabelled_queries": row["unlabelled_queries"],
                 "recall_at_k": row["recall_at_k"],
+                "mrr_at_k": row["mrr_at_k"],
+                "ndcg_at_k": row["ndcg_at_k"],
+                "retrieval_latency_s": row["retrieval_latency_s"],
+                "rerank_latency_s": row["rerank_latency_s"],
+                "avg_query_latency_s": row["avg_query_latency_s"],
+                "evidence_count": row["evidence_count"],
             }
             for row in summary_rows
             if row["status"] == "completed" and row["labelled_queries"] > 0
@@ -915,22 +1130,32 @@ class ProjectMatrixRunner:
             _atomic_json(
                 run_layout["root"] / "analysis.json",
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
+                    "summary_schema_version": 2,
                     "project_id": project_id,
                     "run_id": run_id,
-                    "scoring_mode": "retrieval_labels",
+                    "metric_k": request.top_k,
+                    "scoring_mode": scoring_mode,
+                    "created_at": created_at,
+                    "completed_at": completed_at,
                     "rows": scored_rows,
                 },
             )
         _atomic_json(
             run_layout["root"] / "manifest.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "summary_schema_version": 2,
                 "project_id": project_id,
                 "run_id": run_id,
                 "request_fingerprint": validated.request_fingerprint,
                 "catalog_sha256": catalog_sha256,
+                "evidence_index_sha256": evidence_index_sha256,
                 "state": state,
+                "scoring_mode": scoring_mode,
+                "metric_k": request.top_k,
+                "created_at": created_at,
+                "completed_at": completed_at,
                 "combination_count": validated.combination_count,
                 "succeeded": succeeded,
                 "failed": failed,
@@ -939,6 +1164,7 @@ class ProjectMatrixRunner:
                     "chunks": "chunks/manifest.json",
                     "details": "details.jsonl",
                     "evidence": "evidence.json",
+                    "evidence_index": "evidence_index.json",
                     "summary": "summary.csv",
                     "analysis": "analysis.json" if scored_rows else None,
                 },

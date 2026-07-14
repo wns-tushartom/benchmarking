@@ -31,6 +31,10 @@ from source.services.project_documents import (
     extract_project_documents,
     write_project_documents,
 )
+from source.services.project_run_results import (
+    ProjectRunResultService,
+    ProjectRunResultsError,
+)
 from source.services.project_workspace import (
     ProjectWorkspace,
     UnsupportedUploadError,
@@ -418,6 +422,62 @@ def read_evaluation() -> dict:
     return base
 
 
+def benchmark_row_is_evaluated(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    error_code = str(row.get("error_code") or row.get("error") or "").strip()
+    if (
+        status in {"failed", "error", "skipped", "cancelled", "interrupted"}
+        or error_code
+    ):
+        return False
+    raw_query_count = row.get("evaluated_queries", row.get("query_count"))
+    try:
+        query_count = float(raw_query_count or 0)
+    except (TypeError, ValueError):
+        query_count = 0.0
+    metric_recorded = any(
+        row.get(field) is not None and row.get(field) != ""
+        for field in (
+            "recall_at_1",
+            "recall_at_3",
+            "recall_at_5",
+            "recall_at_10",
+            "mrr",
+            "precision_at_5",
+            "ndcg_at_5",
+        )
+    )
+    return query_count > 0 or metric_recorded
+
+
+def official_evaluated_count(evaluation: dict[str, Any]) -> int:
+    official = official_matrix_keys()
+    seen: set[tuple[str, str, str, str]] = set()
+    sources = (
+        ("groundtruth_eval", evaluation.get("summary", [])),
+        ("groundtruth_eval_reranked", evaluation.get("reranked", {}).get("summary", [])),
+        ("benchmark_reference", evaluation.get("benchmark_reference", {}).get("summary", [])),
+    )
+    for source, rows in sources:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = normalized_benchmark_row(row, source)
+            if not benchmark_row_is_evaluated(normalized):
+                continue
+            key = (
+                normalized["sheet"],
+                normalized["embedding"],
+                normalized["store"],
+                normalized["reranker"],
+            )
+            if key in official:
+                seen.add(key)
+    return len(seen)
+
+
 def canonical_reranker_name(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -441,6 +501,13 @@ def canonical_reranker_name(value: Any) -> str:
 
 
 def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]:
+    def value_or_empty(*names: str) -> Any:
+        for name in names:
+            value = row.get(name)
+            if value is not None and value != "":
+                return value
+        return ""
+
     latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms") or 0
     try:
         latency_s = float(latency_ms) / 1000.0
@@ -454,14 +521,16 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
         "embedding": embedding,
         "store": row.get("vector_store") or row.get("vector_database") or row.get("store") or "",
         "reranker": reranker,
-        "evaluated_queries": row.get("query_count") or row.get("evaluated_queries") or "",
-        "recall_at_1": row.get("recall_at_1") or "",
-        "recall_at_3": row.get("recall_at_3") or "",
-        "recall_at_5": row.get("recall_at_5") or "",
-        "recall_at_10": row.get("recall_at_10") or "",
-        "mrr": row.get("mrr") or "",
-        "precision_at_5": row.get("precision_at_5") or "",
-        "ndcg_at_5": row.get("ndcg_at_5") or row.get("ndcg_at_10") or "",
+        "status": value_or_empty("status"),
+        "error_code": value_or_empty("error_code", "error"),
+        "evaluated_queries": value_or_empty("query_count", "evaluated_queries"),
+        "recall_at_1": value_or_empty("recall_at_1"),
+        "recall_at_3": value_or_empty("recall_at_3"),
+        "recall_at_5": value_or_empty("recall_at_5"),
+        "recall_at_10": value_or_empty("recall_at_10"),
+        "mrr": value_or_empty("mrr"),
+        "precision_at_5": value_or_empty("precision_at_5"),
+        "ndcg_at_5": value_or_empty("ndcg_at_5", "ndcg_at_10"),
         "avg_latency_seconds": latency_s,
         "cost": "commercial" if re.search(r"openai|amazon", f"{embedding} {reranker}", re.I) else "oss",
     }
@@ -513,6 +582,8 @@ def read_benchmark_reference() -> dict[str, Any]:
                 skipped_non_official += 1
                 continue
             if key in seen:
+                continue
+            if not benchmark_row_is_evaluated(normalized):
                 continue
             seen.add(key)
             rows.append(normalized)
@@ -1217,11 +1288,43 @@ def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str])
     return steps
 
 
+def project_result_service() -> ProjectRunResultService:
+    return ProjectRunResultService(ProjectWorkspace(USER_PROJECTS_DIR))
+
+
+def exact_query_value(query: dict[str, list[str]], name: str) -> str:
+    values = query.get(name, [])
+    if len(values) != 1 or not values[0]:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return values[0]
+
+
+def _bounded_result_integer(
+    query: dict[str, list[str]],
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = exact_query_value(query, name)
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return value
+
+
+def _require_result_query_keys(query: dict[str, list[str]], allowed: set[str]) -> None:
+    if set(query) != allowed:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1237,6 +1340,77 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {
+            "/api/result-sources",
+            "/api/project-runs",
+            "/api/project-run-results",
+            "/api/project-run-evidence",
+        }:
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                service = project_result_service()
+                if parsed.path == "/api/result-sources":
+                    _require_result_query_keys(query, set())
+                    evaluation = read_evaluation()
+                    reference = evaluation.get("benchmark_reference", {})
+                    report = reference.get("report", {})
+                    configured = (
+                        report.get("official_matrix_rows")
+                        if isinstance(report, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(configured, bool)
+                        or not isinstance(configured, int)
+                        or configured < 0
+                    ):
+                        configured = len(official_matrix_keys())
+                    payload = service.result_sources(
+                        official_configured=configured,
+                        official_evaluated=official_evaluated_count(evaluation),
+                    )
+                elif parsed.path == "/api/project-runs":
+                    _require_result_query_keys(query, {"project_id"})
+                    payload = service.project_runs(exact_query_value(query, "project_id"))
+                elif parsed.path == "/api/project-run-results":
+                    _require_result_query_keys(query, {"project_id", "run_id"})
+                    payload = service.project_run_results(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                    )
+                else:
+                    _require_result_query_keys(
+                        query,
+                        {"project_id", "run_id", "combo_id", "limit", "offset"},
+                    )
+                    payload = service.project_run_evidence(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                        exact_query_value(query, "combo_id"),
+                        limit=_bounded_result_integer(
+                            query, "limit", minimum=1, maximum=100
+                        ),
+                        offset=_bounded_result_integer(
+                            query, "offset", minimum=0, maximum=10_000_000
+                        ),
+                    )
+                self.send_json(payload)
+            except ProjectRunResultsError as exc:
+                self.send_json(
+                    {"error": {"code": exc.code, "message": exc.public_message}},
+                    exc.status,
+                )
+            except Exception:
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "run_unavailable",
+                            "message": "Result service is unavailable",
+                        }
+                    },
+                    500,
+                )
+            return
         if parsed.path == "/api/run/status":
             job_id = parse_qs(parsed.query).get("job_id", [""])[0]
             self.send_json(job_status(job_id))

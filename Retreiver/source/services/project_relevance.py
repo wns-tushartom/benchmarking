@@ -8,7 +8,7 @@ import stat
 import unicodedata
 from typing import Iterable
 
-from benchmarking.core.schemas import SearchHit
+from benchmarking.core.schemas import Chunk, SearchHit
 from source.services.project_questions import ProjectQuestion
 
 
@@ -157,35 +157,66 @@ def label_applies(question: ProjectQuestion, chunker_id: str) -> bool:
     return _label_applies_verified(question, chunker_id)
 
 
+def _chunk_is_relevant_verified(
+    question: ProjectQuestion,
+    chunk: Chunk,
+    chunker_id: str,
+) -> bool:
+    metadata = chunk.metadata or {}
+    source_id = metadata.get("source_id")
+    if isinstance(source_id, str) and source_id in question.labels.source_ids:
+        return True
+
+    chunk_id = str(chunk.id)
+    if any(
+        reference.chunker == chunker_id and reference.chunk_id == chunk_id
+        for reference in question.labels.chunk_refs
+    ):
+        return True
+
+    normalized_chunk = _normalize_text(chunk.paragraph)
+    chunk_tokens = wns_context_tokens_v1(chunk.paragraph)
+    for normalized_context, context_tokens in _eligible_contexts(question):
+        if normalized_context in normalized_chunk:
+            return True
+        recall = len(context_tokens & chunk_tokens) / len(context_tokens)
+        if recall >= _CONTEXT_RECALL_THRESHOLD:
+            return True
+    return False
+
+
+def chunk_is_relevant(
+    question: ProjectQuestion,
+    chunk: Chunk,
+    chunker_id: str,
+) -> bool:
+    """Evaluate one canonical chunk using the project relevance contract."""
+    load_pinned_stopwords()
+    return _chunk_is_relevant_verified(question, chunk, chunker_id)
+
+
 def hit_is_relevant(
     question: ProjectQuestion,
     hit: SearchHit,
     chunker_id: str,
 ) -> bool:
-    """Evaluate exact source/chunk labels and reproducible context relevance."""
+    """Evaluate one search hit using the same canonical chunk predicate."""
     load_pinned_stopwords()
-    metadata = hit.chunk.metadata or {}
-    source_id = metadata.get("source_id")
-    if isinstance(source_id, str) and source_id in question.labels.source_ids:
-        return True
+    return _chunk_is_relevant_verified(question, hit.chunk, chunker_id)
 
-    hit_chunk_id = str(hit.chunk.id)
-    if any(
-        reference.chunker == chunker_id and reference.chunk_id == hit_chunk_id
-        for reference in question.labels.chunk_refs
-    ):
-        return True
 
-    hit_text = hit.chunk.paragraph
-    normalized_hit = _normalize_text(hit_text)
-    hit_tokens = wns_context_tokens_v1(hit_text)
-    for normalized_context, context_tokens in _eligible_contexts(question):
-        if normalized_context in normalized_hit:
-            return True
-        recall = len(context_tokens & hit_tokens) / len(context_tokens)
-        if recall >= _CONTEXT_RECALL_THRESHOLD:
-            return True
-    return False
+def relevant_corpus_count(
+    question: ProjectQuestion,
+    chunks: Iterable[Chunk],
+    chunker_id: str,
+) -> int:
+    """Count canonical corpus chunks relevant to one question and chunker."""
+    load_pinned_stopwords()
+    if not _label_applies_verified(question, chunker_id):
+        return 0
+    return sum(
+        1 for chunk in chunks if _chunk_is_relevant_verified(question, chunk, chunker_id)
+    )
 
 
 def metric_denominator(

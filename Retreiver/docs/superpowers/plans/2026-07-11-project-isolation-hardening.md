@@ -682,9 +682,9 @@ Fix review findings with failing regression tests first.
 Package only changed/new Retreiver files relative to the baseline commit. Include `APPLY_ZIP.md`, VM scripts, tests, and design/plan docs. Then:
 
 ```bash
-zip -T /home/fate/wns_retreiver_project_isolation_final_20260711.zip
-sha256sum /home/fate/wns_retreiver_project_isolation_final_20260711.zip
-unzip -l /home/fate/wns_retreiver_project_isolation_final_20260711.zip
+zip -T "$HOME/wns_retreiver_project_isolation_final_20260711.zip"
+sha256sum "$HOME/wns_retreiver_project_isolation_final_20260711.zip"
+unzip -l "$HOME/wns_retreiver_project_isolation_final_20260711.zip"
 ```
 
 Expected: integrity OK and critical files visible.

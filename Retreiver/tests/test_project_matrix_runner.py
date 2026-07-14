@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -349,13 +351,45 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
     assert all(row["labelled_queries"] == "0" for row in summary)
     assert all(row["unlabelled_queries"] == "1" for row in summary)
     assert all(not row["recall_at_k"] for row in summary)
+    assert all(row["summary_schema_version"] == "2" for row in summary)
+    for row in completed:
+        assert not row["mrr_at_k"]
+        assert not row["ndcg_at_k"]
+        retrieval_latency = float(row["retrieval_latency_s"])
+        rerank_latency = float(row["rerank_latency_s"])
+        assert retrieval_latency >= 0
+        assert rerank_latency >= 0
+        assert math.isclose(
+            float(row["avg_query_latency_s"]),
+            retrieval_latency + rerank_latency,
+        )
+        assert int(row["evidence_count"]) > 0
+    for row in failed:
+        assert not row["mrr_at_k"]
+        assert not row["ndcg_at_k"]
+        assert not row["retrieval_latency_s"]
+        assert not row["rerank_latency_s"]
+        assert not row["avg_query_latency_s"]
+        assert row["evidence_count"] == "0"
 
     evidence = json.loads((first_root / "evidence.json").read_text(encoding="utf-8"))
     assert evidence["mode"] == "evidence_only"
     assert "leaderboard" not in evidence
     assert "metrics" not in evidence
     assert evidence["rows"]
+    evidence_index = json.loads((first_root / "evidence_index.json").read_text(encoding="utf-8"))
+    assert evidence_index["project_id"] == alpha_id
+    assert evidence_index["run_id"] == first_run_id
+    assert evidence_index["mode"] == "evidence_only"
+    assert len(evidence_index["entries"]) == 4
+    assert all(entry["row_count"] >= 0 for entry in evidence_index["entries"])
+    assert all(
+        (first_root / part["path"]).is_file()
+        for entry in evidence_index["entries"]
+        for part in entry["parts"]
+    )
     assert all("ALPHA_SENTINEL" in row["excerpt"] for row in evidence["rows"])
+    assert all(isinstance(row.get("rank"), int) and row["rank"] >= 1 for row in evidence["rows"])
     assert all("BETA_SENTINEL" not in row["excerpt"] for row in evidence["rows"])
     assert {row["combo_id"] for row in evidence["rows"]}.isdisjoint(
         {row["combo_id"] for row in failed}
@@ -369,6 +403,23 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
     assert all("source_name" in row and "page_number" in row for row in details)
 
     manifest = json.loads((first_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["summary_schema_version"] == 2
+    assert manifest["metric_k"] == 3
+    assert manifest["scoring_mode"] == "evidence_only"
+    assert manifest["created_at"].endswith("Z")
+    assert manifest["completed_at"].endswith("Z")
+    created_at = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+    completed_at = datetime.fromisoformat(
+        manifest["completed_at"].replace("Z", "+00:00")
+    )
+    assert created_at <= completed_at
+    assert manifest["artifacts"]["chunks"] == "chunks/manifest.json"
+    assert manifest["artifacts"]["details"] == "details.jsonl"
+    assert manifest["artifacts"]["evidence"] == "evidence.json"
+    assert manifest["artifacts"]["evidence_index"] == "evidence_index.json"
+    assert len(manifest["evidence_index_sha256"]) == 64
+    assert manifest["artifacts"]["summary"] == "summary.csv"
+    assert manifest["artifacts"]["analysis"] is None
     assert manifest["request_fingerprint"]
     assert len(manifest["receipts"]) == 4
     serialized_receipts = json.dumps(manifest["receipts"], sort_keys=True).casefold()
@@ -391,6 +442,13 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
         if receipt["status"] == "completed":
             assert receipt["adapters"]["reranker"]["provider_metadata"] == {
                 "request_id": "rerank-request-1"
+            }
+            assert receipt["usage"] == {
+                "embedding_input_tokens": None,
+                "embedding_usage_scope": None,
+                "embedding_usage_key": None,
+                "rerank_search_units": None,
+                "rerank_usage_scope": None,
             }
     physical = {
         receipt["adapters"]["vector_store"]["physical_namespace"]
@@ -608,12 +666,247 @@ def test_labelled_run_scores_only_applicable_retrieval_labels(project_environmen
     assert len(summary) == 1
     assert summary[0]["labelled_queries"] == "1"
     assert summary[0]["unlabelled_queries"] == "0"
+    assert summary[0]["summary_schema_version"] == "2"
     assert summary[0]["recall_at_k"] == "1.0"
+    assert summary[0]["mrr_at_k"] == "1.0"
+    assert summary[0]["ndcg_at_k"] == "1.0"
+    retrieval_latency = float(summary[0]["retrieval_latency_s"])
+    rerank_latency = float(summary[0]["rerank_latency_s"])
+    assert retrieval_latency >= 0
+    assert rerank_latency >= 0
+    assert math.isclose(
+        float(summary[0]["avg_query_latency_s"]),
+        retrieval_latency + rerank_latency,
+    )
+    evidence = json.loads((root / "evidence.json").read_text(encoding="utf-8"))
+    assert summary[0]["evidence_count"] == str(len(evidence["rows"]))
     analysis = json.loads((root / "analysis.json").read_text(encoding="utf-8"))
+    assert analysis["schema_version"] == 2
+    assert analysis["summary_schema_version"] == 2
+    assert analysis["metric_k"] == 3
     assert analysis["scoring_mode"] == "retrieval_labels"
     assert analysis["rows"][0]["labelled_queries"] == 1
     assert analysis["rows"][0]["unlabelled_queries"] == 0
     assert analysis["rows"][0]["recall_at_k"] == 1.0
+    assert analysis["rows"][0]["mrr_at_k"] == 1.0
+    assert analysis["rows"][0]["ndcg_at_k"] == 1.0
+    assert analysis["rows"][0]["retrieval_latency_s"] == retrieval_latency
+    assert analysis["rows"][0]["rerank_latency_s"] == rerank_latency
+    assert analysis["rows"][0]["avg_query_latency_s"] == float(
+        summary[0]["avg_query_latency_s"]
+    )
+    assert analysis["rows"][0]["evidence_count"] == len(evidence["rows"])
+    run_manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert analysis["created_at"] == run_manifest["created_at"]
+    assert analysis["completed_at"] == run_manifest["completed_at"]
+    assert run_manifest["scoring_mode"] == "retrieval_labels"
+    assert run_manifest["metric_k"] == 3
+
+
+def test_openai_embedding_usage_is_measured_shared_and_amazon_units_are_per_combo(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-secret")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    embedding_calls = 0
+
+    def measured_embedding_post(
+        url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        nonlocal embedding_calls
+        embedding_calls += 1
+        response = _fake_embedding_post(url, payload, headers, timeout)
+        response["usage"] = (
+            {"input_tokens": 100}
+            if embedding_calls == 1
+            else {"prompt_tokens": 23, "total_tokens": 999}
+        )
+        return response
+
+    class FakeBedrockClient:
+        def rerank(self, **kwargs: object) -> dict[str, object]:
+            sources = kwargs["sources"]
+            assert isinstance(sources, list)
+            return {
+                "results": [
+                    {"index": index, "relevanceScore": 1.0 / (index + 1)}
+                    for index in range(len(sources))
+                ],
+                "ResponseMetadata": {"RequestId": "amazon-request-1"},
+            }
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.client = (  # type: ignore[attr-defined]
+        lambda service_name, region_name=None: FakeBedrockClient()
+    )
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setattr(remote_embeddings, "_post_json", measured_embedding_post)
+
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    payload = _request_payload(
+        alpha_id,
+        rerankers=["Amazon Rerank v1"],
+    )
+    payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    payload["selections"]["embeddings"] = [  # type: ignore[index]
+        "openai_text-embedding-3-large"
+    ]
+    run_id, root = _create_run_request(workspace, payload)
+
+    result = ProjectMatrixRunner(workspace).run(alpha_id, run_id)
+
+    assert result["state"] == "completed"
+    assert embedding_calls == 2
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    receipt = manifest["receipts"][0]
+    embedding_metadata = receipt["adapters"]["embedding"]["provider_metadata"]
+    assert embedding_metadata["embedding_input_tokens"] == 123
+    assert receipt["usage"] == {
+        "embedding_input_tokens": 123,
+        "embedding_usage_scope": "shared_embedding",
+        "embedding_usage_key": "entity_heuristic_w6|openai_text-embedding-3-large",
+        "rerank_search_units": 1,
+        "rerank_usage_scope": "combination",
+    }
+    summary = _summary_rows(root / "summary.csv")[0]
+    assert summary["embedding_input_tokens"] == "123"
+    assert summary["embedding_usage_scope"] == "shared_embedding"
+    assert summary["embedding_usage_key"] == (
+        "entity_heuristic_w6|openai_text-embedding-3-large"
+    )
+    assert summary["rerank_search_units"] == "1"
+    assert summary["rerank_usage_scope"] == "combination"
+
+
+def test_failed_amazon_rerank_does_not_publish_zero_search_units(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    class FailingBedrockClient:
+        def rerank(self, **_kwargs: object) -> dict[str, object]:
+            raise RuntimeError("provider unavailable")
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.client = (  # type: ignore[attr-defined]
+        lambda service_name, region_name=None: FailingBedrockClient()
+    )
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    payload = _request_payload(alpha_id, rerankers=["Amazon Rerank v1"])
+    payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    run_id, root = _create_run_request(workspace, payload)
+
+    result = ProjectMatrixRunner(workspace).run(alpha_id, run_id)
+
+    assert result["state"] == "failed"
+    summary = _summary_rows(root / "summary.csv")[0]
+    assert summary["error_code"] == "reranker_failed"
+    assert summary["rerank_search_units"] == ""
+    receipt = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
+        "receipts"
+    ][0]
+    assert receipt["usage"]["rerank_search_units"] is None
+
+
+def test_openai_embedding_accumulates_complete_valid_input_token_usage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-secret")
+    usages: list[dict[str, object]] = [
+        {"input_tokens": 5},
+        {"prompt_tokens": 7, "total_tokens": 700},
+        {"input_tokens": 11},
+        {"prompt_tokens": 13},
+    ]
+
+    def usage_post(
+        _url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        del headers, timeout
+        values = payload["input"]
+        assert isinstance(values, list) and len(values) == 1
+        usage = usages.pop(0)
+        return {
+            "data": [{"embedding": [1.0, 0.0]}],
+            "usage": usage,
+        }
+
+    monkeypatch.setattr(remote_embeddings, "_post_json", usage_post)
+    adapter = OpenAIEmbeddingAdapter("openai-test", dimensions=2, batch_size=1)
+
+    assert len(adapter.embed_many(["one", "two", "three", "four"])) == 4
+    assert adapter.last_response_metadata["embedding_input_tokens"] == 36
+
+
+def test_openai_embedding_omits_partial_usage_when_any_batch_is_unmeasured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-secret")
+    usages: list[dict[str, object]] = [
+        {"input_tokens": 5},
+        {"total_tokens": 900},
+        {"prompt_tokens": 7},
+    ]
+
+    def partially_measured_post(
+        _url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        del headers, timeout
+        values = payload["input"]
+        assert isinstance(values, list) and len(values) == 1
+        return {
+            "data": [{"embedding": [1.0, 0.0]}],
+            "usage": usages.pop(0),
+        }
+
+    monkeypatch.setattr(remote_embeddings, "_post_json", partially_measured_post)
+    adapter = OpenAIEmbeddingAdapter("openai-test", dimensions=2, batch_size=1)
+
+    assert len(adapter.embed_many(["one", "two", "three"])) == 3
+    assert "embedding_input_tokens" not in adapter.last_response_metadata
+
+
+def test_openai_embedding_does_not_publish_unmeasured_total_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "unit-secret")
+
+    def total_only_post(
+        _url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        del headers, timeout
+        values = payload["input"]
+        assert isinstance(values, list)
+        return {
+            "data": [{"embedding": [1.0, 0.0]} for _ in values],
+            "usage": {"total_tokens": 999},
+        }
+
+    monkeypatch.setattr(remote_embeddings, "_post_json", total_only_post)
+    adapter = OpenAIEmbeddingAdapter("openai-test", dimensions=2)
+
+    assert adapter.embed_many(["one"])
+    assert "embedding_input_tokens" not in adapter.last_response_metadata
 
 
 def test_runner_rejects_corpus_manifest_copied_from_another_project(
@@ -652,3 +945,57 @@ def test_runner_rejects_request_fingerprint_or_project_substitution(project_envi
         ProjectMatrixRunner(workspace).run(alpha_id, run_id)
     with pytest.raises((FileNotFoundError, ValueError)):
         ProjectMatrixRunner(workspace).run(beta_id, run_id)
+
+
+def test_post_rerank_failure_discards_evidence_and_preserves_measured_amazon_units(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    class FakeBedrockClient:
+        def rerank(self, **kwargs: object) -> dict[str, object]:
+            sources = kwargs["sources"]
+            assert isinstance(sources, list)
+            return {
+                "results": [
+                    {"index": index, "relevanceScore": 1.0 / (index + 1)}
+                    for index in range(len(sources))
+                ],
+                "ResponseMetadata": {"RequestId": "amazon-request-post-rerank"},
+            }
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.client = (  # type: ignore[attr-defined]
+        lambda service_name, region_name=None: FakeBedrockClient()
+    )
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    def fail_metric_input(*args: object, **kwargs: object):
+        del args, kwargs
+        raise RuntimeError("metric-input processing failed")
+
+    monkeypatch.setattr(project_matrix_runner, "QueryMetricInput", fail_metric_input)
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    payload = _request_payload(alpha_id, rerankers=["Amazon Rerank v1"])
+    payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    run_id, root = _create_run_request(workspace, payload)
+
+    result = ProjectMatrixRunner(workspace).run(alpha_id, run_id)
+
+    assert result["state"] == "failed"
+    summary = _summary_rows(root / "summary.csv")[0]
+    assert summary["error_code"] == "combination_failed"
+    assert summary["evidence_count"] == "0"
+    assert summary["rerank_search_units"] == "1"
+    assert json.loads((root / "evidence.json").read_text(encoding="utf-8"))["rows"] == []
+    assert (root / "details.jsonl").read_text(encoding="utf-8") == ""
+    index = json.loads((root / "evidence_index.json").read_text(encoding="utf-8"))
+    assert index["entries"][0]["row_count"] == 0
+    receipt = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
+        "receipts"
+    ][0]
+    assert receipt["error_code"] == "combination_failed"
+    assert receipt["usage"]["rerank_search_units"] == 1

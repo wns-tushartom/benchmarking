@@ -2,8 +2,15 @@ import csv
 import json
 import subprocess
 import tempfile
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import urlopen
+
+import pytest
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -81,6 +88,7 @@ def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(
             dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = old
 
     assert len(evaluation["benchmark_reference"]["summary"]) == 15
+    assert dashboard.official_evaluated_count(evaluation) == 180
     app = Path(__file__).resolve().parents[1] / "web" / "app.js"
     payload = json.dumps(evaluation)
     js = f"""
@@ -318,3 +326,168 @@ if (context.__defaultCount !== 180 || context.__noneCount !== 60) {{
 """
     proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_project_result_http_endpoints_are_exact_no_store_and_safely_mapped(monkeypatch: pytest.MonkeyPatch):
+    import scripts.serve_benchmark_dashboard as dashboard
+    from source.services.project_run_results import ProjectRunResultsError
+
+    project_id = "alpha_0123456789abcdef0123456789abcdef"
+    run_id = "run_0123456789abcdef0123456789abcdef"
+
+    class FakeResults:
+        def result_sources(self, *, official_configured: int, official_evaluated: int):
+            return {"official": {"source_type": "official", "configured": official_configured, "evaluated": official_evaluated}, "projects": [{"project_id": project_id, "label": "Alpha"}]}
+
+        def project_runs(self, supplied_project_id: str):
+            if supplied_project_id != project_id:
+                raise ProjectRunResultsError("not_found", "Project result was not found", 404)
+            return [{"project_id": project_id, "run_id": run_id}]
+
+        def project_run_results(self, supplied_project_id: str, supplied_run_id: str):
+            if (supplied_project_id, supplied_run_id) != (project_id, run_id):
+                raise ProjectRunResultsError("not_found", "Run result was not found", 404)
+            return {"source_type": "uploaded_project", "project_id": project_id, "run_id": run_id, "rows": []}
+
+        def project_run_evidence(self, supplied_project_id: str, supplied_run_id: str, combo_id: str, *, limit: int, offset: int):
+            if (supplied_project_id, supplied_run_id, combo_id) != (project_id, run_id, "combo"):
+                raise ProjectRunResultsError("not_found", "Combination evidence was not found", 404)
+            return {"project_id": project_id, "run_id": run_id, "combo_id": combo_id, "rows": [], "next_offset": None, "limit": limit, "offset": offset}
+
+    monkeypatch.setattr(dashboard, "project_result_service", lambda: FakeResults())
+    monkeypatch.setattr(
+        dashboard,
+        "read_evaluation",
+        lambda: {
+            "summary": [],
+            "reranked": {"summary": []},
+            "benchmark_reference": {
+                "summary": [{}, {}],
+                "report": {"config_rows": 0, "official_matrix_rows": 180},
+            },
+        },
+    )
+    monkeypatch.setattr(dashboard, "official_evaluated_count", lambda _evaluation: 2)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        paths = (
+            "/api/result-sources",
+            f"/api/project-runs?project_id={quote(project_id)}",
+            f"/api/project-run-results?project_id={quote(project_id)}&run_id={quote(run_id)}",
+            f"/api/project-run-evidence?project_id={quote(project_id)}&run_id={quote(run_id)}&combo_id=combo&limit=2&offset=0",
+        )
+        payloads = []
+        for path in paths:
+            with urlopen(base + path, timeout=5) as response:
+                assert response.headers["Cache-Control"] == "no-store, max-age=0"
+                payloads.append(json.loads(response.read()))
+        assert payloads[0]["official"] == {"source_type": "official", "configured": 180, "evaluated": 2}
+        assert payloads[1][0]["run_id"] == run_id
+        assert payloads[2]["source_type"] == "uploaded_project"
+        assert payloads[3]["limit"] == 2
+
+        for bad_path in (
+            "/api/project-runs",
+            f"/api/project-runs?project_id={quote(project_id)}&extra=/srv/private",
+            f"/api/project-run-evidence?project_id={quote(project_id)}&run_id={quote(run_id)}&combo_id=combo&limit=999&offset=0",
+            "/api/project-runs?project_id=missing_0123456789abcdef0123456789abcdef",
+        ):
+            with pytest.raises(HTTPError) as caught:
+                urlopen(base + bad_path, timeout=5)
+            body = json.loads(caught.value.read())
+            assert set(body) == {"error"}
+            assert set(body["error"]) == {"code", "message"}
+            assert "/srv" not in json.dumps(body)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_official_evaluated_count_excludes_failed_or_unmeasured_rows():
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    official_key = next(iter(dashboard.official_matrix_keys()))
+    chunker, embedding, store, reranker = official_key
+    base = {
+        "sheet": chunker,
+        "embedding": embedding,
+        "store": store,
+        "reranker": reranker,
+    }
+    failed = {**base, "status": "failed"}
+    failed_with_stale_metrics = {
+        **base,
+        "status": "completed",
+        "query_count": "1",
+        "error_code": "reranker_failed",
+    }
+    unmeasured = {**base, "status": "completed"}
+    measured = {**base, "status": "completed", "query_count": "1"}
+
+    assert dashboard.official_evaluated_count({
+        "summary": [failed],
+        "reranked": {"summary": []},
+        "benchmark_reference": {"summary": []},
+    }) == 0
+    assert dashboard.official_evaluated_count({
+        "summary": [failed_with_stale_metrics],
+        "reranked": {"summary": []},
+        "benchmark_reference": {"summary": []},
+    }) == 0
+    assert dashboard.official_evaluated_count({
+        "summary": [unmeasured],
+        "reranked": {"summary": []},
+        "benchmark_reference": {"summary": []},
+    }) == 0
+    assert dashboard.official_evaluated_count({
+        "summary": [measured],
+        "reranked": {"summary": []},
+        "benchmark_reference": {"summary": []},
+    }) == 1
+
+
+def test_benchmark_reference_skips_failed_rows_and_uses_measured_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    official_key = next(iter(dashboard.official_matrix_keys()))
+    chunker, embedding, store, reranker = official_key
+    base = {
+        "chunker": chunker,
+        "embedding": embedding,
+        "vector_store": store,
+        "reranker": reranker,
+    }
+    latest = tmp_path / "latest.csv"
+    archive = tmp_path / "archive.csv"
+    failed = tmp_path / "failed.csv"
+    _write_csv(latest, [{**base, "status": "completed", "query_count": ""}])
+    _write_csv(archive, [{**base, "status": "completed", "query_count": "1"}])
+    _write_csv(failed, [{**base, "status": "failed", "query_count": "1"}])
+    monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {official_key})
+    monkeypatch.setattr(
+        dashboard,
+        "benchmark_reference_sources",
+        lambda: [
+            ("modular_matrix", latest),
+            ("modular_run:archive", archive),
+            ("modular_run:failed", failed),
+        ],
+    )
+
+    reference = dashboard.read_benchmark_reference()
+
+    assert len(reference["summary"]) == 1
+    assert reference["summary"][0]["source"] == "modular_run:archive"
+    assert reference["summary"][0]["status"] == "completed"
+    assert dashboard.official_evaluated_count({
+        "summary": [],
+        "reranked": {"summary": []},
+        "benchmark_reference": reference,
+    }) == 1

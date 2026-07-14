@@ -17,10 +17,12 @@ from source.services.project_questions import (
 from source.services import project_relevance
 from source.services.project_relevance import (
     ProjectRelevanceError,
+    chunk_is_relevant,
     hit_is_relevant,
     label_applies,
     load_pinned_stopwords,
     metric_denominator,
+    relevant_corpus_count,
     wns_context_tokens_v1,
 )
 
@@ -103,6 +105,10 @@ def test_every_relevance_scoring_operation_verifies_stopword_pin(
     with pytest.raises(ProjectRelevanceError, match="hash"):
         hit_is_relevant(question, matching, "fixed_tok1200_ov150")
     with pytest.raises(ProjectRelevanceError, match="hash"):
+        chunk_is_relevant(question, matching.chunk, "fixed_tok1200_ov150")
+    with pytest.raises(ProjectRelevanceError, match="hash"):
+        relevant_corpus_count(question, [matching.chunk], "fixed_tok1200_ov150")
+    with pytest.raises(ProjectRelevanceError, match="hash"):
         metric_denominator([question], "fixed_tok1200_ov150")
 
 
@@ -123,23 +129,43 @@ def test_context_relevance_uses_normalization_substring_or_eighty_percent_set_re
     substring_question = _question(
         RetrievalLabels(reference_contexts=("Refunds   are ACCEPTED within thirty days",))
     )
+    substring_hit = _hit(
+        "Policy: refunds are accepted within thirty days for eligible bookings."
+    )
     assert hit_is_relevant(
         substring_question,
-        _hit("Policy: refunds are accepted within thirty days for eligible bookings."),
+        substring_hit,
+        "entity_heuristic_w4",
+    )
+    assert chunk_is_relevant(
+        substring_question,
+        substring_hit.chunk,
         "entity_heuristic_w4",
     )
 
     recall_question = _question(
         RetrievalLabels(reference_contexts=("refund cancellation booking support policy",))
     )
+    recall_hit = _hit("Booking cancellation support follows the refund rules.")
+    miss_hit = _hit("Booking support is available.")
     assert hit_is_relevant(
         recall_question,
-        _hit("Booking cancellation support follows the refund rules."),
+        recall_hit,
+        "entity_heuristic_w4",
+    )
+    assert chunk_is_relevant(
+        recall_question,
+        recall_hit.chunk,
         "entity_heuristic_w4",
     )
     assert not hit_is_relevant(
         recall_question,
-        _hit("Booking support is available."),
+        miss_hit,
+        "entity_heuristic_w4",
+    )
+    assert not chunk_is_relevant(
+        recall_question,
+        miss_hit.chunk,
         "entity_heuristic_w4",
     )
 
