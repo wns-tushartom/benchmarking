@@ -767,8 +767,10 @@ function renderTop10Visualizations(rows) {
   </svg>`;
 }
 
-function renderPipelineComparison(evaluation) {
-  const rows = evaluatedRows(evaluation);
+function renderPipelineComparison(evaluation, scopedRows = null) {
+  const rows = Array.isArray(scopedRows)
+    ? [...scopedRows].sort((a, b) => metricScore(b) - metricScore(a))
+    : evaluatedRows(evaluation);
   const grid = $('comparisonGrid');
   const hint = $('comparisonHint');
   if (!grid) return;
@@ -1090,11 +1092,14 @@ function renderRecommendationSource(payload) {
   const result = recommendationModule().recommendationsForSource(payload);
   recommendationState.active = payload;
   const uploaded = payload.source_type === 'uploaded_project';
+  const baseline = !uploaded && payload.result_set === 'baseline';
   recommendationState.sourceType = uploaded ? 'uploaded_project' : 'official';
-  setText('recommendationStatus', uploaded ? (payload.run_state || 'Uploaded matrix run') : 'Official benchmark');
+  setText('recommendationStatus', uploaded ? (payload.run_state || 'Uploaded matrix run') : (baseline ? 'No-reranker baseline' : 'Official benchmark'));
   const context = uploaded
     ? `Viewing: ${payload.project_label || payload.project_id} · ${payload.run_id} · ${payload.scoring_mode === 'retrieval_labels' ? `retrieval labels @${payload.metric_k}` : 'evidence only'}`
-    : `Viewing: Official WNS benchmark · ${fmtInt(payload.configured ?? 180)} configured combinations · ${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} evaluated`;
+    : baseline
+      ? `Viewing: No-reranker baseline · ${fmtInt(payload.rows?.length ?? 0)} measured combinations · separate from the official matrix`
+      : `Viewing: Official WNS benchmark · ${fmtInt(payload.configured ?? 180)} configured combinations · ${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} evaluated`;
   setText('recommendationContext', context);
   setText('recommendationModeNote', result.mode === 'labelled' ? 'Quality, speed, and honest cost posture for the active source.' : 'Operational speed, run health, and evidence coverage. Quality is not claimed without labels.');
   renderRecommendationStrip(result);
@@ -1104,25 +1109,48 @@ function renderRecommendationSource(payload) {
   return result;
 }
 
-function officialRecommendationPayload() {
+function officialRecommendationPayload(resultSet = 'official') {
   const evaluation = state.operational?.evaluation || {};
-  const rows = evaluatedRows(evaluation).map(row => ({...row, status: row.status || 'completed'}));
+  const baseline = resultSet === 'baseline';
+  const evidenceCounts = new Map();
+  (state.operational?.benchmark_detail_evidence || []).forEach(evidence => {
+    const key = metricRowKey(canonicalMetricRow(evidence));
+    evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
+  });
+  const sourceRows = baseline
+    ? [
+        ...(evaluation?.summary || []),
+        ...(evaluation?.reranked?.summary || []),
+      ].filter(row => canonicalRerankerName(row?.reranker || row?.reranking_model || 'none') === 'none')
+    : (evaluation?.benchmark_reference?.summary || []);
+  const rows = dedupeMetricRows(sourceRows).map(row => {
+    const official = canonicalMetricRow(row, {status: row.status || 'completed'});
+    const key = metricRowKey(official);
+    return {
+      ...official,
+      combo_id: key,
+      winner_score: metricScore(official),
+      evidence_count: evidenceCounts.has(key) ? evidenceCounts.get(key) : null,
+    };
+  });
   const descriptor = recommendationState.official || {};
   return {
     source_type: 'official',
+    result_set: baseline ? 'baseline' : 'official',
     scoring_mode: 'retrieval_labels',
     metric_k: 5,
-    configured: descriptor.configured ?? 180,
-    evaluated: descriptor.evaluated ?? rows.length,
+    configured: baseline ? rows.length : (descriptor.configured ?? 180),
+    evaluated: baseline ? rows.length : (descriptor.evaluated ?? rows.length),
     rows,
   };
 }
 
 function showOfficialRecommendations() {
   recommendationState.sourceType = 'official';
-  const payload = officialRecommendationPayload();
+  const resultSet = $('recommendationOfficialSet')?.value === 'baseline' ? 'baseline' : 'official';
+  const payload = officialRecommendationPayload(resultSet);
   renderRecommendationSource(payload);
-  renderPipelineComparison(state.operational?.evaluation || {});
+  renderPipelineComparison(state.operational?.evaluation || {}, payload.rows);
 }
 
 function populateRecommendationProjects() {
@@ -1706,6 +1734,7 @@ async function selectRecommendationSource(sourceType) {
   recommendationState.generation += 1;
   recommendationState.sourceType = normalized;
   recommendationState.active = null;
+  $('recommendationOfficialSetField').hidden = normalized !== 'official';
   $('recommendationProjectField').hidden = normalized !== 'uploaded_project';
   $('recommendationRunField').hidden = normalized !== 'uploaded_project';
   closeRecommendationEvidence();
@@ -1724,6 +1753,9 @@ async function selectRecommendationSource(sourceType) {
 
 $('recommendationSource')?.addEventListener('change', event => {
   selectRecommendationSource(event.target.value).catch(console.error);
+});
+$('recommendationOfficialSet')?.addEventListener('change', () => {
+  if (recommendationState.sourceType === 'official') showOfficialRecommendations();
 });
 $('recommendationProject')?.addEventListener('change', event => {
   if (event.target.value) loadProjectRuns(event.target.value).catch(console.error);

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 
@@ -15,6 +16,7 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert 'data-page="compare" type="button">Recommendations<' in index
     for element_id in (
         "recommendationSource",
+        "recommendationOfficialSet",
         "recommendationProject",
         "recommendationRun",
         "recommendationContext",
@@ -26,12 +28,14 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     ):
         assert f'id="{element_id}"' in index
 
+    assert "Official reranked matrix — 180" in index
+    assert "No-reranker baseline — 30" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260713-source-aware"' in index
-    assert 'src="/recommendations.js?v=20260713-source-aware"' in index
-    assert index.index('/recommendations.js?v=20260713-source-aware') < index.index(
-        '/app.js?v=20260713-source-aware'
+    assert 'href="/styles.css?v=20260714-official-baseline"' in index
+    assert 'src="/recommendations.js?v=20260714-official-baseline"' in index
+    assert index.index('/recommendations.js?v=20260714-official-baseline') < index.index(
+        '/app.js?v=20260714-official-baseline'
     )
 
     for endpoint in (
@@ -453,3 +457,63 @@ setTimeout(()=>{{
 """
     proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_official_recommendations_use_only_official_rows_and_recorded_evidence() -> None:
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const elements = {{}};
+function element(id) {{
+  return elements[id] ||= {{
+    id, value: '', textContent: '', innerHTML: '', hidden: false,
+    options: [], selectedOptions: [],
+    classList: {{toggle(){{}}, add(){{}}, remove(){{}}}},
+    addEventListener(){{}}, querySelectorAll(){{return [];}}, setAttribute(){{}},
+    showModal(){{}}, close(){{}},
+  }};
+}}
+const context = {{
+  console, AbortController, URLSearchParams,
+  PipelineRecommendations: {{}},
+  document: {{getElementById:element,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},
+  window: {{}}, location: {{hash:'#compare'}}, history: {{replaceState(){{}}}}, setTimeout, clearTimeout,
+  fetch() {{throw new Error('unexpected fetch');}},
+}};
+vm.createContext(context);
+const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(source + `
+  const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',recall_at_5:0.964,mrr:0.888433,ndcg_at_5:0.902323,avg_latency_seconds:0.024932915}};
+  const qdrant = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'bge-reranker-base',recall_at_5:0.90,mrr:0.80,ndcg_at_5:0.81,avg_latency_seconds:0.01}};
+  state = {{operational:{{
+    evaluation:{{
+      summary:[{{sheet:'legacy',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'none',winner_score:1,recall_at_5:1}}],
+      reranked:{{summary:[]}},
+      benchmark_reference:{{summary:[faiss,qdrant]}},
+    }},
+    benchmark_detail_evidence:[faiss,faiss],
+  }}}};
+  recommendationState.official = {{configured:180,evaluated:2}};
+  globalThis.__payload = {{
+    official: officialRecommendationPayload('official'),
+    baseline: officialRecommendationPayload('baseline'),
+  }};
+`, context);
+console.log(JSON.stringify(context.__payload));
+"""
+    proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payloads = json.loads(proc.stdout)
+    payload = payloads["official"]
+    assert len(payload["rows"]) == 2
+    assert payload["result_set"] == "official"
+    assert all(row["reranker"] == "bge-reranker-base" for row in payload["rows"])
+    faiss = next(row for row in payload["rows"] if row["store"] == "FAISS")
+    qdrant = next(row for row in payload["rows"] if row["store"] == "Qdrant")
+    assert faiss["winner_score"] > qdrant["winner_score"]
+    assert faiss["evidence_count"] == 2
+    baseline = payloads["baseline"]
+    assert baseline["result_set"] == "baseline"
+    assert len(baseline["rows"]) == 1
+    assert baseline["rows"][0]["reranker"] == "none"
+    assert baseline["rows"][0]["sheet"] == "legacy"

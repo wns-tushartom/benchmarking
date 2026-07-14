@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260713-source-aware" />
+  <link rel="stylesheet" href="/styles.css?v=20260714-official-baseline" />
 </head>
 <body>
   <main class="shell">
@@ -129,6 +129,7 @@
         </div>
         <div class="result-source-bar">
           <label>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
+          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — 30</option></select></label>
           <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
           <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
         </div>
@@ -380,7 +381,7 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
       </details>
     </section>
   </main>
-  <script src="/recommendations.js?v=20260713-source-aware"></script>
-  <script src="/app.js?v=20260713-source-aware"></script>
+  <script src="/recommendations.js?v=20260714-official-baseline"></script>
+  <script src="/app.js?v=20260714-official-baseline"></script>
 </body>
 </html>

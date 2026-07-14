@@ -34,15 +34,17 @@ Turn the current comparison page into a source-aware decision surface. A user ca
 
 ## Core source invariant
 
-The page has one active result source:
+The page has one active result source and one active result set:
 
 ```text
-Official WNS benchmark
+Official WNS benchmark → Official reranked matrix (180)
+or
+Official WNS benchmark → No-reranker baseline (30)
 or
 Uploaded project → one project_id → one matrix run_id
 ```
 
-Official and uploaded rows are never appended to the same array, payload, table, chart, winner calculation, filter, or cache entry. Switching sources clears the previous source state before the new result payload is rendered.
+The 30 measured no-reranker rows are a separate legacy baseline, not part of the official 180-row matrix and not presented as a complete fourth reranker lane. Official, baseline, and uploaded rows are never appended to the same array, payload, table, chart, winner calculation, filter, or cache entry. Switching sources or official result sets clears the previous state before the new result payload is rendered.
 
 A request-generation token or `AbortController` prevents an older, slower response from overwriting a newer source selection.
 
@@ -70,11 +72,20 @@ Use a compact source bar above the recommendation strip.
 - **Official WNS benchmark** — default
 - **Uploaded project**
 
-### Control 2: Project
+### Control 2: Official result set
+
+Visible only in official-source mode:
+
+- **Official reranked matrix — 180** — default; uses only filtered `benchmark_reference.summary` rows and the existing benchmark winner-score formula.
+- **No-reranker baseline — 30** — uses only measured legacy rows whose canonical reranker is `none`.
+
+The selector never combines these arrays. Its context line and table count state exactly which set is active. Evidence-display counts are joined by the exact canonical pipeline key from the already-loaded official benchmark evidence payload; missing counts remain **Not recorded**.
+
+### Control 3: Project
 
 Visible only in uploaded-project mode. Options contain project label and safe short ID. The control reads from the isolated project catalog and never accepts a raw path.
 
-### Control 3: Matrix run
+### Control 4: Matrix run
 
 Visible only after a project is selected. Each option shows:
 
