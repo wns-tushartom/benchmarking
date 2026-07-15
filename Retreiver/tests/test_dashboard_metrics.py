@@ -277,6 +277,15 @@ if (!context.__disabled || context.__primary) process.exit(1);
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_frontend_assets_use_current_cache_key():
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    assert "/recommendations.js?v=20260715-recommendations-restored" in index
+    assert "/app.js?v=20260715-recommendations-restored" in index
+    assert "/styles.css?v=20260715-recommendations-restored" in index
+    assert "20260709-query-ui" not in index
+
+
 def test_smoke_counts_use_summary_without_loading_json_rows():
     import scripts.serve_benchmark_dashboard as dashboard
 

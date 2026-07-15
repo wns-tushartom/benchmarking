@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260709-query-ui" />
+  <link rel="stylesheet" href="/styles.css?v=20260715-recommendations-restored" />
 </head>
 <body>
   <main class="shell">
@@ -35,7 +35,7 @@
     <nav class="page-tabs" aria-label="Benchmark pages">
       <button class="tab-btn active" data-page="overview" type="button">Overview</button>
       <button class="tab-btn" data-page="quality" type="button">Metrics</button>
-      <button class="tab-btn" data-page="compare" type="button">Accuracy, cost, latency</button>
+      <button class="tab-btn" data-page="compare" type="button">Recommendations</button>
       <button class="tab-btn" data-page="run" type="button">Run pipeline</button>
       <button class="tab-btn" data-page="evidence" type="button">Top 5 hits evidence</button>
       <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
@@ -122,33 +122,32 @@
     </section>
 
     <section class="page" data-page-panel="compare">
-      <section class="panel">
+      <section class="panel recommendation-panel">
         <div class="section-head">
-          <div><h2>Top 10 pipeline visualization</h2><p>Graphical comparison of the best complete pipelines by accuracy score, Recall@5, MRR, and average query latency. Cost appears when commercial runs are configured.</p></div>
-          <span class="mini-stat" id="top10Hint">Waiting for evaluation</span>
+          <div><h2>Pipeline recommendations</h2><p>Decision-ready quality, speed, and value recommendations from the evaluated WNS benchmark.</p></div>
+          <span id="recommendationStatus" class="mini-stat">Waiting for evaluation</span>
         </div>
-        <div class="viz-grid">
-          <div id="top10ScoreChart" class="svg-chart"></div>
-          <div id="qualityLatencyChart" class="svg-chart"></div>
-        </div>
+        <p id="recommendationContext" class="result-context">Viewing: Official WNS benchmark</p>
+        <div id="recommendationStrip" class="recommendation-strip" aria-live="polite"></div>
       </section>
+
       <section class="panel">
-        <div class="section-head">
-          <div><h2>Accuracy, cost, latency comparison</h2><p>Visual comparison of evaluated pipelines across quality, latency, and commercial cost readiness. Built only from real ground-truth summary rows.</p></div>
-          <span class="mini-stat" id="comparisonHint">Waiting for evaluation</span>
-        </div>
+        <div class="section-head"><div><h2>Top combinations</h2><p id="recommendationModeNote">Quality, speed, and honest cost posture for the official result set.</p></div><div id="recommendationSort" class="compact-sort"></div></div>
+        <div class="table-wrap recommendation-table-wrap"><table id="recommendationTable"></table></div>
+      </section>
+
+      <section class="panel pricing-panel">
+        <div class="section-head"><div><h2>Commercial pricing basis</h2><p>Published API rates and measured usage only. VM infrastructure is excluded.</p></div></div>
+        <div id="pricingLedger" class="pricing-ledger"></div>
+      </section>
+
+      <details class="panel tradeoff-details">
+        <summary>Explore accuracy, cost, and latency trade-offs</summary>
+        <div class="section-head"><span class="mini-stat" id="top10Hint">Waiting for evaluation</span><span class="mini-stat" id="comparisonHint">Waiting for evaluation</span></div>
+        <div class="viz-grid"><div id="top10ScoreChart" class="svg-chart"></div><div id="qualityLatencyChart" class="svg-chart"></div></div>
         <div id="comparisonGrid" class="comparison-grid"></div>
-      </section>
-      <section class="grid two">
-        <article class="panel">
-          <div class="section-head"><div><h2>Reranker lift</h2><p>Compares no reranker, BGE, and Qwen against the evaluated pipeline set.</p></div></div>
-          <div id="rerankerLiftChart" class="bar-list"></div>
-        </article>
-        <article class="panel">
-          <div class="section-head"><div><h2>Best by component</h2><p>Average performance grouped by component: chunker, embedding, vector DB, and reranker.</p></div></div>
-          <div id="stageComparisonChart" class="bar-list"></div>
-        </article>
-      </section>
+        <section class="grid two"><article><h3>Reranker lift</h3><div id="rerankerLiftChart" class="bar-list"></div></article><article><h3>Best by component</h3><div id="stageComparisonChart" class="bar-list"></div></article></section>
+      </details>
     </section>
 
     <section class="page" data-page-panel="run">
@@ -371,6 +370,7 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
       </details>
     </section>
   </main>
-  <script src="/app.js?v=20260709-query-ui"></script>
+  <script src="/recommendations.js?v=20260715-recommendations-restored"></script>
+  <script src="/app.js?v=20260715-recommendations-restored"></script>
 </body>
 </html>

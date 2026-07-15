@@ -677,6 +677,14 @@ function renderEvaluation(evaluation) {
     {key:'cost', label:'Cost lane', render:costLabel},
   ]);
   renderBestMethods(filteredRows.length ? filteredRows : displayRows);
+  renderRecommendationSource({
+    source_type: 'official',
+    scoring_mode: 'retrieval_labels',
+    result_set: 'official',
+    configured: displayRows.length,
+    evaluated: displayRows.length,
+    rows: displayRows,
+  });
 }
 
 function groupWinner(rows, key) {
@@ -841,6 +849,90 @@ function renderPipelineComparison(evaluation) {
   ].filter(([,v]) => v);
   const maxStage = Math.max(...stageWinners.map(([,v]) => v.score), 0);
   $('stageComparisonChart').innerHTML = stageWinners.map(([label, v]) => metricBar(`${label}: ${v.name}`, v.score, maxStage, `Avg score ${fmt(v.score,3)} · R@5 ${(v.r5*100).toFixed(1)}% · ${v.configs} configs`)).join('');
+}
+
+function recommendationModule() {
+  const module = globalThis.PipelineRecommendations;
+  if (!module || typeof module.recommendationsForSource !== 'function') throw new Error('Recommendation logic is unavailable');
+  return module;
+}
+
+function recommendationPipelineName(row) {
+  if (!row) return 'Not available';
+  return [row.chunker_id || row.sheet, row.embedding_id || row.embedding, row.vector_store_id || row.store, row.reranker_id || row.reranker || 'none']
+    .filter(Boolean).join(' · ') || row.combo_id || 'Not available';
+}
+
+function recommendationMetric(value, percent = false) {
+  if (value === null || value === undefined || value === '') return 'Not recorded';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 'Not recorded';
+  return percent ? `${(number * 100).toFixed(1)}%` : number.toFixed(3);
+}
+
+function recommendationPricingText(pricing) {
+  const stateName = String(pricing?.state || '');
+  const total = Number(pricing?.total_cost_usd);
+  if (stateName === 'measured_usage' && Number.isFinite(total)) return `$${total.toFixed(6)} measured API cost`;
+  if (stateName === 'no_api_fee') return 'No external model API fee';
+  if (stateName === 'pricing_unavailable') return 'Pricing unavailable';
+  return 'Usage not recorded';
+}
+
+function recommendationRoleNote(key, row) {
+  if (!row) return 'Not available for this result set';
+  if (key === 'quality') return `nDCG ${recommendationMetric(row.ndcg_at_5 ?? row.ndcg_at_k)} · MRR ${recommendationMetric(row.mrr ?? row.mrr_at_k)}`;
+  if (key === 'speed') return `${recommendationMetric(row.avg_latency_seconds ?? row.avg_query_latency_s)} seconds per query`;
+  return recommendationPricingText(recommendationModule().pricingForRow(row));
+}
+
+function renderRecommendationStrip(result) {
+  const roles = result?.roles || {};
+  const cards = [['quality', 'Quality'], ['speed', 'Speed'], ['value', 'Value']];
+  // Every dynamic value is escaped before this structured markup is assigned.
+  $('recommendationStrip').innerHTML = cards.map(([key, label]) => {
+    const row = roles[key] || null;
+    return `<article class="recommendation-item ${key}"><span>${esc(label)}</span><strong>${esc(recommendationPipelineName(row))}</strong><small>${esc(recommendationRoleNote(key, row))}</small></article>`;
+  }).join('');
+}
+
+function renderRecommendationTable(result) {
+  const rows = result?.rows || [];
+  const roles = result?.roles || {};
+  if (!rows.length) {
+    $('recommendationTable').innerHTML = '<tr><td class="empty-cell">No evaluated combinations are available.</td></tr>';
+    return;
+  }
+  const head = ['Pipeline', 'Status', 'Recall@5', 'MRR', 'nDCG@5', 'Avg sec/query', 'Cost posture'];
+  // Dynamic values are escaped; only fixed table structure is emitted as HTML.
+  $('recommendationTable').innerHTML = `<thead><tr>${head.map(label => `<th>${esc(label)}</th>`).join('')}</tr></thead><tbody>${rows.slice(0, 10).map((row, index) => {
+    const combo = row.combo_id || [row.sheet, row.embedding, row.store, row.reranker || 'none'].join('|');
+    const badges = [roles.quality?.combo_id === combo ? 'Quality' : '', roles.speed?.combo_id === combo ? 'Speed' : '', roles.value?.combo_id === combo ? 'Value' : ''].filter(Boolean);
+    const badgeHtml = badges.length ? `<div class="recommendation-badges">${badges.map(label => `<span>${esc(label)}</span>`).join('')}</div>` : '';
+    const pricing = recommendationModule().pricingForRow(row);
+    return `<tr><td data-label="Pipeline"><div class="recommendation-pipeline"><span class="recommendation-rank">#${index + 1}</span><strong>${esc(recommendationPipelineName(row))}</strong></div>${badgeHtml}</td><td data-label="Status">${esc(row.status || 'completed')}</td><td data-label="Recall@5">${esc(recommendationMetric(row.recall_at_5, true))}</td><td data-label="MRR">${esc(recommendationMetric(row.mrr, true))}</td><td data-label="nDCG@5">${esc(recommendationMetric(row.ndcg_at_5, true))}</td><td data-label="Avg sec/query">${esc(recommendationMetric(row.avg_latency_seconds))}</td><td data-label="Cost posture">${esc(recommendationPricingText(pricing))}</td></tr>`;
+  }).join('')}</tbody>`;
+}
+
+function renderRecommendationPricing(result) {
+  const ledger = result?.pricing_ledger || [];
+  // Ledger fields originate in the recommendation module and are escaped here.
+  $('pricingLedger').innerHTML = ledger.length ? ledger.map(entry => {
+    const rate = Number(entry.usd_rate);
+    const rateText = Number.isFinite(rate) ? `$${rate} / ${String(entry.unit || '').replaceAll('_', ' ')}` : 'Published rate unavailable';
+    return `<article class="pricing-entry"><strong>${esc(entry.model_id || 'Commercial model')}</strong><span>${esc(rateText)}</span></article>`;
+  }).join('') : '<div class="empty-state">No commercial model usage appears in this result set.</div>';
+}
+
+function renderRecommendationSource(payload) {
+  const safePayload = payload && typeof payload === 'object' ? payload : {source_type: 'official', rows: []};
+  const result = recommendationModule().recommendationsForSource(safePayload);
+  setText('recommendationStatus', result.rows.length ? 'Official benchmark' : 'Waiting for evaluation');
+  setText('recommendationContext', `Viewing: Official WNS benchmark · ${result.completed.length} evaluated combinations`);
+  setText('recommendationModeNote', 'Quality, speed, and honest cost posture for the official result set.');
+  renderRecommendationStrip(result);
+  renderRecommendationTable(result);
+  renderRecommendationPricing(result);
 }
 
 function showPage(page) {
