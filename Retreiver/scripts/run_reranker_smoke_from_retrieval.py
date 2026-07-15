@@ -23,11 +23,25 @@ RERANKERS = {
     "bge-reranker-base": ("BGE_RERANK_URL", "http://127.0.0.1:5000/rerank/bge"),
     "qwen3_4b_rerank": ("QWEN_RERANK_URL", "http://127.0.0.1:5000/rerank/qwen"),
     "Qwen3:4B Rerank": ("QWEN_RERANK_URL", "http://127.0.0.1:5000/rerank/qwen"),
+    "Amazon Rerank v1": ("", ""),
+    "amazon_bedrock": ("", ""),
 }
 
 
 def safe_name(value: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in value).strip("_")[:96]
+
+
+def canonical_reranker(value: str) -> str:
+    raw = str(value or "").strip()
+    normalized = "_".join(part for part in raw.lower().replace(":", " ").replace("-", " ").split() if part)
+    if normalized in {"qwen", "qwen3", "qwen3_4b", "qwen3_4b_rerank", "qwen3_4b_reranker"}:
+        return "qwen3_4b_rerank"
+    if normalized in {"amazon", "amazon_rerank", "amazon_rerank_v1", "amazon_bedrock", "amazon_bedrock_rerank"} or ("amazon" in normalized and "rerank" in normalized):
+        return "Amazon Rerank v1"
+    if normalized in {"bge", "bge_reranker", "bge_reranker_base"}:
+        return "bge-reranker-base"
+    return raw
 
 
 def load_env(root: Path) -> None:
@@ -40,6 +54,39 @@ def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def amazon_model_arn(model_id: str, region: str) -> str:
+    if model_id.startswith("arn:aws:bedrock:"):
+        return model_id
+    return f"arn:aws:bedrock:{region}::foundation-model/{model_id}"
+
+
+def amazon_rerank(query: str, documents: list[str], top_k: int) -> dict[str, Any]:
+    try:
+        import boto3  # type: ignore[import-not-found]
+    except Exception as exc:
+        raise RuntimeError("boto3 is required for Amazon Rerank v1") from exc
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION is required for Amazon Rerank v1")
+    model_id = amazon_model_arn(os.environ.get("AMAZON_RERANK_MODEL_ID", "amazon.rerank-v1:0").strip(), region)
+    sources = [
+        {"type": "INLINE", "inlineDocumentSource": {"type": "TEXT", "textDocument": {"text": doc}}}
+        for doc in documents
+    ]
+    client = boto3.client("bedrock-agent-runtime", region_name=region)
+    return client.rerank(
+        queries=[{"type": "TEXT", "textQuery": {"text": query}}],
+        sources=sources,
+        rerankingConfiguration={
+            "type": "BEDROCK_RERANKING_MODEL",
+            "bedrockRerankingConfiguration": {
+                "modelConfiguration": {"modelArn": model_id},
+                "numberOfResults": min(len(documents), max(top_k, 1)),
+            },
+        },
+    )
+
+
 def load_retrieval_artifacts(path: Path, limit: int) -> list[Path]:
     files = [p for p in path.glob("*.json") if p.name != "summary.json"]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -47,12 +94,16 @@ def load_retrieval_artifacts(path: Path, limit: int) -> list[Path]:
 
 
 def rerank_one(payload: dict[str, Any], reranker: str, top_k: int) -> dict[str, Any]:
-    env, default_url = RERANKERS[reranker]
-    url = os.environ.get(env, default_url)
+    reranker = canonical_reranker(reranker)
     hits = payload.get("hits") or []
     docs = [str(h.get("paragraph") or "") for h in hits]
     start = time.perf_counter()
-    response = post_json(url, {"query": payload.get("query", ""), "documents": docs, "top_k": top_k})
+    if reranker == "Amazon Rerank v1":
+        response = amazon_rerank(payload.get("query", ""), docs, top_k)
+    else:
+        env, default_url = RERANKERS[reranker]
+        url = os.environ.get(env, default_url)
+        response = post_json(url, {"query": payload.get("query", ""), "documents": docs, "top_k": top_k})
     elapsed = time.perf_counter() - start
     ranked_hits = []
     for i, item in enumerate(response.get("results", []), 1):
@@ -62,7 +113,7 @@ def rerank_one(payload: dict[str, Any], reranker: str, top_k: int) -> dict[str, 
         h = dict(hits[idx])
         h["original_rank"] = h.get("rank", idx + 1)
         h["rank"] = i
-        h["rerank_score"] = float(item.get("score", 0))
+        h["rerank_score"] = float(item.get("score", item.get("relevance_score", item.get("relevanceScore", 0))))
         ranked_hits.append(h)
     return {
         **payload,
@@ -108,9 +159,10 @@ def main() -> int:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["artifact"] = str(path.relative_to(ROOT))
-            for reranker in args.rerankers:
+            for requested_reranker in args.rerankers:
+                reranker = canonical_reranker(requested_reranker)
                 if reranker not in RERANKERS:
-                    raise ValueError(f"Unknown reranker {reranker}; known={sorted(RERANKERS)}")
+                    raise ValueError(f"Unknown reranker {requested_reranker}; known={sorted(RERANKERS)}")
                 result = rerank_one(payload, reranker, args.top_k)
                 name = f"{safe_name(payload.get('sheet',''))}_{safe_name(payload.get('embedding',''))}_{safe_name(payload.get('store',''))}_{safe_name(reranker)}_{safe_name(payload.get('query',''))}.json"
                 (out_dir / name).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")

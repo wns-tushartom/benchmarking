@@ -151,6 +151,24 @@ def test_frontend_initial_load_uses_lazy_evidence_limits():
     assert "reranker_limit=60000" not in text
 
 
+def test_metrics_exposes_shared_dataset_groundtruth_and_result_set_selectors() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="metricsDataset"' in index
+    assert 'id="metricsGroundtruth"' in index
+    assert 'id="metricsResultSet"' in index
+    assert 'id="metricsSourceContext"' in index
+    assert "function syncSourceSelectorControls()" in app
+    assert "target.replaceChildren" in app
+    assert "target.innerHTML = source.innerHTML" not in app
+    assert "function renderMetricsSource(payload)" in app
+    assert "$('metricsDataset')?.addEventListener('input'" in app
+    assert "$('metricsGroundtruth')?.addEventListener('input'" in app
+    assert "$('metricsResultSet')?.addEventListener('input'" in app
+
+
 def test_nvidia_baseline_and_reranked_results_are_independently_visible():
     root = Path(__file__).resolve().parents[1]
     app = root / "web" / "app.js"
@@ -288,9 +306,9 @@ if (!context.__disabled || context.__primary) process.exit(1);
 def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
-    assert "/recommendations.js?v=20260715-recommendations-v2" in index
-    assert "/app.js?v=20260715-recommendations-v2" in index
-    assert "/styles.css?v=20260715-recommendations-v2" in index
+    assert "/recommendations.js?v=20260715-metrics-sources" in index
+    assert "/app.js?v=20260715-metrics-sources" in index
+    assert "/styles.css?v=20260715-metrics-sources" in index
     assert "20260709-query-ui" not in index
 
 

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -610,6 +611,63 @@ console.log(JSON.stringify({
                 self.assertEqual(asyncio.run(service.parse_pdf(str(pdf), pdf.name, allow_fallback=True)), "fallback-used")
         finally:
             parser_module.PYPDF2_AVAILABLE = old_pypdf2_available
+
+    def test_amazon_bedrock_reranker_uses_text_inline_source_shape(self):
+        from benchmarking.adapters.remote_rerankers import AmazonBedrockRerankerAdapter
+        from benchmarking.core.schemas import Chunk, SearchHit
+
+        captured: dict = {}
+
+        class FakeBoto3:
+            @staticmethod
+            def client(service_name: str, region_name: str | None = None):
+                self.assertEqual(service_name, "bedrock-agent-runtime")
+                self.assertEqual(region_name, "us-west-2")
+
+                class FakeClient:
+                    def rerank(self, **kwargs):
+                        captured.update(kwargs)
+                        return {"results": [{"index": 0, "relevanceScore": 0.7}]}
+
+                return FakeClient()
+
+        old_module = sys.modules.get("boto3")
+        old_env = {k: os.environ.get(k) for k in ["AWS_REGION", "AWS_DEFAULT_REGION", "AMAZON_RERANK_MODEL_ID"]}
+        sys.modules["boto3"] = FakeBoto3()
+        os.environ["AWS_REGION"] = "us-west-2"
+        os.environ["AMAZON_RERANK_MODEL_ID"] = "amazon.rerank-v1:0"
+        try:
+            adapter = AmazonBedrockRerankerAdapter("Amazon Rerank v1")
+            hits = [SearchHit(Chunk(id=1, pdf_name="doc.pdf", paragraph="refund text"), 0.1)]
+            reranked = adapter.rerank("refund", hits, top_k=1)
+        finally:
+            if old_module is None:
+                sys.modules.pop("boto3", None)
+            else:
+                sys.modules["boto3"] = old_module
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.assertEqual(len(reranked), 1)
+        self.assertEqual(captured["queries"][0]["textQuery"]["text"], "refund")
+        source = captured["sources"][0]
+        self.assertEqual(source["type"], "INLINE")
+        self.assertEqual(source["inlineDocumentSource"]["type"], "TEXT")
+        self.assertEqual(source["inlineDocumentSource"]["textDocument"]["text"], "refund text")
+
+    def test_complete_pipeline_normalizes_frontend_reranker_labels(self):
+        from scripts.run_complete_pipeline import choose, normalize_reranker, LIVE_RERANKERS
+
+        self.assertEqual(normalize_reranker("Qwen3:4B Rerank"), "qwen3_4b_rerank")
+        self.assertEqual(normalize_reranker("Amazon Rerank v1"), "Amazon Rerank v1")
+        self.assertIn("Amazon Rerank v1", LIVE_RERANKERS)
+        self.assertEqual(
+            choose(["Qwen3:4B Rerank", "Amazon Rerank v1", "none"], LIVE_RERANKERS, normalize=normalize_reranker),
+            ["qwen3_4b_rerank", "Amazon Rerank v1", "none"],
+        )
 
     def test_modular_experiment_writes_outputs(self):
         root = Path(__file__).resolve().parents[1]

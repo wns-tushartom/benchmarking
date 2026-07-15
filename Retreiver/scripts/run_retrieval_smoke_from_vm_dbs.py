@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
+from benchmarking.adapters.remote_embeddings import OpenAIEmbeddingAdapter, RemoteHTTPEmbeddingAdapter
 from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 from benchmarking.adapters.vector_pgvector import _vec
 from scripts.wns_env import load_env_files
@@ -38,11 +39,27 @@ EMBEDDING_CONFIGS: dict[str, dict[str, Any]] = {
         "dimensions": 1024,
         "default_batch_size": 1,
     },
+    "openai_text-embedding-3-large": {
+        "adapter": "openai",
+        "dimensions": 3072,
+        "default_batch_size": 1,
+    },
 }
 
 
 def safe_name(value: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in value).strip("_")
+
+
+def legacy_artifact_path(out_dir: Path, row: dict[str, str], query: str) -> Path:
+    name = f"{safe_name(row['sheet'])}_{safe_name(row['embedding'])}_{safe_name(row['store'])}_{safe_name(query)[:40]}.json"
+    return out_dir / name
+
+
+def artifact_path(out_dir: Path, row: dict[str, str], query: str) -> Path:
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
+    name = f"{safe_name(row['sheet'])}_{safe_name(row['embedding'])}_{safe_name(row['store'])}_{safe_name(query)[:40]}_{digest}.json"
+    return out_dir / name
 
 
 def load_env(root: Path) -> None:
@@ -106,15 +123,41 @@ def latest_ok_rows(run_id_filter: str = "") -> list[dict[str, str]]:
     return list(picked.values())
 
 
-def embed_query(query: str, embedding: str) -> list[float]:
+def make_query_embedding_adapter(embedding: str) -> Any:
     cfg = EMBEDDING_CONFIGS[embedding]
-    adapter = RemoteHTTPEmbeddingAdapter(
+    if cfg.get("adapter") == "openai":
+        return OpenAIEmbeddingAdapter(
+            model_name=embedding,
+            dimensions=cfg["dimensions"],
+            batch_size=1,
+        )
+    return RemoteHTTPEmbeddingAdapter(
         model_name=embedding,
         endpoint_env=cfg["endpoint_env"],
         dimensions=cfg["dimensions"],
         batch_size=1,
     )
-    return adapter.embed_many([query])[0]
+
+
+def embed_query(query: str, embedding: str) -> list[float]:
+    return make_query_embedding_adapter(embedding).embed_many([query])[0]
+
+
+def completed_artifact_matches(path: Path, row: dict[str, str], query: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("sheet") == row.get("sheet")
+        and payload.get("embedding") == row.get("embedding")
+        and payload.get("store") == row.get("store")
+        and payload.get("query") == query
+        and isinstance(payload.get("hits"), list)
+        and isinstance(payload.get("retrieved_count"), int)
+    )
 
 
 def hit_payload(rank: int, score: float, pdf_name: Any, chunk_id: Any, paragraph: Any, page_number: Any = "", source_type: Any = "", parser_method: Any = "") -> dict[str, Any]:
@@ -242,6 +285,8 @@ def main() -> int:
     parser.add_argument("--max-combos", type=int, default=18)
     parser.add_argument("--query-limit", type=int, default=0, help="0 = all queries from queries file")
     parser.add_argument("--run-id", default="", help="Restrict ingestion discovery to one data/db_ingestion_runs/<run_id> directory")
+    parser.add_argument("--skip-existing-success", action="store_true")
+    parser.add_argument("--require-combos", type=int, default=0)
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -255,6 +300,7 @@ def main() -> int:
         queries = queries[: args.query_limit]
     all_results = []
     errors = []
+    skipped = 0
     if not rows:
         errors.append({
             "error": "no_matching_ingestion_rows",
@@ -263,6 +309,13 @@ def main() -> int:
             "embeddings": args.embeddings,
             "stores": args.stores,
             "hint": "Run scripts/run_long_db_ingestion.py for the selected combinations first.",
+        })
+    if args.require_combos and len(rows) != args.require_combos:
+        errors.append({
+            "error": "required_combo_count_mismatch",
+            "required": args.require_combos,
+            "discovered": len(rows),
+            "hint": "Ingest every selected chunker × embedding × store combination before retrieval.",
         })
     if not queries:
         errors.append({"error": "no_queries", "queries_file": args.queries_file, "hint": "Provide a groundtruth/query file with query/question rows."})
@@ -273,17 +326,22 @@ def main() -> int:
         return 1
     for row in rows:
         for query in queries:
+            artifact = artifact_path(out_dir, row, query)
+            legacy = legacy_artifact_path(out_dir, row, query)
+            if args.skip_existing_success and any(completed_artifact_matches(candidate, row, query) for candidate in (artifact, legacy)):
+                skipped += 1
+                print(f"SKIP existing {row['sheet']} {row['embedding']} {row['store']} query={query!r}", flush=True)
+                continue
             try:
                 result = run_one(row, query, args.top_k)
-                name = f"{safe_name(row['sheet'])}_{safe_name(row['embedding'])}_{safe_name(row['store'])}_{safe_name(query)[:40]}.json"
-                (out_dir / name).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+                artifact.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"OK {row['sheet']} {row['embedding']} {row['store']} query={query!r} hits={result['retrieved_count']} seconds={result['retrieval_seconds']}", flush=True)
                 all_results.append(result)
             except Exception as exc:
                 err = {"row": row, "query": query, "error": repr(exc)}
                 errors.append(err)
                 print(f"ERROR {row.get('sheet')} {row.get('embedding')} {row.get('store')} query={query!r}: {exc!r}", flush=True)
-    summary = {"created_at": datetime.now().isoformat(), "result_count": len(all_results), "error_count": len(errors), "errors": errors}
+    summary = {"created_at": datetime.now().isoformat(), "result_count": len(all_results), "skipped_count": skipped, "error_count": len(errors), "errors": errors}
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return 1 if errors else 0
 

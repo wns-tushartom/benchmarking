@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260715-recommendations-v2" />
+  <link rel="stylesheet" href="/styles.css?v=20260715-metrics-sources" />
 </head>
 <body>
   <main class="shell">
@@ -104,6 +104,18 @@
     </section>
 
     <section class="page" data-page-panel="quality">
+      <section class="panel metrics-source-panel">
+        <div class="section-head">
+          <div><h2>Metrics result source</h2><p>Select the dataset, ground truth, and completed result set shown in this Metrics page.</p></div>
+          <span class="mini-stat">Shared with Recommendations</span>
+        </div>
+        <div class="result-source-bar">
+          <label>Dataset<select id="metricsDataset"><option value="official">Official WNS corpus</option></select></label>
+          <label>Ground truth<select id="metricsGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
+          <label>Result set<select id="metricsResultSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
+        </div>
+        <p id="metricsSourceContext" class="result-context">Viewing: Official WNS benchmark</p>
+      </section>
       <section id="qualitySection" class="panel quality-panel hidden">
         <div class="section-head">
           <div><h2>Ground-truth metrics</h2><p>Metric table for complete pipeline combinations. Components are chunker, embedding, vector DB, and reranker. Metrics are Recall@K, MRR, nDCG, score, cost, and average latency per query.</p></div>
@@ -131,7 +143,7 @@
           <label hidden>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
           <label>Dataset<select id="recommendationDataset"><option value="official">Official WNS corpus</option></select></label>
           <label>Ground truth<select id="recommendationGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
-          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — 30</option></select></label>
+          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
           <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
           <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
         </div>
@@ -386,7 +398,7 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
       </details>
     </section>
   </main>
-  <script src="/recommendations.js?v=20260715-recommendations-v2"></script>
-  <script src="/app.js?v=20260715-recommendations-v2"></script>
+  <script src="/recommendations.js?v=20260715-metrics-sources"></script>
+  <script src="/app.js?v=20260715-metrics-sources"></script>
 </body>
 </html>

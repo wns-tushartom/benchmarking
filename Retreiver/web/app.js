@@ -629,7 +629,7 @@ function displayScore(r) {
   return fmt(metricScore(r), 3);
 }
 
-function renderEvaluation(evaluation) {
+function renderEvaluation(evaluation, syncRecommendations = true) {
   const rows = evaluation?.summary || [];
   const section = $('qualitySection');
   if (!section) return;
@@ -677,14 +677,38 @@ function renderEvaluation(evaluation) {
     {key:'cost', label:'Cost lane', render:costLabel},
   ]);
   renderBestMethods(filteredRows.length ? filteredRows : displayRows);
-  renderRecommendationSource({
-    source_type: 'official',
-    scoring_mode: 'retrieval_labels',
-    result_set: 'official',
-    configured: displayRows.length,
-    evaluated: displayRows.length,
-    rows: displayRows,
-  });
+  if (syncRecommendations) {
+    renderRecommendationSource({
+      source_type: 'official',
+      scoring_mode: 'retrieval_labels',
+      result_set: 'official',
+      configured: displayRows.length,
+      evaluated: displayRows.length,
+      rows: displayRows,
+    });
+  }
+}
+
+function renderMetricsSource(payload) {
+  const context = payload?.source_type === 'uploaded_project'
+    ? `Viewing: ${payload.project_label || payload.project_id} · ${payload.groundtruth_label || (payload.scoring_mode === 'retrieval_labels' ? 'Selected ground truth' : 'None (evidence-only)')} · ${payload.timestamp_label || payload.run_id}`
+    : payload?.result_set === 'baseline'
+      ? `Viewing: Official WNS corpus · Official benchmark ground truth · No-reranker baseline`
+      : `Viewing: Official WNS corpus · Official benchmark ground truth · Official reranked matrix`;
+  setText('metricsSourceContext', context);
+  if (payload?.scoring_mode !== 'retrieval_labels') {
+    const section = $('qualitySection');
+    section?.classList.remove('hidden');
+    setText('qualityHint', 'Evidence-only · scored metrics unavailable');
+    if ($('qualityInsight')) $('qualityInsight').textContent = 'This result has no selected ground truth. Recall, MRR, nDCG, score, and winner claims are intentionally suppressed.';
+    table($('qualityTable'), [], []);
+    renderBestMethods([]);
+    return;
+  }
+  renderEvaluation({
+    summary: Array.isArray(payload?.rows) ? payload.rows : [],
+    report: {groundtruth_rows: payload?.evaluated_queries || payload?.query_count || '—'},
+  }, false);
 }
 
 function groupWinner(rows, key) {
@@ -1182,11 +1206,23 @@ function officialRecommendationPayload(resultSet = 'official') {
   };
 }
 
+function setSelectOptionLabel(selectId, value, label) {
+  const select = $(selectId);
+  const option = Array.from(select?.options || []).find(item => item.value === value);
+  if (option) option.textContent = label;
+}
+
 function showOfficialRecommendations() {
   recommendationState.sourceType = 'official';
   const resultSet = $('recommendationOfficialSet')?.value === 'baseline' ? 'baseline' : 'official';
   const payload = officialRecommendationPayload(resultSet);
+  const baselineCount = officialRecommendationPayload('baseline')?.rows.length || 0;
+  const baselineLabel = `No-reranker baseline — ${baselineCount} measured`;
+  setSelectOptionLabel('recommendationOfficialSet', 'baseline', baselineLabel);
+  setSelectOptionLabel('metricsResultSet', 'baseline', baselineLabel);
   renderRecommendationSource(payload);
+  renderMetricsSource(payload);
+  syncSourceSelectorControls();
   renderPipelineComparison(state.operational?.evaluation || {}, payload.rows);
 }
 
@@ -1240,6 +1276,30 @@ function populateRecommendationRuns() {
   select.innerHTML = runs.length
     ? runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.timestamp_label || run.completed_at || run.created_at || run.run_id)}</option>`).join('')
     : '<option value="">No completed run for this dataset and ground truth</option>';
+  syncSourceSelectorControls();
+}
+
+function copySelectState(sourceId, targetId) {
+  const source = $(sourceId);
+  const target = $(targetId);
+  if (!source || !target) return;
+  if (source.options && typeof target.replaceChildren === 'function') {
+    const options = Array.from(source.options)
+      .filter(option => typeof option.cloneNode === 'function')
+      .map(option => option.cloneNode(true));
+    target.replaceChildren(...options);
+  }
+  target.value = source.value;
+  target.disabled = source.disabled;
+}
+function syncSourceSelectorControls() {
+  copySelectState('recommendationDataset', 'metricsDataset');
+  copySelectState('recommendationGroundtruth', 'metricsGroundtruth');
+  if (recommendationState.sourceType === 'official') {
+    copySelectState('recommendationOfficialSet', 'metricsResultSet');
+  } else {
+    copySelectState('recommendationRun', 'metricsResultSet');
+  }
 }
 
 async function loadResultSources() {
@@ -1252,6 +1312,7 @@ async function loadResultSources() {
     populateRecommendationProjects();
     populateRecommendationDatasets();
     populateRecommendationGroundtruths();
+    syncSourceSelectorControls();
     if (recommendationState.sourceType === 'official') showOfficialRecommendations();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
@@ -1296,6 +1357,8 @@ async function loadProjectRun(projectId, runId) {
       throw new Error('Project run response identity mismatch');
     }
     renderRecommendationSource(payload);
+    renderMetricsSource(payload);
+    syncSourceSelectorControls();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
     recommendationState.active = null;
@@ -1969,22 +2032,41 @@ async function selectRecommendationDataset(datasetId) {
   await selectRecommendationSource('uploaded_project');
 }
 
+async function selectRecommendationGroundtruth(groundtruthId) {
+  if ($('recommendationGroundtruth')) $('recommendationGroundtruth').value = groundtruthId;
+  if (recommendationState.sourceType !== 'uploaded_project') {
+    showOfficialRecommendations();
+    return;
+  }
+  populateRecommendationRuns();
+  const projectId = $('recommendationProject')?.value;
+  const runId = $('recommendationRun')?.value;
+  if (projectId && runId) await loadProjectRun(projectId, runId);
+  else clearRecommendationView('No completed run for this dataset and ground truth');
+}
+
+async function selectRecommendationResultSet(resultSetId) {
+  if (recommendationState.sourceType === 'official') {
+    if ($('recommendationOfficialSet')) $('recommendationOfficialSet').value = resultSetId;
+    showOfficialRecommendations();
+    return;
+  }
+  if ($('recommendationRun')) $('recommendationRun').value = resultSetId;
+  const projectId = $('recommendationProject')?.value;
+  if (projectId && resultSetId) await loadProjectRun(projectId, resultSetId);
+}
+
 $('recommendationSource')?.addEventListener('change', event => {
   selectRecommendationSource(event.target.value).catch(console.error);
 });
 $('recommendationDataset')?.addEventListener('change', event => {
   selectRecommendationDataset(event.target.value).catch(console.error);
 });
-$('recommendationGroundtruth')?.addEventListener('change', () => {
-  if (recommendationState.sourceType !== 'uploaded_project') return;
-  populateRecommendationRuns();
-  const projectId = $('recommendationProject')?.value;
-  const runId = $('recommendationRun')?.value;
-  if (projectId && runId) loadProjectRun(projectId, runId).catch(console.error);
-  else clearRecommendationView('No completed run for this dataset and ground truth');
+$('recommendationGroundtruth')?.addEventListener('change', event => {
+  selectRecommendationGroundtruth(event.target.value).catch(console.error);
 });
-$('recommendationOfficialSet')?.addEventListener('change', () => {
-  if (recommendationState.sourceType === 'official') showOfficialRecommendations();
+$('recommendationOfficialSet')?.addEventListener('change', event => {
+  selectRecommendationResultSet(event.target.value).catch(console.error);
 });
 $('recommendationProject')?.addEventListener('change', event => {
   if (event.target.value) loadProjectRuns(event.target.value).catch(console.error);
@@ -1992,6 +2074,16 @@ $('recommendationProject')?.addEventListener('change', event => {
 $('recommendationRun')?.addEventListener('change', event => {
   const projectId = $('recommendationProject')?.value;
   if (projectId && event.target.value) loadProjectRun(projectId, event.target.value).catch(console.error);
+});
+$('metricsDataset')?.addEventListener('input', event => {
+  if ($('recommendationDataset')) $('recommendationDataset').value = event.target.value;
+  selectRecommendationDataset(event.target.value).catch(console.error);
+});
+$('metricsGroundtruth')?.addEventListener('input', event => {
+  selectRecommendationGroundtruth(event.target.value).catch(console.error);
+});
+$('metricsResultSet')?.addEventListener('input', event => {
+  selectRecommendationResultSet(event.target.value).catch(console.error);
 });
 $('projectEvidenceMore')?.addEventListener('click', () => loadProjectEvidencePage({append: true}).catch(console.error));
 $('projectEvidenceDialog')?.addEventListener('close', closeRecommendationEvidence);

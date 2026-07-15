@@ -36,13 +36,13 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert "No completed run for this dataset and ground truth" in app
 
     assert "Official reranked matrix — 180" in index
-    assert "No-reranker baseline — 30" in index
+    assert "No-reranker baseline — measured results" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260715-recommendations-v2"' in index
-    assert 'src="/recommendations.js?v=20260715-recommendations-v2"' in index
-    assert index.index('/recommendations.js?v=20260715-recommendations-v2') < index.index(
-        '/app.js?v=20260715-recommendations-v2'
+    assert 'href="/styles.css?v=20260715-metrics-sources"' in index
+    assert 'src="/recommendations.js?v=20260715-metrics-sources"' in index
+    assert index.index('/recommendations.js?v=20260715-metrics-sources') < index.index(
+        '/app.js?v=20260715-metrics-sources'
     )
 
     for endpoint in (
