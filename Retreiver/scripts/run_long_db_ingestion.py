@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarking.adapters.remote_embeddings import RemoteHTTPEmbeddingAdapter
+from benchmarking.adapters.remote_embeddings import OpenAIEmbeddingAdapter, RemoteHTTPEmbeddingAdapter
 from benchmarking.adapters.vector_faiss import FaissVectorStoreAdapter
 from benchmarking.adapters.vector_pgvector import PGVectorStoreAdapter
 from benchmarking.adapters.vector_qdrant import QdrantVectorStoreAdapter
@@ -45,14 +45,24 @@ from scripts.wns_env import load_env_files
 
 EMBEDDING_CONFIGS: dict[str, dict[str, Any]] = {
     "gte_multilingual_base": {
+        "adapter": "remote_http",
         "endpoint_env": "GTE_EMBEDDING_URL",
         "dimensions": 768,
         "default_batch_size": 4,
     },
     "jina_v3": {
+        "adapter": "remote_http",
         "endpoint_env": "JINA_EMBEDDING_URL",
         "dimensions": 1024,
         "default_batch_size": 2,
+    },
+    "openai_text-embedding-3-large": {
+        "adapter": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "endpoint_env": "OPENAI_EMBEDDING_URL",
+        "url": "https://api.openai.com/v1/embeddings",
+        "dimensions": 3072,
+        "default_batch_size": 32,
     },
 }
 
@@ -171,12 +181,44 @@ def validate_vectors_for_chunks(chunks: list[Chunk], vectors: list[list[float]],
             raise ValueError(f"Vector contains non-finite values for {embedding} at index {idx}")
 
 
-def cache_metadata(chunks: list[Chunk], embedding_name: str, batch_size: int, limit: int, endpoint_env: str, expected_dim: int) -> dict[str, Any]:
+def embedding_endpoint_url(cfg: dict[str, Any]) -> str:
+    endpoint_env = str(cfg.get("endpoint_env") or "")
+    if endpoint_env:
+        value = os.environ.get(endpoint_env, "").strip()
+        if value:
+            return value
+    return str(cfg.get("url") or "").strip()
+
+
+def make_embedding_adapter(embedding_name: str, batch_size: int):
+    cfg = EMBEDDING_CONFIGS[embedding_name]
+    adapter = cfg.get("adapter", "remote_http")
+    if adapter == "openai":
+        return OpenAIEmbeddingAdapter(
+            model_name=embedding_name,
+            dimensions=cfg["dimensions"],
+            batch_size=batch_size,
+            api_key_env=cfg.get("api_key_env", "OPENAI_API_KEY"),
+            url=embedding_endpoint_url(cfg),
+        )
+    if adapter == "remote_http":
+        return RemoteHTTPEmbeddingAdapter(
+            model_name=embedding_name,
+            endpoint_env=cfg["endpoint_env"],
+            dimensions=cfg["dimensions"],
+            batch_size=batch_size,
+            api_key_env=cfg.get("api_key_env"),
+        )
+    raise ValueError(f"Unsupported embedding adapter {adapter!r} for {embedding_name}")
+
+
+def cache_metadata(chunks: list[Chunk], embedding_name: str, batch_size: int, limit: int, cfg: dict[str, Any], expected_dim: int) -> dict[str, Any]:
+    endpoint_env = str(cfg.get("endpoint_env") or "")
     return {
         "version": 2,
         "embedding": embedding_name,
         "endpoint_env": endpoint_env,
-        "endpoint_url": os.environ.get(endpoint_env, ""),
+        "endpoint_url": embedding_endpoint_url(cfg),
         "expected_dim": expected_dim,
         "batch_size": batch_size,
         "limit": int(limit or 0),
@@ -207,7 +249,7 @@ def get_vectors(
 ) -> list[list[float]]:
     cfg = EMBEDDING_CONFIGS[embedding_name]
     expected_dim = int(cfg["dimensions"])
-    expected_meta = cache_metadata(chunks, embedding_name, batch_size, limit, cfg["endpoint_env"], expected_dim)
+    expected_meta = cache_metadata(chunks, embedding_name, batch_size, limit, cfg, expected_dim)
     if cache_path.exists() and not force and metadata_matches(meta_path, expected_meta):
         vectors = np.load(cache_path).tolist()
         log(f"loaded_cached_vectors path={cache_path} count={len(vectors)} dim={len(vectors[0]) if vectors else 0}")
@@ -216,12 +258,7 @@ def get_vectors(
     if cache_path.exists() and not force:
         log(f"embedding cache metadata mismatch; regenerating vectors path={cache_path}")
 
-    embedder = RemoteHTTPEmbeddingAdapter(
-        model_name=embedding_name,
-        endpoint_env=cfg["endpoint_env"],
-        dimensions=cfg["dimensions"],
-        batch_size=batch_size,
-    )
+    embedder = make_embedding_adapter(embedding_name, batch_size)
     texts = [c.paragraph for c in chunks]
     start = time.perf_counter()
     vectors = embedder.embed_many(texts)

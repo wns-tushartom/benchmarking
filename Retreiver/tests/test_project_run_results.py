@@ -519,6 +519,7 @@ def test_public_contract_lists_only_valid_projects_and_matrix_runs(result_worksp
         result_workspace["beta_id"],
     ]
     assert sources["projects"][0]["label"] == "Alpha refunds"
+    assert sources["projects"][0]["dataset_id"] == f"project:{result_workspace['alpha_id']}"
 
     runs = service.project_runs(str(result_workspace["alpha_id"]))
     assert {row["run_id"] for row in runs} == {
@@ -528,6 +529,9 @@ def test_public_contract_lists_only_valid_projects_and_matrix_runs(result_worksp
     }
     assert result_workspace["lexical_run_id"] not in {row["run_id"] for row in runs}
     assert runs[0]["run_id"] == result_workspace["labelled_run_id"]
+    assert runs[0]["dataset_id"] == f"project:{result_workspace['alpha_id']}"
+    assert runs[0]["groundtruth_id"] == "groundtruth:none"
+    assert runs[0]["groundtruth_label"] == "None (evidence-only)"
     legacy = next(row for row in runs if row["run_id"] == result_workspace["legacy_run_id"])
     assert legacy["timestamp_label"] == "Legacy artifact time"
     assert legacy["artifact_time"].endswith("Z")
@@ -562,6 +566,9 @@ def test_schema_v2_results_are_normalized_without_cross_source_fallback(
     assert result["run_id"] == result_workspace["labelled_run_id"]
     assert result["run_state"] == "completed"
     assert result["scoring_mode"] == "retrieval_labels"
+    assert result["dataset_id"] == f"project:{result_workspace['alpha_id']}"
+    assert result["groundtruth_id"] == "groundtruth:none"
+    assert result["groundtruth_label"] == "None (evidence-only)"
     assert result["metric_k"] == 10
     assert result["combination_count"] == 1
     assert result["succeeded"] == 1

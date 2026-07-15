@@ -16,7 +16,11 @@
     }),
   });
 
-  const finite = value => Number.isFinite(Number(value)) ? Number(value) : null;
+  const finite = value => {
+    if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
   const positive = value => {
     const number = finite(value);
     return number !== null && number > 0 ? number : null;
@@ -169,9 +173,11 @@
       const shared = scope === 'shared_embedding' && usageKey !== null;
       const valid = amount !== null && (shared || scope === 'combination');
       return {
-        key: shared
-          ? `shared_embedding:${usageKey}`
-          : `combination:${comboId || stableKey(row)}:${modelId}`,
+        key: !valid
+          ? `usage_missing:${modelId}`
+          : shared
+            ? `shared_embedding:${usageKey}`
+            : `combination:${comboId || stableKey(row)}:${modelId}`,
         model_id: modelId,
         state: valid ? 'measured_usage' : 'usage_missing',
         unit: pricing.unit,
@@ -179,7 +185,7 @@
         usage: valid ? amount : null,
         usage_scope: scope,
         cost_usd: valid ? amount / 1000000 * pricing.usd_rate : null,
-        combo_id: shared ? null : comboId,
+        combo_id: !valid || shared ? null : comboId,
       };
     }
 
@@ -187,7 +193,9 @@
     const scope = usage.rerank_usage_scope || null;
     const valid = amount !== null && scope === 'combination';
     return {
-      key: `combination:${comboId || stableKey(row)}:${modelId}`,
+      key: valid
+        ? `combination:${comboId || stableKey(row)}:${modelId}`
+        : `usage_missing:${modelId}`,
       model_id: modelId,
       state: valid ? 'measured_usage' : 'usage_missing',
       unit: pricing.unit,
@@ -195,7 +203,7 @@
       usage: valid ? amount : null,
       usage_scope: scope,
       cost_usd: valid ? amount * pricing.usd_rate : null,
-      combo_id: comboId,
+      combo_id: valid ? comboId : null,
     };
   }
 
@@ -207,7 +215,7 @@
       || String(a.combo_id || '').localeCompare(String(b.combo_id || '')));
 
     const entries = [];
-    const seen = new Set();
+    const entriesByKey = new Map();
     rows.forEach(row => {
       modelIdsForRow(row).forEach(modelId => {
         let entry;
@@ -226,13 +234,28 @@
         } else {
           entry = ledgerEntry(row, modelId);
         }
-        if (!seen.has(entry.key)) {
-          seen.add(entry.key);
+        const existing = entriesByKey.get(entry.key);
+        if (!existing) {
+          entriesByKey.set(entry.key, entry);
           entries.push(entry);
+        } else if (
+          existing.state !== entry.state
+          || existing.usage !== entry.usage
+          || existing.usage_scope !== entry.usage_scope
+          || existing.cost_usd !== entry.cost_usd
+        ) {
+          existing.state = 'usage_missing';
+          existing.usage = null;
+          existing.cost_usd = null;
         }
       });
     });
     return entries;
+  }
+
+  function projectQualityApplicable(row) {
+    const labelled = measuredNumber(row.labelled_queries ?? row.labelled_query_count);
+    return row.quality_applicable !== false && labelled !== null && labelled > 0;
   }
 
   function qualityRecorded(row, sourceType) {
@@ -240,6 +263,7 @@
       return measuredNumber(row.winner_score) !== null
         || measuredNumber(row.recall_at_5) !== null;
     }
+    if (!projectQualityApplicable(row)) return false;
     return measuredNumber(row.ndcg_at_k) !== null
       || measuredNumber(row.mrr_at_k) !== null
       || measuredNumber(row.recall_at_k) !== null;
@@ -247,6 +271,7 @@
 
   function qualityValue(row, sourceType) {
     if (sourceType === 'official') return measuredNumber(row.winner_score);
+    if (!projectQualityApplicable(row)) return null;
     return measuredNumber(row.ndcg_at_k)
       ?? measuredNumber(row.mrr_at_k)
       ?? measuredNumber(row.recall_at_k);
@@ -296,24 +321,21 @@
   }
 
   function evidenceCoverage(source, rows) {
-    const queryCounts = rows
-      .map(row => measuredNumber(row.query_count))
-      .filter(value => value !== null);
-    const queryCount = measuredNumber(source && source.query_count)
-      ?? (queryCounts.length ? Math.max(...queryCounts) : 0);
+    const queryCounts = rows.map(row => measuredNumber(row.query_count));
+    const derivedQueryCount = queryCounts.length && !queryCounts.some(value => value === null)
+      ? Math.max(...queryCounts)
+      : null;
+    const queryCount = measuredNumber(source && source.query_count) ?? derivedQueryCount;
     const byCombo = source && source.evidence_counts_by_combo;
-    let evidenceCount;
-    if (byCombo && typeof byCombo === 'object' && !Array.isArray(byCombo)) {
-      evidenceCount = Object.values(byCombo).reduce((sum, value) => {
-        const number = measuredNumber(value);
-        return sum + (number === null ? 0 : number);
-      }, 0);
-    } else {
-      evidenceCount = rows.reduce((sum, row) => {
-        const number = measuredNumber(row.evidence_count);
-        return sum + (number === null ? 0 : number);
-      }, 0);
-    }
+    const rawEvidenceCounts = byCombo && typeof byCombo === 'object' && !Array.isArray(byCombo)
+      ? rows.map(row => Object.prototype.hasOwnProperty.call(byCombo, row.combo_id)
+        ? byCombo[row.combo_id]
+        : null)
+      : rows.map(row => row.evidence_count);
+    const measuredEvidenceCounts = rawEvidenceCounts.map(measuredNumber);
+    const evidenceCount = measuredEvidenceCounts.some(value => value === null)
+      ? null
+      : measuredEvidenceCounts.reduce((sum, value) => sum + value, 0);
     return {state: 'evidence_coverage', query_count: queryCount, evidence_count: evidenceCount};
   }
 
@@ -327,7 +349,7 @@
     const qualityCompare = sourceType === 'official'
       ? officialQualityCompare
       : projectQualityCompare;
-    const mode = safeSource.scoring_mode === 'evidence_only' ? 'evidence_only' : 'labelled';
+    const mode = safeSource.scoring_mode === 'retrieval_labels' ? 'labelled' : 'evidence_only';
 
     if (mode === 'evidence_only') {
       const speedRows = completedRows.slice().sort((a, b) =>

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260715-recommendations-restored" />
+  <link rel="stylesheet" href="/styles.css?v=20260715-recommendations-v2" />
 </head>
 <body>
   <main class="shell">
@@ -67,7 +67,7 @@
           <article><strong>P@5</strong><p>Precision at 5. Share of the top 5 retrieved chunks that are relevant.</p></article>
           <article><strong>Avg rank</strong><p>Average rank position of the first relevant chunk, calculated only when a hit exists.</p></article>
           <article><strong>No hit</strong><p>Number of evaluated queries where no relevant chunk was found in the retrieval window.</p></article>
-          <article><strong>Avg sec/query</strong><p>Average retrieval latency per query for that one pipeline configuration. It is not the total time for all 500 rows. If the table says 120 queries, this value is averaged across those 120 query runs.</p></article>
+          <article><strong>Avg sec/query</strong><p>Average retrieval plus reranking latency per query. It excludes chunking, embedding, vector upsert/indexing, queue time, and worker startup.</p></article>
           <article><strong>Chunker</strong><p>The document splitting method used before embedding, for example heading sections or fixed-token chunks.</p></article>
           <article><strong>Embedding</strong><p>The model that converts each text chunk and query into vectors for similarity search.</p></article>
           <article><strong>Vector DB</strong><p>The vector store used to store and search vectors, currently Qdrant, PGVector, Weaviate, and FAISS.</p></article>
@@ -124,30 +124,46 @@
     <section class="page" data-page-panel="compare">
       <section class="panel recommendation-panel">
         <div class="section-head">
-          <div><h2>Pipeline recommendations</h2><p>Decision-ready quality, speed, and value recommendations from the evaluated WNS benchmark.</p></div>
-          <span id="recommendationStatus" class="mini-stat">Waiting for evaluation</span>
+          <div><h2>Pipeline recommendations</h2><p>Select the dataset and ground truth used by a completed result, then compare only those combinations.</p></div>
+          <span id="recommendationStatus" class="mini-stat">Official benchmark</span>
+        </div>
+        <div class="result-source-bar">
+          <label hidden>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
+          <label>Dataset<select id="recommendationDataset"><option value="official">Official WNS corpus</option></select></label>
+          <label>Ground truth<select id="recommendationGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
+          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — 30</option></select></label>
+          <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
+          <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
         </div>
         <p id="recommendationContext" class="result-context">Viewing: Official WNS benchmark</p>
         <div id="recommendationStrip" class="recommendation-strip" aria-live="polite"></div>
       </section>
 
       <section class="panel">
-        <div class="section-head"><div><h2>Top combinations</h2><p id="recommendationModeNote">Quality, speed, and honest cost posture for the official result set.</p></div><div id="recommendationSort" class="compact-sort"></div></div>
-        <div class="table-wrap recommendation-table-wrap"><table id="recommendationTable"></table></div>
+        <div class="section-head"><div><h2>Top combinations</h2><p id="recommendationModeNote">Quality, speed, and honest cost posture for the active source.</p></div><div id="recommendationSort" class="compact-sort"></div></div>
+        <div id="recommendationFilters" class="filter-row"></div>
+        <div class="table-wrap"><table id="recommendationTable"></table></div>
       </section>
 
       <section class="panel pricing-panel">
-        <div class="section-head"><div><h2>Commercial pricing basis</h2><p>Published API rates and measured usage only. VM infrastructure is excluded.</p></div></div>
+        <div class="section-head"><div><h2>Commercial pricing basis</h2><p>Published API rates and measured usage scope. VM infrastructure is excluded.</p></div></div>
         <div id="pricingLedger" class="pricing-ledger"></div>
       </section>
 
-      <details class="panel tradeoff-details">
-        <summary>Explore accuracy, cost, and latency trade-offs</summary>
-        <div class="section-head"><span class="mini-stat" id="top10Hint">Waiting for evaluation</span><span class="mini-stat" id="comparisonHint">Waiting for evaluation</span></div>
+      <details id="tradeoffDetails" class="panel tradeoff-details">
+        <summary>Explore trade-offs</summary>
         <div class="viz-grid"><div id="top10ScoreChart" class="svg-chart"></div><div id="qualityLatencyChart" class="svg-chart"></div></div>
         <div id="comparisonGrid" class="comparison-grid"></div>
         <section class="grid two"><article><h3>Reranker lift</h3><div id="rerankerLiftChart" class="bar-list"></div></article><article><h3>Best by component</h3><div id="stageComparisonChart" class="bar-list"></div></article></section>
       </details>
+
+      <dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">
+        <form method="dialog"><button type="submit" aria-label="Close evidence">Close</button></form>
+        <h2 id="projectEvidenceTitle">Combination evidence</h2>
+        <p id="projectEvidenceStatus"></p>
+        <div id="projectEvidenceRows" class="evidence-dialog-rows"></div>
+        <button id="projectEvidenceMore" type="button" hidden>Load more</button>
+      </dialog>
     </section>
 
     <section class="page" data-page-panel="run">
@@ -322,15 +338,15 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
         </form>
         <section class="panel-soft project-query-panel">
           <div class="section-head">
-            <div><h2>Uploaded-project query</h2><p>Use data uploaded from the frontend. Evidence-only mode is used when no ground truth is attached, so the app does not fake scores.</p></div>
-            <span id="projectQueryStatus" class="mini-stat">Evidence-only mode</span>
+            <div><h2>Lexical preview</h2><p>Search only the active uploaded project with token overlap. Embeddings, vector databases, rerankers, and accuracy scoring are not executed here.</p></div>
+            <span id="projectQueryStatus" class="mini-stat">Choose an active project</span>
           </div>
           <div class="run-grid">
-            <label>Project<select id="projectSelect"></select></label>
-            <label>Query<textarea id="projectQueryInput">cancelled flight refund policy</textarea></label>
-            <label>Hits shown<input id="projectQueryTopK" value="5" /></label>
+            <label>Active project<select id="projectSelect"></select></label>
+            <label>Search this project<textarea id="projectQueryInput">cancelled flight refund policy</textarea></label>
+            <label>Hits shown<input id="projectQueryTopK" type="number" min="1" max="50" value="5" /></label>
           </div>
-          <div class="run-actions"><button id="projectQueryBtn" type="button">Query uploaded data</button></div>
+          <div class="run-actions"><button id="projectQueryBtn" type="button">Search this project</button></div>
           <div class="table-wrap"><table id="projectQueryTable"></table></div>
         </section>
         <div class="upload-guidance">
@@ -370,7 +386,7 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
       </details>
     </section>
   </main>
-  <script src="/recommendations.js?v=20260715-recommendations-restored"></script>
-  <script src="/app.js?v=20260715-recommendations-restored"></script>
+  <script src="/recommendations.js?v=20260715-recommendations-v2"></script>
+  <script src="/app.js?v=20260715-recommendations-v2"></script>
 </body>
 </html>

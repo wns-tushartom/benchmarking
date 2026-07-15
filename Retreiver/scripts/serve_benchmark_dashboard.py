@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import cgi
+import hashlib
 import json
 import os
 import re
@@ -14,11 +15,10 @@ import subprocess
 import sys
 import uuid
 import zipfile
-from itertools import product
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
@@ -32,6 +32,25 @@ from scripts.dashboard_source_catalog import (
     register_groundtruth_upload,
     resolve_dataset,
     resolve_groundtruth,
+)
+from source.services.project_documents import (
+    ProjectDocumentStorageError,
+    ProjectDocumentValidationError,
+    extract_project_documents,
+    write_project_documents,
+)
+from source.services.project_run_results import (
+    ProjectRunResultService,
+    ProjectRunResultsError,
+)
+from source.services.project_workspace import (
+    ProjectWorkspace,
+    UnsupportedUploadError,
+    UploadError,
+    UploadLimits,
+    UploadStorageError,
+    UploadTooLargeError,
+    UploadValidationError,
 )
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
@@ -56,6 +75,99 @@ JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
 load_env_files(ROOT)
 CHUNK_LOOKUP_CACHE: dict[str, dict[int, Any]] = {}
+
+
+def _nonnegative_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    if re.fullmatch(r"[0-9]+", raw or "") is None:
+        return default
+    return int(raw)
+
+
+def dashboard_upload_limits() -> UploadLimits:
+    """Build upload limits from documented nonnegative dashboard settings."""
+    max_upload = _nonnegative_env_int("DASHBOARD_MAX_UPLOAD_MB", 100) * 1024 * 1024
+    return UploadLimits(
+        max_upload_bytes=max_upload,
+        max_json_bytes=_nonnegative_env_int("DASHBOARD_MAX_JSON_KB", 1024) * 1024,
+        max_zip_entries=_nonnegative_env_int("DASHBOARD_MAX_ZIP_FILES", 500),
+        max_zip_entry_bytes=max_upload,
+        max_zip_expanded_bytes=_nonnegative_env_int("DASHBOARD_MAX_ZIP_EXPANDED_MB", 500) * 1024 * 1024,
+        max_zip_ratio=_nonnegative_env_int("DASHBOARD_MAX_ZIP_RATIO", 100),
+    )
+
+
+def api_error(code: str, message: str, request_id: str) -> dict:
+    """Return the one public error envelope used by the upload endpoint."""
+    return {"error": {"code": code, "message": message, "request_id": request_id}}
+
+
+_MAX_CONTENT_LENGTH_DIGITS = 20
+
+
+class _BoundedRequestReader:
+    """Expose at most the declared request bytes without buffering or read-ahead."""
+
+    def __init__(self, source: Any, limit: int):
+        self.source = source
+        self.remaining = limit
+        self.consumed = 0
+        self.truncated = False
+        self.tail = b""
+
+    def _size(self, requested: int | None) -> int:
+        if requested is None or requested < 0:
+            return self.remaining
+        return min(requested, self.remaining)
+
+    def _record(self, chunk: bytes, allowed: int) -> bytes:
+        if not isinstance(chunk, bytes) or len(chunk) > allowed:
+            raise OSError("invalid bounded request stream")
+        self.remaining -= len(chunk)
+        self.consumed += len(chunk)
+        self.tail = (self.tail + chunk)[-256:]
+        if not chunk and self.remaining:
+            self.truncated = True
+        return chunk
+
+    def read(self, size: int | None = -1) -> bytes:
+        allowed = self._size(size)
+        if allowed <= 0:
+            return b""
+        return self._record(self.source.read(allowed), allowed)
+
+    def readline(self, size: int | None = -1) -> bytes:
+        allowed = self._size(size)
+        if allowed <= 0:
+            return b""
+        return self._record(self.source.readline(allowed), allowed)
+
+
+def _header_values(headers: Any, name: str) -> list[Any]:
+    """Return every instance of a header when the headers object supports it."""
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all(name)
+        if values is None:
+            return []
+        if isinstance(values, (list, tuple)):
+            return list(values)
+        return [values]
+    value = headers.get(name)
+    return [] if value is None else [value]
+
+
+def _parse_content_length(headers: Any) -> int | None:
+    values = _header_values(headers, "Content-Length")
+    if len(values) != 1 or not isinstance(values[0], str):
+        return None
+    raw = values[0]
+    if len(raw) > _MAX_CONTENT_LENGTH_DIGITS or re.fullmatch(r"[0-9]+", raw) is None:
+        return None
+    try:
+        return int(raw)
+    except (OverflowError, ValueError):
+        return None
 
 
 def benchmark_options() -> dict:
@@ -318,6 +430,62 @@ def read_evaluation() -> dict:
     return base
 
 
+def benchmark_row_is_evaluated(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    error_code = str(row.get("error_code") or row.get("error") or "").strip()
+    if (
+        status in {"failed", "error", "skipped", "cancelled", "interrupted"}
+        or error_code
+    ):
+        return False
+    raw_query_count = row.get("evaluated_queries", row.get("query_count"))
+    try:
+        query_count = float(raw_query_count or 0)
+    except (TypeError, ValueError):
+        query_count = 0.0
+    metric_recorded = any(
+        row.get(field) is not None and row.get(field) != ""
+        for field in (
+            "recall_at_1",
+            "recall_at_3",
+            "recall_at_5",
+            "recall_at_10",
+            "mrr",
+            "precision_at_5",
+            "ndcg_at_5",
+        )
+    )
+    return query_count > 0 or metric_recorded
+
+
+def official_evaluated_count(evaluation: dict[str, Any]) -> int:
+    official = official_matrix_keys()
+    seen: set[tuple[str, str, str, str]] = set()
+    sources = (
+        ("groundtruth_eval", evaluation.get("summary", [])),
+        ("groundtruth_eval_reranked", evaluation.get("reranked", {}).get("summary", [])),
+        ("benchmark_reference", evaluation.get("benchmark_reference", {}).get("summary", [])),
+    )
+    for source, rows in sources:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = normalized_benchmark_row(row, source)
+            if not benchmark_row_is_evaluated(normalized):
+                continue
+            key = (
+                normalized["sheet"],
+                normalized["embedding"],
+                normalized["store"],
+                normalized["reranker"],
+            )
+            if key in official:
+                seen.add(key)
+    return len(seen)
+
+
 def canonical_reranker_name(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -341,6 +509,13 @@ def canonical_reranker_name(value: Any) -> str:
 
 
 def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]:
+    def value_or_empty(*names: str) -> Any:
+        for name in names:
+            value = row.get(name)
+            if value is not None and value != "":
+                return value
+        return ""
+
     latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms") or 0
     try:
         latency_s = float(latency_ms) / 1000.0
@@ -354,14 +529,16 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
         "embedding": embedding,
         "store": row.get("vector_store") or row.get("vector_database") or row.get("store") or "",
         "reranker": reranker,
-        "evaluated_queries": row.get("query_count") or row.get("evaluated_queries") or "",
-        "recall_at_1": row.get("recall_at_1") or "",
-        "recall_at_3": row.get("recall_at_3") or "",
-        "recall_at_5": row.get("recall_at_5") or "",
-        "recall_at_10": row.get("recall_at_10") or "",
-        "mrr": row.get("mrr") or "",
-        "precision_at_5": row.get("precision_at_5") or "",
-        "ndcg_at_5": row.get("ndcg_at_5") or row.get("ndcg_at_10") or "",
+        "status": value_or_empty("status"),
+        "error_code": value_or_empty("error_code", "error"),
+        "evaluated_queries": value_or_empty("query_count", "evaluated_queries"),
+        "recall_at_1": value_or_empty("recall_at_1"),
+        "recall_at_3": value_or_empty("recall_at_3"),
+        "recall_at_5": value_or_empty("recall_at_5"),
+        "recall_at_10": value_or_empty("recall_at_10"),
+        "mrr": value_or_empty("mrr"),
+        "precision_at_5": value_or_empty("precision_at_5"),
+        "ndcg_at_5": value_or_empty("ndcg_at_5", "ndcg_at_10"),
         "avg_latency_seconds": latency_s,
         "cost": "commercial" if re.search(r"openai|amazon", f"{embedding} {reranker}", re.I) else "oss",
     }
@@ -413,6 +590,8 @@ def read_benchmark_reference() -> dict[str, Any]:
                 skipped_non_official += 1
                 continue
             if key in seen:
+                continue
+            if not benchmark_row_is_evaluated(normalized):
                 continue
             seen.add(key)
             rows.append(normalized)
@@ -924,18 +1103,11 @@ def safe_label(value: str) -> str:
 
 
 def new_project_id(label: str) -> str:
-    return f"{safe_label(label)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    return ProjectWorkspace(USER_PROJECTS_DIR).new_project_id(label)
 
 
 def project_root(project_id: str) -> Path:
-    clean = safe_label(project_id)
-    if clean != project_id:
-        raise ValueError("Invalid project_id")
-    root = (USER_PROJECTS_DIR / clean).resolve()
-    base = USER_PROJECTS_DIR.resolve()
-    if base not in root.parents and root != base:
-        raise ValueError("Invalid project path")
-    return root
+    return ProjectWorkspace(USER_PROJECTS_DIR).project_root(project_id)
 
 
 def display_path(path: Path) -> str:
@@ -957,26 +1129,6 @@ def project_storage_layout(root: Path) -> dict[str, str]:
     }
 
 
-def safe_extract_zip(zip_path: Path, target_dir: Path) -> list[str]:
-    extracted: list[str] = []
-    with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            name = Path(info.filename)
-            if name.is_absolute() or ".." in name.parts:
-                continue
-            suffix = name.suffix.lower()
-            if suffix not in {".pdf", ".csv", ".xlsx", ".txt", ".md"}:
-                continue
-            dest = target_dir / "extracted" / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, dest.open("wb") as out:
-                shutil.copyfileobj(src, out)
-            extracted.append(display_path(dest))
-    return extracted
-
-
 def read_text_upload(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md", ".csv"}:
@@ -984,15 +1136,21 @@ def read_text_upload(path: Path) -> str:
     if suffix == ".pdf":
         try:
             from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            raise UploadStorageError(UploadStorageError.public_message) from None
+        try:
             reader = PdfReader(str(path))
             pages = []
             for i, page in enumerate(reader.pages, 1):
                 text = page.extract_text() or ""
                 if text.strip():
                     pages.append(f"[page {i}]\n{text}")
-            return "\n\n".join(pages)
-        except Exception as exc:
-            return f"[PDF text extraction failed for {path.name}: {exc}]"
+        except Exception:
+            raise UploadValidationError(UploadValidationError.public_message) from None
+        extracted = "\n\n".join(pages)
+        if not extracted.strip():
+            raise UploadValidationError(UploadValidationError.public_message)
+        return extracted
     return ""
 
 
@@ -1028,7 +1186,11 @@ def split_project_chunks(text: str, source_name: str) -> list[dict[str, Any]]:
     return chunks
 
 
-def write_project_workbook(project_dir: Path, chunks: list[dict[str, Any]]) -> str:
+def write_project_workbook(
+    project_dir: Path,
+    chunks: list[dict[str, Any]],
+    display_project_dir: Path | None = None,
+) -> str:
     if not chunks:
         return ""
     try:
@@ -1046,10 +1208,14 @@ def write_project_workbook(project_dir: Path, chunks: list[dict[str, Any]]) -> s
                 pd.DataFrame(rows).to_excel(writer, sheet_name=sheet[:31], index=False)
     except Exception:
         return ""
-    return display_path(out)
+    display_root = display_project_dir or project_dir
+    return display_path(display_root / out.relative_to(project_dir))
 
 
-def rebuild_project_search_index(project_dir: Path) -> dict[str, Any]:
+def rebuild_project_search_index(
+    project_dir: Path,
+    display_project_dir: Path | None = None,
+) -> dict[str, Any]:
     raw_dir = project_dir / "raw_uploads"
     extracted_text_dir = project_dir / "extracted_text"
     extracted_text_dir.mkdir(parents=True, exist_ok=True)
@@ -1061,13 +1227,16 @@ def rebuild_project_search_index(project_dir: Path) -> dict[str, Any]:
         if not text.strip():
             continue
         rel_name = path.name
-        source_files.append(str(path.relative_to(project_dir)))
-        text_path = extracted_text_dir / f"{path.stem}.txt"
+        source_relative = path.relative_to(project_dir)
+        source_files.append(str(source_relative))
+        text_relative = path.relative_to(raw_dir).with_suffix(".txt")
+        text_path = extracted_text_dir / text_relative
+        text_path.parent.mkdir(parents=True, exist_ok=True)
         text_path.write_text(text, encoding="utf-8")
         for chunk in split_project_chunks(text, rel_name):
             chunk["id"] = len(chunks) + 1
             chunk["chunk_id"] = chunk["id"]
-            chunk["project_source_path"] = str(path.relative_to(project_dir))
+            chunk["project_source_path"] = str(source_relative)
             chunks.append(chunk)
     index_path = project_dir / "search_index.json"
     index = {
@@ -1075,57 +1244,167 @@ def rebuild_project_search_index(project_dir: Path) -> dict[str, Any]:
         "chunk_count": len(chunks),
         "source_files": source_files,
         "chunks": chunks,
-        "workbook": write_project_workbook(project_dir, chunks),
+        "workbook": write_project_workbook(project_dir, chunks, display_project_dir),
     }
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
     return index
 
 
-def write_project_manifest(project_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    manifest = {
-        **payload,
-        "storage_layout": project_storage_layout(project_dir),
-        "manifest_path": display_path(project_dir / "manifest.json"),
+def create_user_project_upload(
+    original_name: str,
+    content: bytes,
+    label: str = "",
+    limits: UploadLimits | None = None,
+) -> dict[str, Any]:
+    if Path(original_name).suffix.lower() not in {".txt", ".pdf", ".zip"}:
+        raise UnsupportedUploadError(UnsupportedUploadError.public_message)
+    workspace = ProjectWorkspace(USER_PROJECTS_DIR, limits or dashboard_upload_limits())
+    finalized_context: dict[str, Any] = {}
+
+    def finalize_upload(staging: Path, final_root: Path, published: dict) -> dict:
+        saved_relative = Path(published["saved_path"])
+        saved_path = staging / saved_relative
+        if staging not in saved_path.resolve().parents:
+            raise UploadValidationError(UploadValidationError.public_message)
+        final_saved_path = final_root / saved_relative
+
+        # Keep the historical dashboard layout alias while the strict service uses indexes/.
+        (staging / "vector_indexes").mkdir()
+        extracted_relative = [Path(relative) for relative in published.get("extracted_files", [])]
+        for relative in extracted_relative:
+            candidate = staging / relative
+            if staging not in candidate.resolve().parents:
+                raise UploadValidationError(UploadValidationError.public_message)
+        extracted = [display_path(final_root / relative) for relative in extracted_relative]
+
+        saved_suffix = saved_path.suffix.lower()
+        document_sources: list[Path] = []
+        if saved_suffix in {".txt", ".pdf"}:
+            document_sources = [saved_path]
+        elif saved_suffix == ".zip":
+            if not extracted_relative or any(
+                relative.suffix.lower() not in {".txt", ".pdf"}
+                for relative in extracted_relative
+            ):
+                raise UploadValidationError(UploadValidationError.public_message)
+            document_sources = [staging / relative for relative in extracted_relative]
+
+        if not document_sources:
+            raise UploadValidationError(UploadValidationError.public_message)
+
+        documents = []
+        source_records: list[dict[str, Any]] = []
+        extraction_failures: list[dict[str, str]] = []
+        for source_path in sorted(
+            document_sources,
+            key=lambda path: path.relative_to(staging / "raw_uploads").as_posix(),
+        ):
+            relative = source_path.relative_to(staging / "raw_uploads")
+            if relative.parts and relative.parts[0] == "extracted":
+                relative = Path(*relative.parts[1:])
+            source_name = relative.as_posix()
+            try:
+                raw_source = source_path.read_bytes()
+            except OSError:
+                raise UploadStorageError(UploadStorageError.public_message) from None
+            source_record = {
+                "source_name": source_name,
+                "raw_sha256": hashlib.sha256(raw_source).hexdigest(),
+                "raw_size_bytes": len(raw_source),
+                "parser_versions": [],
+                "page_count": 0,
+            }
+            try:
+                source_documents = extract_project_documents(staging, [source_path])
+            except ProjectDocumentStorageError:
+                raise UploadStorageError(UploadStorageError.public_message) from None
+            except ProjectDocumentValidationError:
+                source_records.append({**source_record, "status": "failed"})
+                extraction_failures.append(
+                    {"source_name": source_name, "code": "extraction_failed"}
+                )
+                continue
+            documents.extend(source_documents)
+            source_records.append(
+                {
+                    **source_record,
+                    "status": "complete",
+                    "parser_versions": sorted(
+                        {
+                            str(document.metadata["parser_method"])
+                            for document in source_documents
+                        }
+                    ),
+                    "page_count": len(source_documents),
+                }
+            )
+
+        if extraction_failures:
+            corpus_manifest: dict[str, Any] = {
+                "ok": False,
+                "extraction_status": "failed",
+                "document_count": 0,
+                "source_count": len(document_sources),
+                "page_count": sum(record["page_count"] for record in source_records),
+                "corpus_sha256": None,
+                "parser_versions": [],
+                "sources": source_records,
+                "extraction_failures": extraction_failures,
+            }
+        else:
+            corpus_manifest = {
+                **write_project_documents(
+                    staging / "extracted_text" / "documents.jsonl",
+                    documents,
+                ),
+                "extraction_status": "complete",
+                "page_count": len(documents),
+                "parser_versions": sorted(
+                    {str(document.metadata["parser_method"]) for document in documents}
+                ),
+                "sources": source_records,
+                "extraction_failures": [],
+            }
+
+        manifest = {
+            **published,
+            "saved_path": display_path(final_saved_path),
+            "extracted_files": extracted[:200],
+            "storage_layout": project_storage_layout(final_root),
+            "question_file": "",
+            "search_index": "",
+            "canonical_corpus": (
+                display_path(final_root / "extracted_text" / "documents.jsonl")
+                if corpus_manifest["extraction_status"] == "complete"
+                else ""
+            ),
+            **corpus_manifest,
+            "chunk_count": 0,
+            "workbook": "",
+            "manifest_path": display_path(final_root / "manifest.json"),
+        }
+        finalized_context.update(
+            saved_path=final_saved_path,
+            root=final_root,
+            extracted=extracted,
+        )
+        return manifest
+
+    published = workspace.create_upload(
+        original_name=original_name,
+        content=content,
+        label=label,
+        finalizer=finalize_upload,
+    )
+    return {
+        **published,
+        "next_steps": upload_next_steps(
+            finalized_context["saved_path"],
+            finalized_context["root"],
+            finalized_context["extracted"],
+        ),
     }
-    (project_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    return manifest
 
-
-def create_user_project_upload(original_name: str, content: bytes, label: str = "") -> dict[str, Any]:
-    original = Path(original_name).name
-    suffix = Path(original).suffix.lower()
-    if suffix not in {".pdf", ".zip", ".csv", ".txt", ".md"}:
-        raise ValueError("Supported dataset uploads: .pdf, .zip, .csv, .txt, .md. Use ground-truth upload for .xlsx files.")
-    project_label = label or Path(original).stem
-    project_id = new_project_id(project_label)
-    root = USER_PROJECTS_DIR / project_id
-    for name in ["raw_uploads", "extracted_text", "chunks", "vector_indexes", "questions", "runs"]:
-        (root / name).mkdir(parents=True, exist_ok=True)
-    saved_path = root / "raw_uploads" / original
-    saved_path.write_bytes(content)
-    extracted = safe_extract_zip(saved_path, root / "raw_uploads") if suffix == ".zip" else []
-    question_path = ""
-    if suffix in {".csv", ".txt"}:
-        # Keep a copy in questions/ as a candidate query file; text files are also indexed as docs.
-        q_target = root / "questions" / original
-        q_target.write_bytes(content)
-        question_path = display_path(q_target)
-    index = rebuild_project_search_index(root)
-    manifest = write_project_manifest(root, {
-        "ok": True,
-        "project_id": project_id,
-        "label": project_label,
-        "created_at": datetime.now().isoformat(),
-        "saved_path": display_path(saved_path),
-        "bytes": saved_path.stat().st_size,
-        "extracted_files": extracted[:200],
-        "extracted_count": len(extracted),
-        "question_file": question_path,
-        "search_index": display_path(root / "search_index.json"),
-        "chunk_count": index.get("chunk_count", 0),
-        "workbook": index.get("workbook", ""),
-    })
-    return {**manifest, "next_steps": upload_next_steps(saved_path, root, extracted)}
 
 
 def list_user_projects() -> list[dict[str, Any]]:
@@ -1137,98 +1416,12 @@ def list_user_projects() -> list[dict[str, Any]]:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception as exc:
             manifest = {"project_id": manifest_path.parent.name, "error": str(exc)}
-        index = read_json_file(manifest_path.parent / "search_index.json")
-        manifest["chunk_count"] = index.get("chunk_count", manifest.get("chunk_count", 0))
         projects.append(manifest)
     return projects
 
 
-def selected_list(values: Any, fallback: list[str]) -> list[str]:
-    if isinstance(values, str):
-        raw = [values]
-    elif isinstance(values, list):
-        raw = [str(v) for v in values]
-    else:
-        raw = []
-    raw = [v for v in raw if v and v != "all"]
-    return raw or fallback
-
-
-def score_project_hit(query: str, paragraph: str) -> float:
-    terms = {t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", query)}
-    text_terms = {t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", paragraph)}
-    if not terms or not text_terms:
-        return 0.0
-    overlap = len(terms & text_terms)
-    return overlap / max(1, len(terms)) + min(0.25, overlap / max(1, len(text_terms)))
-
-
-def query_user_project(project_id: str, query: str, selections: dict[str, Any] | None = None, top_k: int = 5) -> dict[str, Any]:
-    if not query.strip():
-        raise ValueError("query is required")
-    root = project_root(project_id)
-    index = read_json_file(root / "search_index.json")
-    chunks = index.get("chunks") or []
-    if not chunks:
-        raise ValueError("Project has no indexed text yet. Upload PDFs/TXT/CSV with extractable text first.")
-    scored = sorted(
-        [
-            {
-                "rank": 0,
-                "score": round(score_project_hit(query, c.get("paragraph", "")), 6),
-                "pdf_name": c.get("pdf_name", ""),
-                "chunk_id": c.get("chunk_id", c.get("id", "")),
-                "paragraph": c.get("paragraph", ""),
-                "page_number": c.get("page_number", ""),
-                "source_type": c.get("source_type", "uploaded_document"),
-                "parser_method": c.get("parser_method", "dashboard_upload_text_index"),
-            }
-            for c in chunks
-        ],
-        key=lambda h: h["score"],
-        reverse=True,
-    )[: max(1, int(top_k or 5))]
-    for i, hit in enumerate(scored, 1):
-        hit["rank"] = i
-    opts = benchmark_options()
-    selections = selections or {}
-    chunkers = selected_list(selections.get("chunkers") or selections.get("sheets") or selections.get("sheet"), opts.get("chunkers", []))
-    embeddings = selected_list(selections.get("embeddings") or selections.get("embedding"), opts.get("embeddings", []))
-    stores = selected_list(selections.get("vector_stores") or selections.get("stores") or selections.get("store"), opts.get("vector_stores", []))
-    rerankers = selected_list(selections.get("rerankers") or selections.get("reranker"), opts.get("rerankers", []))
-    combos = list(product(chunkers, embeddings, stores, rerankers))
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
-    rows = [
-        {
-            "project_id": project_id,
-            "run_id": run_id,
-            "query": query,
-            "sheet": sheet,
-            "embedding": embedding,
-            "store": store,
-            "reranker": canonical_reranker_name(reranker),
-            "evidence_type": "uploaded project evidence-only",
-            "retrieved_count": len(scored),
-            "hits": scored,
-        }
-        for sheet, embedding, store, reranker in combos
-    ]
-    out_dir = root / "runs" / run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "ok": True,
-        "mode": "evidence_only",
-        "message": "Evidence-only mode: no ground truth was provided, so accuracy scoring is not available.",
-        "project_id": project_id,
-        "run_id": run_id,
-        "query": query,
-        "combo_count": len(combos),
-        "top_k": top_k,
-        "rows": rows,
-    }
-    (out_dir / "evidence.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    (out_dir / "manifest.json").write_text(json.dumps({"project_id": project_id, "run_id": run_id, "selections": selections, "mode": "evidence_only", "created_at": datetime.now().isoformat()}, indent=2, ensure_ascii=False), encoding="utf-8")
-    return payload
+def query_user_project(project_id: str, query: str, top_k: int = 5) -> dict[str, Any]:
+    return ProjectWorkspace(USER_PROJECTS_DIR).lexical_preview(project_id, query, top_k)
 
 
 def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str]) -> list[str]:
@@ -1244,11 +1437,43 @@ def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str])
     return steps
 
 
+def project_result_service() -> ProjectRunResultService:
+    return ProjectRunResultService(ProjectWorkspace(USER_PROJECTS_DIR))
+
+
+def exact_query_value(query: dict[str, list[str]], name: str) -> str:
+    values = query.get(name, [])
+    if len(values) != 1 or not values[0]:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return values[0]
+
+
+def _bounded_result_integer(
+    query: dict[str, list[str]],
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = exact_query_value(query, name)
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return value
+
+
+def _require_result_query_keys(query: dict[str, list[str]], allowed: set[str]) -> None:
+    if set(query) != allowed:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1264,6 +1489,77 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {
+            "/api/result-sources",
+            "/api/project-runs",
+            "/api/project-run-results",
+            "/api/project-run-evidence",
+        }:
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                service = project_result_service()
+                if parsed.path == "/api/result-sources":
+                    _require_result_query_keys(query, set())
+                    evaluation = read_evaluation()
+                    reference = evaluation.get("benchmark_reference", {})
+                    report = reference.get("report", {})
+                    configured = (
+                        report.get("official_matrix_rows")
+                        if isinstance(report, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(configured, bool)
+                        or not isinstance(configured, int)
+                        or configured < 0
+                    ):
+                        configured = len(official_matrix_keys())
+                    payload = service.result_sources(
+                        official_configured=configured,
+                        official_evaluated=official_evaluated_count(evaluation),
+                    )
+                elif parsed.path == "/api/project-runs":
+                    _require_result_query_keys(query, {"project_id"})
+                    payload = service.project_runs(exact_query_value(query, "project_id"))
+                elif parsed.path == "/api/project-run-results":
+                    _require_result_query_keys(query, {"project_id", "run_id"})
+                    payload = service.project_run_results(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                    )
+                else:
+                    _require_result_query_keys(
+                        query,
+                        {"project_id", "run_id", "combo_id", "limit", "offset"},
+                    )
+                    payload = service.project_run_evidence(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                        exact_query_value(query, "combo_id"),
+                        limit=_bounded_result_integer(
+                            query, "limit", minimum=1, maximum=100
+                        ),
+                        offset=_bounded_result_integer(
+                            query, "offset", minimum=0, maximum=10_000_000
+                        ),
+                    )
+                self.send_json(payload)
+            except ProjectRunResultsError as exc:
+                self.send_json(
+                    {"error": {"code": exc.code, "message": exc.public_message}},
+                    exc.status,
+                )
+            except Exception:
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "run_unavailable",
+                            "message": "Result service is unavailable",
+                        }
+                    },
+                    500,
+                )
+            return
         if parsed.path == "/api/run/status":
             job_id = parse_qs(parsed.query).get("job_id", [""])[0]
             self.send_json(job_status(job_id))
@@ -1413,43 +1709,260 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/api/upload-dataset":
+            request_id = uuid.uuid4().hex
+            content_length = _parse_content_length(self.headers)
+            if content_length is None:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+
             try:
-                form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")})
+                limits = dashboard_upload_limits()
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            if content_length > limits.max_upload_bytes:
+                self.close_connection = True
+                self.send_json(
+                    api_error(
+                        "upload_too_large",
+                        "Upload exceeds the configured size limit",
+                        request_id,
+                    ),
+                    413,
+                )
+                return
+
+            raw_content_type = self.headers.get("Content-Type", "")
+            try:
+                media_type, content_params = cgi.parse_header(raw_content_type)
+            except (TypeError, ValueError):
+                media_type = ""
+                content_params = {}
+            if media_type.lower() != "multipart/form-data":
+                self.close_connection = True
+                self.send_json(
+                    api_error(
+                        "unsupported_media_type",
+                        "Content-Type must be multipart/form-data",
+                        request_id,
+                    ),
+                    415,
+                )
+                return
+
+            boundary = content_params.get("boundary")
+            if (
+                not isinstance(boundary, str)
+                or not boundary
+                or len(boundary) > 70
+                or any(ord(char) < 33 or ord(char) > 126 for char in boundary)
+            ):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+            terminal_boundary = b"\r\n--" + boundary.encode("ascii") + b"--"
+
+            bounded_reader = _BoundedRequestReader(self.rfile, content_length)
+            try:
+                form = cgi.FieldStorage(
+                    fp=cast(Any, bounded_reader),
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": raw_content_type,
+                        "CONTENT_LENGTH": str(content_length),
+                    },
+                )
+                if bounded_reader.remaining != 0 or not (
+                    bounded_reader.tail.endswith(terminal_boundary)
+                    or bounded_reader.tail.endswith(terminal_boundary + b"\r\n")
+                ):
+                    raise ValueError("truncated multipart request")
                 file_item = form["file"] if "file" in form else None
-                if file_item is None or not getattr(file_item, "filename", ""):
-                    self.send_json({"error": "No file uploaded"}, 400)
+                original = getattr(file_item, "filename", "") if file_item is not None else ""
+                file_object = getattr(file_item, "file", None) if file_item is not None else None
+                if not isinstance(original, str) or not original or file_object is None:
+                    raise ValueError("missing upload file")
+                content = file_object.read(limits.max_upload_bytes + 1)
+                if not isinstance(content, bytes):
+                    raise ValueError("upload content must be bytes")
+                if len(content) > limits.max_upload_bytes:
+                    self.send_json(
+                        api_error(
+                            "upload_too_large",
+                            "Upload exceeds the configured size limit",
+                            request_id,
+                        ),
+                        413,
+                    )
                     return
-                original = Path(file_item.filename).name
                 label_field = form.getfirst("label", Path(original).stem)
                 upload_type = str(form.getfirst("upload_type", "dataset"))
-                content = file_item.file.read()
+                if upload_type not in {"dataset", "groundtruth"}:
+                    raise ValueError("invalid upload type")
+            except (AttributeError, EOFError, KeyError, OSError, TypeError, ValueError):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed upload request", request_id),
+                    400,
+                )
+                return
+            except Exception:
+                self.close_connection = True
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            try:
                 if upload_type == "groundtruth":
-                    payload = register_groundtruth_upload(ROOT, original, content, str(label_field))
-                elif upload_type == "dataset":
-                    payload = create_user_project_upload(original_name=original, content=content, label=str(label_field))
-                    payload["source_id"] = f"project:{payload['project_id']}"
+                    payload = register_groundtruth_upload(
+                        ROOT, original, content, str(label_field)
+                    )
                 else:
-                    raise ValueError("upload_type must be dataset or groundtruth")
-                self.send_json(payload)
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, 500)
+                    payload = create_user_project_upload(
+                        original_name=original,
+                        content=content,
+                        label=str(label_field),
+                    )
+                    project_id = payload.get("project_id")
+                    if project_id:
+                        payload["source_id"] = f"project:{project_id}"
+            except ValueError:
+                self.send_json(
+                    api_error("upload_validation_failed", "Upload validation failed", request_id),
+                    422,
+                )
+                return
+            except UploadTooLargeError:
+                self.send_json(
+                    api_error(
+                        "upload_too_large",
+                        "Upload exceeds the configured size limit",
+                        request_id,
+                    ),
+                    413,
+                )
+                return
+            except UnsupportedUploadError:
+                self.send_json(
+                    api_error("unsupported_media_type", "Unsupported upload type", request_id),
+                    415,
+                )
+                return
+            except UploadValidationError:
+                self.send_json(
+                    api_error("upload_validation_failed", "Upload validation failed", request_id),
+                    422,
+                )
+                return
+            except (UploadStorageError, UploadError):
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+
+            self.send_json(payload)
             return
         if parsed.path == "/api/project-query":
-            try:
-                length = int(self.headers.get("Content-Length", "0") or 0)
-                body = self.rfile.read(length).decode("utf-8") if length else "{}"
-                payload = json.loads(body or "{}")
-                result = query_user_project(
-                    project_id=str(payload.get("project_id") or ""),
-                    query=str(payload.get("query") or ""),
-                    selections=payload.get("selections") or {},
-                    top_k=int(payload.get("top_k") or 5),
+            request_id = uuid.uuid4().hex
+            content_length = _parse_content_length(self.headers)
+            if content_length is None:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
                 )
-                self.send_json(result)
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, 400)
+                return
+            media_type = str(self.headers.get("Content-Type", "")).partition(";")[0].strip().lower()
+            if media_type != "application/json":
+                self.send_json(
+                    api_error("unsupported_media_type", "Project query request must be JSON", request_id),
+                    415,
+                )
+                return
+            try:
+                limits = dashboard_upload_limits()
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            if content_length > limits.max_json_bytes:
+                self.close_connection = True
+                self.send_json(
+                    api_error("request_too_large", "Project query request is too large", request_id),
+                    413,
+                )
+                return
+
+            reader = _BoundedRequestReader(self.rfile, content_length)
+            body = reader.read(content_length)
+            if reader.remaining != 0:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
+                )
+                return
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                if (
+                    not isinstance(payload, dict)
+                    or not set(payload).issubset({"project_id", "query", "top_k"})
+                ):
+                    raise ValueError("invalid project query request")
+                project_id = payload.get("project_id")
+                query = payload.get("query")
+                top_k = payload.get("top_k", 5)
+                if (
+                    not isinstance(project_id, str)
+                    or not isinstance(query, str)
+                    or isinstance(top_k, bool)
+                    or not isinstance(top_k, int)
+                ):
+                    raise ValueError("invalid project query fields")
+                result = query_user_project(
+                    project_id=project_id,
+                    query=query,
+                    top_k=top_k,
+                )
+            except FileNotFoundError:
+                self.send_json(
+                    api_error("project_not_found", "Project was not found", request_id),
+                    404,
+                )
+                return
+            except (UnicodeError, json.JSONDecodeError):
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project query request", request_id),
+                    400,
+                )
+                return
+            except ValueError:
+                self.send_json(
+                    api_error("invalid_request", "Invalid project query request", request_id),
+                    400,
+                )
+                return
+            except UploadValidationError:
+                self.send_json(
+                    api_error("project_data_invalid", "Project data is invalid", request_id),
+                    422,
+                )
+                return
+            except UploadError:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            self.send_json(result)
             return
         qs = parse_qs(parsed.query)
         limit = qs.get("limit", ["50"])[0]

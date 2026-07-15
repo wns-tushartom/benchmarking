@@ -272,6 +272,20 @@ class ProjectRunResultService:
     MAX_EVIDENCE_PART_BYTES = 4 * 1024 * 1024
     MAX_EVIDENCE_PAGE = 100
 
+    @staticmethod
+    def _result_source_identity(request: Any) -> dict[str, str]:
+        source = request.questions_source
+        if source.get("type") == "question_set":
+            question_set_id = source["question_set_id"]
+            return {
+                "groundtruth_id": f"groundtruth:question-set:{question_set_id}",
+                "groundtruth_label": f"Question set · {question_set_id}",
+            }
+        return {
+            "groundtruth_id": "groundtruth:none",
+            "groundtruth_label": "None (evidence-only)",
+        }
+
     def __init__(self, workspace: ProjectWorkspace, *, catalog_path: Path = _DEFAULT_CATALOG):
         if not isinstance(workspace, ProjectWorkspace):
             raise TypeError("workspace must be a ProjectWorkspace")
@@ -408,6 +422,7 @@ class ProjectRunResultService:
                 projects.append(
                     {
                         "project_id": entry.name,
+                        "dataset_id": f"project:{entry.name}",
                         "label": manifest["label"].strip(),
                         "created_at": manifest.get("created_at") if created else None,
                         "artifact_time": _iso_timestamp(artifact_time),
@@ -446,9 +461,11 @@ class ProjectRunResultService:
                 created = _safe_time(manifest.get("created_at"))
                 artifact_timestamp = entry.joinpath("manifest.json").lstat().st_mtime
                 semantic = completed or created
+                source_identity = self._result_source_identity(context["validated"].request)
                 runs.append(
                     {
                         "project_id": project_id,
+                        "dataset_id": f"project:{project_id}",
                         "run_id": entry.name,
                         "state": manifest["state"],
                         "scoring_mode": result["scoring_mode"],
@@ -457,6 +474,7 @@ class ProjectRunResultService:
                         "completed_at": manifest.get("completed_at") if completed else None,
                         "timestamp_label": manifest.get("completed_at") if completed else (manifest.get("created_at") if created else "Legacy artifact time"),
                         "artifact_time": _iso_timestamp(artifact_timestamp),
+                        **source_identity,
                         "_sort": semantic.timestamp() if semantic else artifact_timestamp,
                     }
                 )
@@ -1013,9 +1031,11 @@ class ProjectRunResultService:
             {key: value for key, value in row.items() if key != "physical_namespace"}
             for row in rows
         ]
+        source_identity = self._result_source_identity(context["validated"].request)
         return {
             "source_type": "uploaded_project",
             "project_id": project_id,
+            "dataset_id": f"project:{project_id}",
             "project_label": context["project_manifest"]["label"].strip(),
             "run_id": run_id,
             "run_state": manifest["state"],
@@ -1031,6 +1051,7 @@ class ProjectRunResultService:
             "rows": public_rows,
             "evidence_counts_by_combo": counts,
             "measured_usage_ledger": ledger,
+            **source_identity,
         }
 
     def project_run_evidence(
