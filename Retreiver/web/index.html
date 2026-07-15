@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260714-official-baseline" />
+  <link rel="stylesheet" href="/styles.css?v=20260709-query-ui" />
 </head>
 <body>
   <main class="shell">
@@ -35,7 +35,7 @@
     <nav class="page-tabs" aria-label="Benchmark pages">
       <button class="tab-btn active" data-page="overview" type="button">Overview</button>
       <button class="tab-btn" data-page="quality" type="button">Metrics</button>
-      <button class="tab-btn" data-page="compare" type="button">Recommendations</button>
+      <button class="tab-btn" data-page="compare" type="button">Accuracy, cost, latency</button>
       <button class="tab-btn" data-page="run" type="button">Run pipeline</button>
       <button class="tab-btn" data-page="evidence" type="button">Top 5 hits evidence</button>
       <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
@@ -67,7 +67,7 @@
           <article><strong>P@5</strong><p>Precision at 5. Share of the top 5 retrieved chunks that are relevant.</p></article>
           <article><strong>Avg rank</strong><p>Average rank position of the first relevant chunk, calculated only when a hit exists.</p></article>
           <article><strong>No hit</strong><p>Number of evaluated queries where no relevant chunk was found in the retrieval window.</p></article>
-          <article><strong>Avg sec/query</strong><p>Average retrieval plus reranking latency per query. It excludes chunking, embedding, vector upsert/indexing, queue time, and worker startup.</p></article>
+          <article><strong>Avg sec/query</strong><p>Average retrieval latency per query for that one pipeline configuration. It is not the total time for all 500 rows. If the table says 120 queries, this value is averaged across those 120 query runs.</p></article>
           <article><strong>Chunker</strong><p>The document splitting method used before embedding, for example heading sections or fixed-token chunks.</p></article>
           <article><strong>Embedding</strong><p>The model that converts each text chunk and query into vectors for similarity search.</p></article>
           <article><strong>Vector DB</strong><p>The vector store used to store and search vectors, currently Qdrant, PGVector, Weaviate, and FAISS.</p></article>
@@ -122,46 +122,33 @@
     </section>
 
     <section class="page" data-page-panel="compare">
-      <section class="panel recommendation-panel">
-        <div class="section-head">
-          <div><h2>Pipeline recommendations</h2><p>Choose one result source, then compare only combinations run against that data.</p></div>
-          <span id="recommendationStatus" class="mini-stat">Official benchmark</span>
-        </div>
-        <div class="result-source-bar">
-          <label>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
-          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — 30</option></select></label>
-          <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
-          <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
-        </div>
-        <p id="recommendationContext" class="result-context">Viewing: Official WNS benchmark</p>
-        <div id="recommendationStrip" class="recommendation-strip" aria-live="polite"></div>
-      </section>
-
       <section class="panel">
-        <div class="section-head"><div><h2>Top combinations</h2><p id="recommendationModeNote">Quality, speed, and honest cost posture for the active source.</p></div><div id="recommendationSort" class="compact-sort"></div></div>
-        <div id="recommendationFilters" class="filter-row"></div>
-        <div class="table-wrap"><table id="recommendationTable"></table></div>
+        <div class="section-head">
+          <div><h2>Top 10 pipeline visualization</h2><p>Graphical comparison of the best complete pipelines by accuracy score, Recall@5, MRR, and average query latency. Cost appears when commercial runs are configured.</p></div>
+          <span class="mini-stat" id="top10Hint">Waiting for evaluation</span>
+        </div>
+        <div class="viz-grid">
+          <div id="top10ScoreChart" class="svg-chart"></div>
+          <div id="qualityLatencyChart" class="svg-chart"></div>
+        </div>
       </section>
-
-      <section class="panel pricing-panel">
-        <div class="section-head"><div><h2>Commercial pricing basis</h2><p>Published API rates and measured usage scope. VM infrastructure is excluded.</p></div></div>
-        <div id="pricingLedger" class="pricing-ledger"></div>
-      </section>
-
-      <details id="tradeoffDetails" class="panel tradeoff-details">
-        <summary>Explore trade-offs</summary>
-        <div class="viz-grid"><div id="top10ScoreChart" class="svg-chart"></div><div id="qualityLatencyChart" class="svg-chart"></div></div>
+      <section class="panel">
+        <div class="section-head">
+          <div><h2>Accuracy, cost, latency comparison</h2><p>Visual comparison of evaluated pipelines across quality, latency, and commercial cost readiness. Built only from real ground-truth summary rows.</p></div>
+          <span class="mini-stat" id="comparisonHint">Waiting for evaluation</span>
+        </div>
         <div id="comparisonGrid" class="comparison-grid"></div>
-        <section class="grid two"><article><h3>Reranker lift</h3><div id="rerankerLiftChart" class="bar-list"></div></article><article><h3>Best by component</h3><div id="stageComparisonChart" class="bar-list"></div></article></section>
-      </details>
-
-      <dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">
-        <form method="dialog"><button type="submit" aria-label="Close evidence">Close</button></form>
-        <h2 id="projectEvidenceTitle">Combination evidence</h2>
-        <p id="projectEvidenceStatus"></p>
-        <div id="projectEvidenceRows" class="evidence-dialog-rows"></div>
-        <button id="projectEvidenceMore" type="button" hidden>Load more</button>
-      </dialog>
+      </section>
+      <section class="grid two">
+        <article class="panel">
+          <div class="section-head"><div><h2>Reranker lift</h2><p>Compares no reranker, BGE, and Qwen against the evaluated pipeline set.</p></div></div>
+          <div id="rerankerLiftChart" class="bar-list"></div>
+        </article>
+        <article class="panel">
+          <div class="section-head"><div><h2>Best by component</h2><p>Average performance grouped by component: chunker, embedding, vector DB, and reranker.</p></div></div>
+          <div id="stageComparisonChart" class="bar-list"></div>
+        </article>
+      </section>
     </section>
 
     <section class="page" data-page-panel="run">
@@ -175,15 +162,17 @@
           <label>Embeddings<select id="runEmbedding" multiple size="4"></select><small>Turn embedding adapters on/off from frontend</small></label>
           <label>Vector DBs<select id="runStore" multiple size="4"></select><small>Run against selected stores</small></label>
           <label>Rerankers<select id="runRerankerMain" multiple size="4"></select><small>Choose BGE/Qwen/Amazon/none</small></label>
-          <label>Ground truth file<input id="runGroundtruth" value="data/groundtruth/groundtruth_500.csv" /></label>
+          <label>Dataset<select id="runDataset"></select><small id="runDatasetHint">Choose the corpus to ingest and retrieve</small></label>
+          <label>Ground truth<select id="runGroundtruth"></select><small>Choose a validated file or None for evidence-only</small></label>
           <label>Top K<input id="runTopK" value="10" /><small>initial vector results retrieved per query</small></label>
           <label>Chunk limit<input id="runLimit" value="0" /><small>0 means all chunks</small></label>
           <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
           <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
-          <label class="query-field">Type a specific test query<textarea id="runQueries">What to do when flights have been cancelled
+          <label id="runQueryField" class="query-field" hidden>Type a specific test query (evidence-only)<textarea id="runQueries">What to do when flights have been cancelled
 How to add infant manually
-Passenger wants return refund due to illness</textarea><small>Use this for frontend one-query evidence tests. One query per line.</small></label>
+Passenger wants return refund due to illness</textarea><small>Required in evidence-only mode. One query per line.</small></label>
         </div>
+        <p id="runModeHint" class="status-note">Evaluated mode — retrieval metrics will use the selected ground truth.</p>
         <div class="run-actions primary-run-actions">
           <span id="selectedMatrixCount" class="mini-stat">0 selected combinations</span>
           <button id="runPreflightBtn" type="button">Check what is needed</button>
@@ -195,7 +184,7 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
         <details class="run-log" open><summary>Live execution output</summary><pre id="runOutput" class="run-output"></pre></details>
         <details class="advanced-run-actions">
           <summary>Advanced pipeline controls</summary>
-          <p>Use these controls for targeted troubleshooting of individual pipeline stages.</p>
+          <p id="advancedRunHint">Use these controls only for targeted troubleshooting of the default WNS pipeline.</p>
           <div class="run-actions">
             <button id="runParseMineruBtn" type="button">Parse PDFs</button>
             <button id="runIngestBtn" type="button">Ingest selected components only</button>
@@ -270,8 +259,8 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
           <div class="run-grid nvidia-run-grid">
             <label>NVIDIA query<textarea id="nvidiaQuery">refund old ticket and issue new ticket</textarea></label>
             <label>Collection<input id="nvidiaCollection" value="multimodal_data" /></label>
-            <label>Current data path<input id="nvidiaDataPath" value="data/pdfs" /></label>
-            <label>Ground truth file<input id="nvidiaGroundtruth" value="data/groundtruth/groundtruth_500.csv" /></label>
+            <label>Dataset<select id="nvidiaDataset"></select><small>Uses the same global corpus registry</small></label>
+            <label>Ground truth<select id="nvidiaGroundtruth"></select><small id="nvidiaGroundtruthHint">Required for benchmark; None is smoke-only</small></label>
             <label>Smoke mode<select id="nvidiaMode"><option value="search">Search / rerank</option><option value="generate">Generate answer</option></select></label>
             <label>Top K<input id="nvidiaTopK" value="10" /></label>
             <label>Reranker top K<input id="nvidiaRerankerTopK" value="5" /></label>
@@ -288,7 +277,7 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
 
       <section class="grid two">
         <article class="panel">
-          <div class="section-head"><div><h2>NVIDIA benchmark results</h2><p>Comparable quality metrics from current ground truth after running the NVIDIA benchmark action.</p></div><span class="mini-stat" id="nvidiaBenchmarkHint">—</span></div>
+          <div class="section-head"><div><h2>NVIDIA benchmark results</h2><p>Separate NVIDIA evidence lane for baseline and reranked runs; these results are not part of the official modular matrix.</p></div><div><label>Mode<select id="nvidiaBenchmarkMode"><option value="baseline">Baseline</option><option value="reranked">Reranked</option></select></label><span class="mini-stat" id="nvidiaBenchmarkHint">—</span></div></div>
           <div id="nvidiaBenchmarkCards" class="run-result-cards"></div>
           <div class="table-wrap"><table id="nvidiaBenchmarkTable"></table></div>
         </article>
@@ -327,21 +316,22 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
           <span id="uploadStatus" class="mini-stat">Ready</span>
         </div>
         <form id="uploadForm" class="upload-form">
-          <label>Dataset file<input id="datasetFile" name="file" type="file" accept=".pdf,.zip,.csv,.xlsx,.txt,.md" /></label>
-          <label>Dataset label<input id="datasetLabel" name="label" placeholder="travel-refunds-june" /></label>
-          <button type="submit">Upload into isolated project</button>
+          <label>Upload type<select id="uploadType" name="upload_type"><option value="dataset">Dataset / corpus</option><option value="groundtruth">Ground truth</option></select></label>
+          <label>File<input id="datasetFile" name="file" type="file" accept=".pdf,.zip,.csv,.xlsx,.txt,.md" /></label>
+          <label>Label<input id="datasetLabel" name="label" placeholder="travel-refunds-june" /></label>
+          <button id="uploadSubmitBtn" type="submit">Upload into isolated project</button>
         </form>
         <section class="panel-soft project-query-panel">
           <div class="section-head">
-            <div><h2>Lexical preview</h2><p>Search only the active uploaded project with token overlap. Embeddings, vector databases, rerankers, and accuracy scoring are not executed here.</p></div>
-            <span id="projectQueryStatus" class="mini-stat">Choose an active project</span>
+            <div><h2>Uploaded-project query</h2><p>Use data uploaded from the frontend. Evidence-only mode is used when no ground truth is attached, so the app does not fake scores.</p></div>
+            <span id="projectQueryStatus" class="mini-stat">Evidence-only mode</span>
           </div>
           <div class="run-grid">
-            <label>Active project<select id="projectSelect"></select></label>
-            <label>Search this project<textarea id="projectQueryInput">cancelled flight refund policy</textarea></label>
-            <label>Hits shown<input id="projectQueryTopK" type="number" min="1" max="50" value="5" /></label>
+            <label>Project<select id="projectSelect"></select></label>
+            <label>Query<textarea id="projectQueryInput">cancelled flight refund policy</textarea></label>
+            <label>Hits shown<input id="projectQueryTopK" value="5" /></label>
           </div>
-          <div class="run-actions"><button id="projectQueryBtn" type="button">Search this project</button></div>
+          <div class="run-actions"><button id="projectQueryBtn" type="button">Query uploaded data</button></div>
           <div class="table-wrap"><table id="projectQueryTable"></table></div>
         </section>
         <div class="upload-guidance">
@@ -381,7 +371,6 @@ Passenger wants return refund due to illness</textarea><small>Use this for front
       </details>
     </section>
   </main>
-  <script src="/recommendations.js?v=20260714-official-baseline"></script>
-  <script src="/app.js?v=20260714-official-baseline"></script>
+  <script src="/app.js?v=20260709-query-ui"></script>
 </body>
 </html>

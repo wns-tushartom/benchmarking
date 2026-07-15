@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { const el = $(id); if (el) el.textContent = value; };
-let state = { operational: {}, files: [], options: {} };
+let state = { operational: {}, files: [], options: {}, sourceCatalog: {datasets: [], groundtruth: []} };
 let benchmarkOptions = {};
 
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -156,9 +156,16 @@ function expandedSelection(id, values) {
   return picked;
 }
 
+function activeDatasetSheets() {
+  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
+  const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
+  if (dataset?.kind === 'default') return benchmarkOptions.chunkers || [];
+  return dataset?.sheets?.length ? dataset.sheets : (benchmarkOptions.chunkers || []);
+}
+
 function selectedMatrixComboCount() {
   const opts = benchmarkOptions || {};
-  const chunkers = expandedSelection('runSheet', opts.chunkers || []);
+  const chunkers = expandedSelection('runSheet', activeDatasetSheets());
   const embeddings = expandedSelection('runEmbedding', opts.embeddings || []);
   const stores = expandedSelection('runStore', opts.vector_stores || []);
   const officialRerankers = [...new Set((opts.rerankers || []).map(canonicalRerankerName))];
@@ -451,10 +458,32 @@ function renderNvidiaRag(nvidia) {
   const smoke = nvidia?.smoke || {};
   const ingestion = nvidia?.ingestion || {};
   const benchmark = nvidia?.benchmark || {};
-  const benchmarkReport = benchmark.report || {};
-  const benchmarkRows = benchmark.summary || [];
-  const benchmarkDetails = benchmark.details || [];
+  const benchmarkMode = $('nvidiaBenchmarkMode')?.value === 'reranked' ? 'reranked' : 'baseline';
+  const benchmarkModeLabel = benchmarkMode === 'reranked' ? 'Reranked' : 'Baseline';
+  const hasIndependentBenchmarkLanes = ['baseline', 'reranked'].some(mode => {
+    const lane = benchmark[mode] || {};
+    return Object.keys(lane.report || {}).length || (lane.summary || []).length || (lane.details || []).length;
+  });
+  const legacyReport = benchmark.report || {};
+  const legacySummary = benchmark.summary || [];
+  const legacyReranker = legacyReport.reranker_enabled ?? legacyReport.use_reranker ?? legacySummary[0]?.reranker_enabled;
+  const legacyMode = legacyReranker === true ? 'reranked' : 'baseline';
+  const benchmarkLane = hasIndependentBenchmarkLanes
+    ? (benchmark[benchmarkMode] || {})
+    : (benchmarkMode === legacyMode ? benchmark : {});
+  const benchmarkReport = benchmarkLane.report || {};
+  const benchmarkRows = benchmarkLane.summary || [];
+  const benchmarkDetails = benchmarkLane.details || [];
   const bestBenchmark = benchmarkReport.ok ? (benchmarkRows[0] || benchmarkReport.best || null) : null;
+  const evidenceValue = (...values) => values.find(value => value !== undefined && value !== null && String(value).trim() !== '');
+  const numericEvidence = (value) => {
+    const parsed = Number.parseFloat(value);
+    return evidenceValue(value) === undefined || !Number.isFinite(parsed) ? undefined : parsed;
+  };
+  const metricValue = (value, digits = 3) => numericEvidence(value)?.toFixed(digits) ?? '—';
+  const recallValue = (value) => numericEvidence(value) === undefined ? '—' : `${(numericEvidence(value) * 100).toFixed(1)}%`;
+  const evaluatedQueries = evidenceValue(bestBenchmark?.evaluated_queries, benchmarkReport.evaluated_rows);
+  const successfulQueries = evidenceValue(bestBenchmark?.successful_queries, benchmarkReport.successful_queries);
   const files = nvidia?.files || [];
   const checks = health.checks || {};
   const checkRows = Object.entries(checks).map(([name, check]) => ({name, ok: !!check.ok, url: check.url || '', status: check.status || '', error: check.error || '', latency_ms: check.latency_ms || ''}));
@@ -468,11 +497,11 @@ function renderNvidiaRag(nvidia) {
   const benchmarkError = benchmarkReport.first_error || benchmarkReport.error || '';
   const collection = ingestion.collection || smoke.collection || benchmarkReport.collection || 'multimodal_data';
   status.textContent = benchmarkReport.ok ? 'Benchmarked' : health.ok ? 'Healthy' : (health.created_at ? 'Needs attention' : 'Not checked');
-  const nextStep = !health.ok ? 'Run health check first.' : !ingestion.ok ? 'Run Ingest current data before smoke/benchmark.' : !smoke.ok ? 'Run Test one query to verify retrieval evidence.' : !benchmarkReport.ok ? 'Run NVIDIA benchmark on groundtruth_500.csv.' : 'Benchmark artifact is ready.';
+  const nextStep = !health.ok ? 'Run health check first.' : !ingestion.ok ? 'Run Ingest current data before smoke/benchmark.' : !smoke.ok ? 'Run Test one query to verify retrieval evidence.' : !benchmarkReport.ok ? `Run NVIDIA ${benchmarkModeLabel.toLowerCase()} benchmark on groundtruth_500.csv.` : `${benchmarkModeLabel} benchmark artifact is ready.`;
   cards.innerHTML = `
     <article class="nvidia-stage ${health.ok ? 'ok' : 'warn'}"><span>01</span><strong>Services</strong><p>${healthyCount}/${checkRows.length || 3} healthy · rag-server, ingestor, frontend</p></article>
     <article class="nvidia-stage ${ingestion.ok ? 'ok' : 'warn'}"><span>02</span><strong>Current data</strong><p>${ingestion.files ? `${ingestion.files.length} files selected · ${uploadedBatches}/${batches.length || 0} batches uploaded` : `Collection ${esc(collection)} has no ingestion artifact yet.`}</p></article>
-    <article class="nvidia-stage ${benchmarkReport.ok ? 'ok' : 'warn'}"><span>03</span><strong>Benchmark</strong><p>${bestBenchmark ? `R@5 ${(num(bestBenchmark.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestBenchmark.mrr,3)} · ${fmt(bestBenchmark.avg_latency_seconds,3)}s/query` : (benchmarkError || 'No NVIDIA benchmark artifact yet.')}</p></article>
+    <article class="nvidia-stage ${benchmarkReport.ok ? 'ok' : 'warn'}"><span>03</span><strong>${benchmarkModeLabel} benchmark</strong><p>${bestBenchmark ? `R@5 ${recallValue(bestBenchmark.recall_at_5)} · MRR ${metricValue(bestBenchmark.mrr)} · ${metricValue(bestBenchmark.avg_latency_seconds)}s/query` : (benchmarkError || `No NVIDIA ${benchmarkModeLabel.toLowerCase()} benchmark artifact yet.`)}</p></article>
     <article class="nvidia-stage action"><span>Next</span><strong>${esc(nextStep)}</strong><p>${smokeError && !smoke.ok ? esc(smokeError).slice(0, 160) : 'Keep the benchmark path evidence-led: ingest current PDFs, test one query, then run a limited benchmark.'}</p></article>`;
 
   const serviceRows = checkRows.map(r => ({kind:'health', name:r.name, status:r.ok ? 'ok' : 'check', detail:r.error || r.url, latency:r.latency_ms ? `${fmt(r.latency_ms,1)} ms` : '—'}));
@@ -481,7 +510,7 @@ function renderNvidiaRag(nvidia) {
     ...serviceRows,
     ...(smoke.created_at ? [{kind:'smoke', name:smoke.mode || 'search', status:smoke.ok ? 'ok' : 'check', detail:smoke.query || smokeError || '', latency:smoke.response?.latency_seconds ? `${fmt(smoke.response.latency_seconds,3)}s` : '—'}] : []),
     ...(ingestion.created_at ? [{kind:'ingestion', name:collection, status:ingestion.ok ? 'ok' : 'check', detail:`${(ingestion.files || []).length} files · ${batches.length} batches`, latency:'—'}] : []),
-    ...(benchmarkReport.created_at ? [{kind:'benchmark', name:collection, status:benchmarkReport.ok ? 'ok' : 'check', detail:`${benchmarkReport.evaluated_rows || 0} rows · ${benchmarkReport.groundtruth || ''}`, latency:benchmarkReport.total_seconds ? `${fmt(benchmarkReport.total_seconds,2)}s total` : '—'}] : []),
+    ...(benchmarkReport.created_at || Object.keys(benchmarkReport).length ? [{kind:`benchmark ${benchmarkModeLabel.toLowerCase()}`, name:collection, status:benchmarkReport.ok ? 'ok' : 'check', detail:`${evaluatedQueries ?? '—'} evaluated · ${successfulQueries ?? '—'} successful · ${benchmarkReport.groundtruth || ''}`, latency:benchmarkReport.total_seconds ? `${fmt(benchmarkReport.total_seconds,2)}s total` : '—'}] : []),
     ...artifactRows,
   ];
   artifactHint.textContent = `${files.length} NVIDIA JSON artifacts`;
@@ -519,14 +548,14 @@ function renderNvidiaRag(nvidia) {
   const benchmarkCards = $('nvidiaBenchmarkCards');
   if (benchmarkCards) {
     if (bestBenchmark) {
-      benchmarkCards.innerHTML = `<article class="run-result-card ok"><span>Recall@5</span><strong>${(num(bestBenchmark.recall_at_5)*100).toFixed(1)}%</strong><small>${esc(bestBenchmark.evaluated_queries || benchmarkReport.evaluated_rows || '—')} evaluated queries</small></article>
-        <article class="run-result-card"><span>MRR</span><strong>${fmt(bestBenchmark.mrr,3)}</strong><small>First relevant rank strength</small></article>
-        <article class="run-result-card"><span>Avg sec/query</span><strong>${fmt(bestBenchmark.avg_latency_seconds,3)}s</strong><small>${esc(bestBenchmark.successful_queries || benchmarkReport.successful_queries || '—')} successful service calls</small></article>`;
+      benchmarkCards.innerHTML = `<article class="run-result-card ok"><span>${benchmarkModeLabel} Recall@5</span><strong>${recallValue(bestBenchmark.recall_at_5)}</strong><small>${esc(evaluatedQueries ?? '—')} evaluated queries</small></article>
+        <article class="run-result-card"><span>MRR</span><strong>${metricValue(bestBenchmark.mrr)}</strong><small>First relevant rank strength</small></article>
+        <article class="run-result-card"><span>Avg sec/query</span><strong>${metricValue(bestBenchmark.avg_latency_seconds)}s</strong><small>${esc(successfulQueries ?? '—')} successful service calls</small></article>`;
     } else {
-      benchmarkCards.innerHTML = `<div class="empty-state">${esc(benchmarkError || 'Run NVIDIA benchmark after current PDFs are ingested into the collection.')}</div>`;
+      benchmarkCards.innerHTML = `<div class="empty-state">${esc(benchmarkError || `Run NVIDIA ${benchmarkModeLabel.toLowerCase()} benchmark after current PDFs are ingested into the collection.`)}</div>`;
     }
   }
-  $('nvidiaBenchmarkHint') && ($('nvidiaBenchmarkHint').textContent = benchmarkReport.created_at ? `${benchmarkReport.evaluated_rows || 0} rows · ${benchmarkReport.ok ? 'ok' : 'check'}` : 'No benchmark artifact yet');
+  $('nvidiaBenchmarkHint') && ($('nvidiaBenchmarkHint').textContent = `${benchmarkModeLabel} · ${evaluatedQueries ?? '—'} evaluated · ${successfulQueries ?? '—'} successful · ${Object.keys(benchmarkReport).length ? (benchmarkReport.ok ? 'ok' : 'check') : 'not recorded'}`);
   table($('nvidiaBenchmarkTable'), benchmarkRows.length ? benchmarkRows : benchmarkDetails.slice(0, 20), benchmarkRows.length ? [
     {key:'pipeline', label:'Pipeline', render:r=>esc(r.pipeline || 'NVIDIA RAG Blueprint')},
     {key:'evaluated_queries', label:'Queries'},
@@ -714,15 +743,15 @@ function renderTop10Visualizations(rows) {
   const hint = $('top10Hint');
   const scoreEl = $('top10ScoreChart');
   const scatterEl = $('qualityLatencyChart');
-  if (!scoreEl || !scatterEl) return;
+  if (!hint || !scoreEl || !scatterEl) return;
   const top = rows.slice(0, 10);
   if (!top.length) {
-    if (hint) hint.textContent = 'Waiting for evaluation';
+    hint.textContent = 'Waiting for evaluation';
     scoreEl.innerHTML = '<div class="empty-state">No top 10 pipeline data yet.</div>';
     scatterEl.innerHTML = '<div class="empty-state">No quality-latency plot yet.</div>';
     return;
   }
-  if (hint) hint.textContent = `${top.length} best pipelines`;
+  hint.textContent = `${top.length} best pipelines`;
   const maxScore = Math.max(...top.map(metricScore), 0.001);
   const maxR5 = Math.max(...top.map(r => num(r.recall_at_5)), 0.001);
   const maxMrr = Math.max(...top.map(r => num(r.mrr)), 0.001);
@@ -767,16 +796,14 @@ function renderTop10Visualizations(rows) {
   </svg>`;
 }
 
-function renderPipelineComparison(evaluation, scopedRows = null) {
-  const rows = Array.isArray(scopedRows)
-    ? [...scopedRows].sort((a, b) => metricScore(b) - metricScore(a))
-    : evaluatedRows(evaluation);
+function renderPipelineComparison(evaluation) {
+  const rows = evaluatedRows(evaluation);
   const grid = $('comparisonGrid');
   const hint = $('comparisonHint');
-  if (!grid) return;
+  if (!grid || !hint) return;
   if (!rows.length) {
     renderTop10Visualizations(rows);
-    if (hint) hint.textContent = 'Waiting for evaluation';
+    hint.textContent = 'Waiting for evaluation';
     grid.innerHTML = '<div class="empty-state">Run ground-truth evaluation to compare complete pipelines.</div>';
     $('rerankerLiftChart').innerHTML = '<div class="empty-state">No reranker comparison yet.</div>';
     $('stageComparisonChart').innerHTML = '<div class="empty-state">No stage comparison yet.</div>';
@@ -788,7 +815,7 @@ function renderPipelineComparison(evaluation, scopedRows = null) {
   const maxR5 = Math.max(...top.map(r => num(r.recall_at_5)));
   const maxMrr = Math.max(...top.map(r => num(r.mrr)));
   const maxLatency = Math.max(...top.map(r => num(r.avg_latency_seconds)));
-  if (hint) hint.textContent = `${rows.length} evaluated configs`;
+  hint.textContent = `${rows.length} evaluated configs`;
   grid.innerHTML = top.map((r, i) => `
     <article class="pipeline-card">
       <div class="rank-label">Rank ${i + 1}</div>
@@ -816,461 +843,6 @@ function renderPipelineComparison(evaluation, scopedRows = null) {
   $('stageComparisonChart').innerHTML = stageWinners.map(([label, v]) => metricBar(`${label}: ${v.name}`, v.score, maxStage, `Avg score ${fmt(v.score,3)} · R@5 ${(v.r5*100).toFixed(1)}% · ${v.configs} configs`)).join('');
 }
 
-const recommendationState = {
-  sourceType: 'official',
-  official: {source_type: 'official', configured: 180, evaluated: 0},
-  projects: [],
-  runs: [],
-  active: null,
-  generation: 0,
-  controller: null,
-  evidenceController: null,
-  evidenceOffset: 0,
-  evidenceLoadedCount: 0,
-  evidenceComboId: null,
-  tablePage: 0,
-  tablePayload: null,
-  tableResult: null,
-};
-
-function recommendationModule() {
-  const module = globalThis.PipelineRecommendations;
-  if (!module || typeof module.recommendationsForSource !== 'function') throw new Error('Recommendation logic is unavailable');
-  return module;
-}
-
-function closeRecommendationEvidence() {
-  recommendationState.evidenceController?.abort();
-  recommendationState.evidenceController = null;
-  recommendationState.evidenceOffset = 0;
-  recommendationState.evidenceLoadedCount = 0;
-  recommendationState.evidenceComboId = null;
-  setText('projectEvidenceStatus', '');
-  if ($('projectEvidenceRows')) $('projectEvidenceRows').innerHTML = '';
-  if ($('projectEvidenceMore')) $('projectEvidenceMore').hidden = true;
-  const dialog = $('projectEvidenceDialog');
-  if (dialog?.open && typeof dialog.close === 'function') dialog.close();
-}
-
-function clearRecommendationView(message) {
-  setText('recommendationStatus', message || 'No result source selected');
-  setText('recommendationContext', message || 'Choose a result source');
-  if ($('recommendationStrip')) $('recommendationStrip').innerHTML = '<div class="empty-state">No recommendations loaded.</div>';
-  if ($('recommendationTable')) $('recommendationTable').innerHTML = '<tr><td class="empty-cell">No result rows loaded</td></tr>';
-  if ($('pricingLedger')) $('pricingLedger').innerHTML = '<div class="empty-state">No measured commercial usage loaded.</div>';
-  if ($('recommendationFilters')) $('recommendationFilters').innerHTML = '';
-  if ($('recommendationSort')) $('recommendationSort').innerHTML = '';
-  ['top10ScoreChart','qualityLatencyChart','comparisonGrid','rerankerLiftChart','stageComparisonChart'].forEach(id => {
-    if ($(id)) $(id).innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
-  });
-  closeRecommendationEvidence();
-}
-
-function beginRecommendationRequest() {
-  recommendationState.generation += 1;
-  recommendationState.controller?.abort();
-  recommendationState.controller = new AbortController();
-  clearRecommendationView('Loading selected result source…');
-  return {generation: recommendationState.generation, signal: recommendationState.controller.signal};
-}
-
-function requestIsCurrent(generation) {
-  return generation === recommendationState.generation;
-}
-
-function metricCell(value, {percent = false} = {}) {
-  if (value === null || value === undefined || value === '') return 'Not recorded';
-  const number = Number(value);
-  if (!Number.isFinite(number)) return 'Not recorded';
-  return percent ? `${(number * 100).toFixed(1)}%` : number.toFixed(3);
-}
-
-function recommendationPipelineName(row) {
-  if (!row) return 'Not available';
-  const parts = [
-    row.chunker_id || row.sheet,
-    row.embedding_id || row.embedding,
-    row.vector_store_id || row.store,
-    row.reranker_id || row.reranker || 'none',
-  ].filter(Boolean);
-  return parts.length ? parts.join(' · ') : (row.combo_id || row.label || 'Not available');
-}
-
-function recommendationResultRows(result) {
-  if (Array.isArray(result?.rows)) return result.rows;
-  const completed = result?.completed_rows || result?.completed || [];
-  const failed = result?.failed_rows || result?.failed || [];
-  return [...completed, ...failed];
-}
-
-function roleRow(role) {
-  return role?.row || role?.winner || role || null;
-}
-
-function recommendationRoleTitle(key, row) {
-  if (!row) return 'Not available';
-  if (key === 'fastest' && row.state === 'latency_not_recorded') return 'Latency not recorded';
-  if (key === 'run_health') return `${fmtInt(row.succeeded ?? 0)}/${fmtInt(row.total ?? 0)} succeeded`;
-  if (key === 'evidence_coverage') {
-    return row.evidence_count === null || row.evidence_count === undefined
-      ? 'Evidence not recorded'
-      : `${fmtInt(row.evidence_count)} evidence rows`;
-  }
-  return recommendationPipelineName(row);
-}
-
-function recommendationPricingState(pricing) {
-  return String(pricing?.state || pricing?.status || pricing?.code || '').trim();
-}
-
-function recommendationPricingText(pricing) {
-  const total = Number(pricing?.total_cost_usd ?? pricing?.cost_usd);
-  const stateName = recommendationPricingState(pricing);
-  const sharedMeasured = stateName === 'measured_usage' && Array.isArray(pricing?.charges)
-    && pricing.charges.some(charge => charge?.usage_scope === 'shared_embedding' && charge?.usage !== null && charge?.usage !== undefined);
-  if (Number.isFinite(total) && total >= 0 && stateName === 'measured_usage') {
-    return sharedMeasured
-      ? `$${total.toFixed(6)} combination API cost · shared embedding in pricing ledger`
-      : `$${total.toFixed(6)} measured API cost`;
-  }
-  if (sharedMeasured) return 'Shared embedding cost · see pricing ledger';
-  if (stateName === 'no_api_fee') return 'No external model API fee · VM infrastructure excluded';
-  if (stateName === 'pricing_unavailable') return 'Pricing unavailable';
-  if (stateName === 'usage_missing') return 'Run usage not recorded';
-  return 'Run usage not recorded';
-}
-
-function recommendationRoleNote(key, row, mode) {
-  if (!row) return 'Not available for this source';
-  if (key === 'fastest' && row.state === 'latency_not_recorded') return 'No completed combination recorded latency';
-  if (key === 'quality') return `nDCG ${metricCell(row.ndcg_at_k ?? row.ndcg_at_5)} · MRR ${metricCell(row.mrr_at_k ?? row.mrr)}`;
-  if (key === 'speed' || key === 'fastest') return `${metricCell(row.avg_query_latency_s ?? row.avg_latency_seconds)} seconds per query`;
-  if (key === 'evidence_coverage') {
-    return row.query_count === null || row.query_count === undefined
-      ? 'Query count not recorded'
-      : `${fmtInt(row.query_count)} queries represented`;
-  }
-  if (key === 'run_health') return `${fmtInt(row.failed ?? 0)} failed · ${fmtInt(row.total ?? 0)} total`;
-  if (key === 'value') return recommendationPricingText(recommendationModule().pricingForRow(row));
-  return mode === 'labelled' ? 'Ranked from retrieval labels' : 'Operational evidence only';
-}
-
-function renderRecommendationStrip(result) {
-  const mode = result?.mode === 'labelled' ? 'labelled' : 'evidence_only';
-  const definitions = mode === 'labelled'
-    ? [['quality','Quality'], ['speed','Speed'], ['value','Value']]
-    : [['fastest','Fastest'], ['run_health','Run health'], ['evidence_coverage','Evidence coverage']];
-  const roles = result?.roles || {};
-  $('recommendationStrip').innerHTML = definitions.map(([key, label]) => {
-    const row = roleRow(roles[key]);
-    const tone = key === 'fastest' ? 'speed' : key === 'run_health' ? 'quality' : key === 'evidence_coverage' ? 'value' : key;
-    return `<article class="recommendation-item ${tone}"><span>${esc(label)}</span><strong>${esc(recommendationRoleTitle(key, row))}</strong><small>${esc(recommendationRoleNote(key, row, mode))}</small></article>`;
-  }).join('');
-}
-
-function qualityMetricCell(row, value, mode) {
-  if (mode !== 'labelled') return 'Not applicable';
-  const labelledQueries = row?.labelled_queries ?? row?.labelled_query_count;
-  if (row?.quality_applicable === false || Number(labelledQueries) === 0) return 'Not applicable';
-  return metricCell(value, {percent: true});
-}
-
-function recommendationEvidenceCell(payload, row, failed) {
-  if (failed) return 'Not applicable';
-  const rawCount = row.evidence_count;
-  const count = rawCount === null || rawCount === undefined || rawCount === ''
-    ? null
-    : Number(rawCount);
-  if (!Number.isFinite(count) || count < 0) return 'Not recorded';
-  const comboId = String(row.combo_id || '');
-  if (payload.source_type === 'uploaded_project' && comboId && count > 0) {
-    return `<button class="mini-run-btn view-project-evidence" type="button" data-combo-id="${esc(comboId)}">View ${esc(fmtInt(count))} evidence rows</button>`;
-  }
-  return esc(fmtInt(count));
-}
-
-function recommendationWinnerDetails(row, roles) {
-  const badges = recommendationModule().rowBadges(row, roles);
-  const labels = {
-    quality: 'Quality',
-    speed: 'Speed',
-    value: 'Value',
-    no_api_fee: 'No API fee',
-  };
-  const reasons = {
-    quality: 'highest recorded quality',
-    speed: 'lowest recorded latency',
-    value: 'best measured value posture',
-    no_api_fee: 'no external model API fee',
-  };
-  return {
-    badges: badges.map(key => labels[key]).filter(Boolean),
-    why: badges.map(key => reasons[key]).filter(Boolean).join(' · '),
-  };
-}
-
-function renderRecommendationTable(payload, result, {preservePage = false} = {}) {
-  const allRows = recommendationResultRows(result);
-  const mode = result?.mode === 'labelled' ? 'labelled' : 'evidence_only';
-  const k = Number(payload.metric_k) > 0 ? Number(payload.metric_k) : (payload.source_type === 'official' ? 5 : null);
-  const recallLabel = k ? `Recall@${k}` : 'Recall';
-  const ndcgLabel = k ? `nDCG@${k}` : 'nDCG';
-  recommendationState.tablePayload = payload;
-  recommendationState.tableResult = result;
-  if (!preservePage) recommendationState.tablePage = 0;
-  if (!allRows.length) {
-    $('recommendationTable').innerHTML = '<tr><td class="empty-cell">No completed or failed combinations in this source</td></tr>';
-    if ($('recommendationSort')) $('recommendationSort').innerHTML = '';
-    return;
-  }
-  const pageSize = 10;
-  const pageCount = Math.ceil(allRows.length / pageSize);
-  recommendationState.tablePage = Math.max(0, Math.min(recommendationState.tablePage, pageCount - 1));
-  const start = recommendationState.tablePage * pageSize;
-  const rows = allRows.slice(start, start + pageSize);
-  const end = start + rows.length;
-  if ($('recommendationSort')) {
-    $('recommendationSort').innerHTML = pageCount > 1
-      ? `<div class="recommendation-pager" aria-label="Recommendation table pages"><span>${esc(`${start + 1}–${end} of ${allRows.length}`)}</span><button type="button" class="mini-run-btn recommendation-page-btn" data-page-delta="-1" ${start === 0 ? 'disabled' : ''}>Previous 10</button><button type="button" class="mini-run-btn recommendation-page-btn" data-page-delta="1" ${end >= allRows.length ? 'disabled' : ''}>Next 10</button></div>`
-      : '';
-  }
-  const head = mode === 'labelled'
-    ? ['Pipeline','Status',recallLabel,'MRR',ndcgLabel,'Avg sec/query','Cost posture','Evidence']
-    : ['Pipeline','Status','Queries','Avg sec/query','Cost posture','Evidence'];
-  $('recommendationTable').innerHTML = `<thead><tr>${head.map(label => `<th>${esc(label)}</th>`).join('')}</tr></thead><tbody>${rows.map((row, index) => {
-    const failed = row.status && row.status !== 'completed';
-    const pricing = recommendationModule().pricingForRow(row);
-    const comboId = String(row.combo_id || '');
-    const evidence = recommendationEvidenceCell(payload, row, failed);
-    const classes = [
-      roleRow(result?.roles?.quality)?.combo_id === comboId ? 'recommendation-row-quality' : '',
-      roleRow(result?.roles?.speed || result?.roles?.fastest)?.combo_id === comboId ? 'recommendation-row-speed' : '',
-      roleRow(result?.roles?.value)?.combo_id === comboId ? 'recommendation-row-value' : '',
-    ].filter(Boolean).join(' ');
-    const winner = recommendationWinnerDetails(row, result?.roles);
-    const badges = winner.badges.length
-      ? `<div class="recommendation-badges">${winner.badges.map(label => `<span>${esc(label)}</span>`).join('')}</div>`
-      : '';
-    const why = winner.why ? `<small class="recommendation-why">Why it stands out: ${esc(winner.why)}</small>` : '';
-    const pipeline = `<div class="recommendation-pipeline"><span class="recommendation-rank">#${start + index + 1}</span><strong>${esc(recommendationPipelineName(row))}</strong></div>${badges}${why}`;
-    const prefix = `<td data-label="Pipeline">${pipeline}</td><td data-label="Status"><span class="badge ${failed ? 'warn' : 'ok'}">${esc(row.status || 'completed')}</span></td>`;
-    const operationalCells = `<td data-label="Queries">${esc(metricCell(row.query_count))}</td><td data-label="Avg sec/query">${esc(metricCell(row.avg_query_latency_s ?? row.avg_latency_seconds))}</td><td data-label="Cost posture">${esc(recommendationPricingText(pricing))}</td><td data-label="Evidence">${evidence}</td>`;
-    const qualityCells = `<td data-label="${esc(recallLabel)}">${esc(qualityMetricCell(row, row.recall_at_k ?? row.recall_at_5, mode))}</td><td data-label="MRR">${esc(qualityMetricCell(row, row.mrr_at_k ?? row.mrr, mode))}</td><td data-label="${esc(ndcgLabel)}">${esc(qualityMetricCell(row, row.ndcg_at_k ?? row.ndcg_at_5, mode))}</td><td data-label="Avg sec/query">${esc(metricCell(row.avg_query_latency_s ?? row.avg_latency_seconds))}</td><td data-label="Cost posture">${esc(recommendationPricingText(pricing))}</td><td data-label="Evidence">${evidence}</td>`;
-    return `<tr class="${classes}">${prefix}${mode === 'labelled' ? qualityCells : operationalCells}</tr>`;
-  }).join('')}</tbody>`;
-}
-
-function renderPricingLedger(payload) {
-  const raw = recommendationModule().pricingLedger(payload);
-  const entries = Array.isArray(raw) ? raw : (raw?.entries || []);
-  if (!entries.length) {
-    $('pricingLedger').innerHTML = '<div class="pricing-entry"><strong>No measured commercial usage</strong><span>No external model API fee · VM infrastructure excluded, or run usage not recorded.</span></div>';
-    return;
-  }
-  $('pricingLedger').innerHTML = entries.map(entry => {
-    const model = entry.model_id || entry.commercial_model_id || entry.label || entry.usage_key || 'Commercial model';
-    const rate = Number(entry.usd_rate ?? entry.rate_usd);
-    const usage = entry.usage ?? entry.quantity ?? entry.input_tokens ?? entry.search_units;
-    const rawCost = entry.cost_usd;
-    const cost = rawCost === null || rawCost === undefined || rawCost === '' ? NaN : Number(rawCost);
-    const rateText = Number.isFinite(rate) ? `$${rate} / ${entry.unit || 'unit'}` : 'Pricing unavailable';
-    const usageText = usage === null || usage === undefined ? 'Run usage not recorded' : `${usage} measured`;
-    const costText = Number.isFinite(cost) && cost >= 0
-      ? `$${cost.toFixed(6)} measured ${entry.usage_scope === 'shared_embedding' ? 'run' : 'combination'} cost`
-      : 'Computed cost not recorded';
-    return `<div class="pricing-entry"><strong>${esc(model)}</strong><span>${esc(rateText)} · ${esc(usageText)} · ${esc(costText)}</span></div>`;
-  }).join('');
-}
-
-function clearUploadedTradeoffs() {
-  ['top10ScoreChart','qualityLatencyChart','comparisonGrid','rerankerLiftChart','stageComparisonChart'].forEach(id => {
-    if ($(id)) $(id).innerHTML = '<div class="empty-state">Uploaded-run metrics are shown in the exact table above; official @5 charts are not reused.</div>';
-  });
-}
-
-function renderRecommendationSource(payload) {
-  const result = recommendationModule().recommendationsForSource(payload);
-  recommendationState.active = payload;
-  const uploaded = payload.source_type === 'uploaded_project';
-  const baseline = !uploaded && payload.result_set === 'baseline';
-  recommendationState.sourceType = uploaded ? 'uploaded_project' : 'official';
-  setText('recommendationStatus', uploaded ? (payload.run_state || 'Uploaded matrix run') : (baseline ? 'No-reranker baseline' : 'Official benchmark'));
-  const context = uploaded
-    ? `Viewing: ${payload.project_label || payload.project_id} · ${payload.run_id} · ${payload.scoring_mode === 'retrieval_labels' ? `retrieval labels @${payload.metric_k}` : 'evidence only'}`
-    : baseline
-      ? `Viewing: No-reranker baseline · ${fmtInt(payload.rows?.length ?? 0)} measured combinations · separate from the official matrix`
-      : `Viewing: Official WNS benchmark · ${fmtInt(payload.configured ?? 180)} configured combinations · ${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} evaluated`;
-  setText('recommendationContext', context);
-  setText('recommendationModeNote', result.mode === 'labelled' ? 'Quality, speed, and honest cost posture for the active source.' : 'Operational speed, run health, and evidence coverage. Quality is not claimed without labels.');
-  renderRecommendationStrip(result);
-  renderRecommendationTable(payload, result);
-  renderPricingLedger(payload);
-  if (uploaded) clearUploadedTradeoffs();
-  return result;
-}
-
-function officialRecommendationPayload(resultSet = 'official') {
-  const evaluation = state.operational?.evaluation || {};
-  const baseline = resultSet === 'baseline';
-  const evidenceCounts = new Map();
-  (state.operational?.benchmark_detail_evidence || []).forEach(evidence => {
-    const key = metricRowKey(canonicalMetricRow(evidence));
-    evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
-  });
-  const sourceRows = baseline
-    ? [
-        ...(evaluation?.summary || []),
-        ...(evaluation?.reranked?.summary || []),
-      ].filter(row => canonicalRerankerName(row?.reranker || row?.reranking_model || 'none') === 'none')
-    : (evaluation?.benchmark_reference?.summary || []);
-  const rows = dedupeMetricRows(sourceRows).map(row => {
-    const official = canonicalMetricRow(row, {status: row.status || 'completed'});
-    const key = metricRowKey(official);
-    return {
-      ...official,
-      combo_id: key,
-      winner_score: metricScore(official),
-      evidence_count: evidenceCounts.has(key) ? evidenceCounts.get(key) : null,
-    };
-  });
-  const descriptor = recommendationState.official || {};
-  return {
-    source_type: 'official',
-    result_set: baseline ? 'baseline' : 'official',
-    scoring_mode: 'retrieval_labels',
-    metric_k: 5,
-    configured: baseline ? rows.length : (descriptor.configured ?? 180),
-    evaluated: baseline ? rows.length : (descriptor.evaluated ?? rows.length),
-    rows,
-  };
-}
-
-function showOfficialRecommendations() {
-  recommendationState.sourceType = 'official';
-  const resultSet = $('recommendationOfficialSet')?.value === 'baseline' ? 'baseline' : 'official';
-  const payload = officialRecommendationPayload(resultSet);
-  renderRecommendationSource(payload);
-  renderPipelineComparison(state.operational?.evaluation || {}, payload.rows);
-}
-
-function populateRecommendationProjects() {
-  const select = $('recommendationProject');
-  if (!select) return;
-  select.innerHTML = recommendationState.projects.length
-    ? recommendationState.projects.map(project => `<option value="${esc(project.project_id)}">${esc(project.label || project.project_id)}</option>`).join('')
-    : '<option value="">No matrix projects available</option>';
-}
-
-function populateRecommendationRuns() {
-  const select = $('recommendationRun');
-  if (!select) return;
-  select.innerHTML = recommendationState.runs.length
-    ? recommendationState.runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.timestamp_label || run.completed_at || run.created_at || run.run_id)}</option>`).join('')
-    : '<option value="">No completed matrix runs</option>';
-}
-
-async function loadResultSources() {
-  const {generation, signal} = beginRecommendationRequest();
-  try {
-    const payload = await api('/api/result-sources', {signal});
-    if (!requestIsCurrent(generation)) return;
-    recommendationState.official = payload.official || recommendationState.official;
-    recommendationState.projects = payload.projects || [];
-    populateRecommendationProjects();
-    if (recommendationState.sourceType === 'official') showOfficialRecommendations();
-  } catch (error) {
-    if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
-    clearRecommendationView('Result sources unavailable');
-  }
-}
-
-async function loadProjectRuns(projectId) {
-  const {generation, signal} = beginRecommendationRequest();
-  try {
-    const payload = await api(`/api/project-runs?project_id=${encodeURIComponent(projectId)}`, {signal});
-    if (!requestIsCurrent(generation)) return;
-    recommendationState.runs = Array.isArray(payload) ? payload : (payload.runs || []);
-    populateRecommendationRuns();
-    const runId = $('recommendationRun')?.value || recommendationState.runs[0]?.run_id;
-    if (runId) await loadProjectRun(projectId, runId);
-    else clearRecommendationView('No completed matrix runs for this project');
-  } catch (error) {
-    if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
-    recommendationState.runs = [];
-    populateRecommendationRuns();
-    clearRecommendationView('Project runs unavailable');
-  }
-}
-
-async function loadProjectRun(projectId, runId) {
-  const {generation, signal} = beginRecommendationRequest();
-  const path = `/api/project-run-results?project_id=${encodeURIComponent(projectId)}&run_id=${encodeURIComponent(runId)}`;
-  try {
-    const payload = await api(path, {signal});
-    if (!requestIsCurrent(generation)) return;
-    if (
-      payload?.source_type !== 'uploaded_project'
-      || payload?.project_id !== projectId
-      || payload?.run_id !== runId
-    ) {
-      throw new Error('Project run response identity mismatch');
-    }
-    renderRecommendationSource(payload);
-  } catch (error) {
-    if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
-    recommendationState.active = null;
-    clearRecommendationView('Selected project run is unavailable');
-  }
-}
-
-async function loadProjectEvidencePage({append = false} = {}) {
-  const active = recommendationState.active;
-  const comboId = recommendationState.evidenceComboId;
-  if (!active || active.source_type !== 'uploaded_project' || !comboId) return;
-  recommendationState.evidenceController?.abort();
-  const controller = new AbortController();
-  recommendationState.evidenceController = controller;
-  const offset = append ? recommendationState.evidenceOffset : 0;
-  const ownership = `${active.project_id}|${active.run_id}|${comboId}`;
-  setText('projectEvidenceStatus', 'Loading evidence…');
-  const path = `/api/project-run-evidence?project_id=${encodeURIComponent(active.project_id)}&run_id=${encodeURIComponent(active.run_id)}&combo_id=${encodeURIComponent(comboId)}&limit=25&offset=${offset}`;
-  try {
-    const page = await api(path, {signal: controller.signal});
-    const current = recommendationState.active;
-    if (controller !== recommendationState.evidenceController || `${current?.project_id}|${current?.run_id}|${recommendationState.evidenceComboId}` !== ownership) return;
-    const nextOffset = page.next_offset;
-    if (
-      nextOffset !== null
-      && nextOffset !== undefined
-      && (!Number.isInteger(nextOffset) || nextOffset <= offset)
-    ) {
-      throw new Error('Evidence cursor did not advance');
-    }
-    const html = (page.rows || []).map(row => `<article class="evidence-dialog-row"><strong>${esc(row.query || row.query_id || 'Query')}</strong><p>${esc(row.excerpt || 'Evidence text not recorded')}</p><span>${esc(row.source_name || 'Source not recorded')}${row.page_number ? ` · page ${esc(row.page_number)}` : ''} · rank ${esc(row.rank ?? '—')}</span></article>`).join('');
-    $('projectEvidenceRows').innerHTML = append ? $('projectEvidenceRows').innerHTML + html : (html || '<div class="empty-state">No evidence rows for this combination.</div>');
-    recommendationState.evidenceOffset = page.next_offset ?? 0;
-    const loadedNow = Array.isArray(page.rows) ? page.rows.length : 0;
-    recommendationState.evidenceLoadedCount = append
-      ? recommendationState.evidenceLoadedCount + loadedNow
-      : loadedNow;
-    $('projectEvidenceMore').hidden = page.next_offset === null || page.next_offset === undefined;
-    setText('projectEvidenceStatus', `${fmtInt(recommendationState.evidenceLoadedCount)} evidence rows loaded`);
-  } catch (error) {
-    if (error?.name === 'AbortError' || controller !== recommendationState.evidenceController) return;
-    setText('projectEvidenceStatus', 'Evidence unavailable for this combination');
-    $('projectEvidenceMore').hidden = true;
-  }
-}
-
-function openProjectEvidence(comboId) {
-  closeRecommendationEvidence();
-  recommendationState.evidenceComboId = comboId;
-  setText('projectEvidenceTitle', `Combination evidence · ${comboId}`);
-  const dialog = $('projectEvidenceDialog');
-  if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
-  loadProjectEvidencePage().catch(console.error);
-}
-
 function showPage(page) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.page === page));
   document.querySelectorAll('[data-page-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.pagePanel === page));
@@ -1285,14 +857,18 @@ async function uploadDataset(ev) {
     $('uploadOutput').textContent = 'Select a PDF, ZIP, CSV, XLSX, TXT, or MD first.';
     return;
   }
+  const uploadType = $('uploadType')?.value || 'dataset';
   const form = new FormData();
   form.append('file', file);
   form.append('label', $('datasetLabel')?.value || file.name.replace(/\.[^.]+$/, ''));
+  form.append('upload_type', uploadType);
   $('uploadStatus').textContent = 'Uploading';
-  $('uploadOutput').textContent = `Uploading ${file.name} into isolated project...`;
+  $('uploadOutput').textContent = uploadType === 'groundtruth'
+    ? `Validating and registering ${file.name} as reusable ground truth...`
+    : `Uploading ${file.name} into isolated project...`;
   const res = await fetch('/api/upload-dataset', {method: 'POST', body: form});
   const payload = await res.json();
-  $('uploadStatus').textContent = res.ok ? 'Uploaded project' : 'Error';
+  $('uploadStatus').textContent = res.ok ? (uploadType === 'groundtruth' ? 'Ground truth registered' : 'Uploaded project') : 'Error';
   $('uploadOutput').textContent = JSON.stringify(payload, null, 2);
   if (res.ok) {
     await refresh();
@@ -1312,47 +888,50 @@ function renderUserProjects(projects) {
   el.value = projects.some(p => p.project_id === current) ? current : projects[0].project_id;
 }
 
+function projectSelections() {
+  return {
+    chunkers: selectedValues('runSheet'),
+    embeddings: selectedValues('runEmbedding'),
+    vector_stores: selectedValues('runStore'),
+    rerankers: selectedValues('runRerankerMain'),
+  };
+}
+
 function renderProjectQuery(payload) {
   const status = $('projectQueryStatus');
-  const created = payload.created_at ? new Date(payload.created_at).toLocaleString() : '—';
-  if (status) status.textContent = payload.mode === 'lexical_preview'
-    ? `Lexical preview · ${fmtInt((payload.hits || []).length)} hits · ${created}`
-    : 'Unexpected query mode';
-  const rows = (payload.hits || []).map(hit => ({
-    ...hit,
-    source: hit.pdf_name || '—',
-    page: hit.page_number || '—',
-    snippet: hit.paragraph || '',
-  }));
+  if (status) status.textContent = payload.mode === 'evidence_only' ? `Evidence-only mode · ${fmtInt(payload.combo_count || 0)} combos` : 'Scored mode';
+  const rows = (payload.rows || []).slice(0, 80).map(r => {
+    const hit = (r.hits || [])[0] || {};
+    return {...r, top_pdf: hit.pdf_name || '—', top_score: hit.score ?? '', snippet: hit.paragraph || ''};
+  });
   table($('projectQueryTable'), rows, [
-    {key:'rank', label:'Rank'},
-    {key:'source', label:'Source'},
-    {key:'page', label:'Page'},
-    {key:'score', label:'Lexical score', render:r=>fmt(r.score, 4)},
-    {key:'snippet', label:'Project evidence', render:r=>esc((r.snippet || payload.message || '').slice(0, 500))},
+    {key:'query', label:'Query', render:r=>esc((r.query || '').slice(0, 70))},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'Vector DB'},
+    {key:'reranker', label:'Reranker'},
+    {key:'top_pdf', label:'Top source'},
+    {key:'top_score', label:'Score', render:r=>fmt(r.top_score, 4)},
+    {key:'snippet', label:'Evidence-only result', render:r=>esc((r.snippet || payload.message || '').slice(0, 260))},
   ]);
 }
 
 async function runProjectQuery() {
   const projectId = $('projectSelect')?.value || '';
   const query = ($('projectQueryInput')?.value || '').trim();
-  const topK = Number($('projectQueryTopK')?.value || 5);
   if (!projectId || !query) {
-    $('projectQueryStatus').textContent = 'Choose an active project and enter a query';
+    $('projectQueryStatus').textContent = 'Choose project + query';
     return;
   }
-  if (!Number.isInteger(topK) || topK < 1 || topK > 50) {
-    $('projectQueryStatus').textContent = 'Hits shown must be between 1 and 50';
-    return;
-  }
-  $('projectQueryStatus').textContent = 'Searching active project';
+  $('projectQueryStatus').textContent = 'Querying uploaded project';
   const payload = await api('/api/project-query', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       project_id: projectId,
       query,
-      top_k: topK,
+      top_k: Number($('projectQueryTopK')?.value || 5),
+      selections: projectSelections(),
     }),
   });
   renderProjectQuery(payload);
@@ -1448,7 +1027,7 @@ function renderOperational() {
   renderServices(health);
   renderRetrieval(retrieval, rerank);
   renderEvaluation(op.evaluation);
-  if (recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations) showOfficialRecommendations();
+  renderPipelineComparison(op.evaluation);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
   renderDocumentRepository(op.document_repository || {});
@@ -1490,11 +1069,108 @@ function renderOperational() {
   $('files').innerHTML = state.files.length ? state.files.map(f => `<li><code>${esc(f)}</code></li>`).join('') : '<li>No artifact files listed yet</li>';
 }
 
+function sourceOption(row, type) {
+  const count = type === 'dataset'
+    ? `${fmtInt(row.document_count || 0)} documents · ${fmtInt(row.chunk_count || 0)} chunks`
+    : (row.id === 'groundtruth:none' ? 'evidence-only' : `${fmtInt(row.row_count || 0)} queries`);
+  const runnable = type === 'dataset' ? row.ready : row.valid;
+  return `<option value="${esc(row.id)}"${runnable ? '' : ' disabled'}>${esc(row.label)} · ${esc(count)}${runnable ? '' : ' · unavailable'}</option>`;
+}
+
+function fillSourceSelect(id, rows, type, preferredId='') {
+  const el = $(id);
+  if (!el) return;
+  const current = el.value;
+  el.innerHTML = (rows || []).map(row => sourceOption(row, type)).join('');
+  const validIds = new Set((rows || []).filter(row => type === 'dataset' ? row.ready : row.valid).map(row => row.id));
+  if (validIds.has(current)) el.value = current;
+  else if (validIds.has(preferredId)) el.value = preferredId;
+  else el.value = [...validIds][0] || '';
+}
+
+function syncDatasetChunkers() {
+  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
+  const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
+  const sheets = activeDatasetSheets();
+  fillRunMultiSelect('runSheet', sheets, 'All dataset chunkers');
+  if ($('runDatasetHint') && dataset) {
+    $('runDatasetHint').textContent = `${fmtInt(dataset.document_count || 0)} documents · ${fmtInt(dataset.chunk_count || 0)} chunks · ${fmtInt(sheets.length)} chunker sheet(s)`;
+  }
+  updateSelectedMatrixCount();
+}
+
+function syncRunMode() {
+  const evidenceOnly = $('runGroundtruth')?.value === 'groundtruth:none';
+  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
+  const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
+  const defaultDataset = !dataset || dataset.kind === 'default';
+  if ($('runQueryField')) $('runQueryField').hidden = !evidenceOnly;
+  if ($('runModeHint')) {
+    $('runModeHint').textContent = !defaultDataset
+      ? 'Project dataset mode — use the main pipeline. Legacy stage controls are disabled because they target the default repository artifacts.'
+      : evidenceOnly
+        ? 'Evidence-only mode — retrieval evidence will be returned without recall, MRR, nDCG, accuracy, or winner scores. Fresh-run archival and scored controls are disabled.'
+        : 'Evaluated mode — retrieval metrics will use the selected ground truth.';
+  }
+  if ($('runCompletePipelineBtn')) {
+    $('runCompletePipelineBtn').textContent = evidenceOnly ? 'Run evidence retrieval' : 'Run pipeline and evaluate';
+    $('runCompletePipelineBtn').disabled = false;
+  }
+
+  const fresh = $('runFresh');
+  if (fresh) {
+    fresh.disabled = evidenceOnly;
+    if (evidenceOnly) fresh.checked = false;
+  }
+  const scoredActionIds = ['runFullGtBtn', 'runRerankerBtn', 'runRerankedEvalBtn', 'runEvalBtn', 'runHallucinationBtn', 'runHallucinationLlmBtn'];
+  const canonicalOnlyIds = ['runParseMineruBtn', 'runIngestBtn', 'runSmokeBtn', ...scoredActionIds];
+  canonicalOnlyIds.forEach(id => {
+    const button = $(id);
+    if (button) button.disabled = !defaultDataset || (evidenceOnly && scoredActionIds.includes(id));
+  });
+  if ($('advancedRunHint')) $('advancedRunHint').textContent = !defaultDataset
+    ? 'Advanced stage controls are disabled for uploaded datasets; use the source-aware complete pipeline above.'
+    : evidenceOnly
+      ? 'Scored evaluation and reranker actions are disabled in evidence-only mode.'
+      : 'Use these controls only for targeted troubleshooting of the default WNS pipeline.';
+
+  const nvidiaEvidenceOnly = $('nvidiaGroundtruth')?.value === 'groundtruth:none';
+  if ($('runNvidiaBenchmarkBtn')) $('runNvidiaBenchmarkBtn').disabled = nvidiaEvidenceOnly;
+  if ($('nvidiaGroundtruthHint')) $('nvidiaGroundtruthHint').textContent = nvidiaEvidenceOnly
+    ? 'None selected — use Test one query; scored benchmark is disabled.'
+    : 'Validated ground truth selected for NVIDIA benchmark.';
+}
+
+function syncNvidiaBenchmarkMode() {
+  const baseline = ($('nvidiaBenchmarkMode')?.value || 'baseline') === 'baseline';
+  if ($('nvidiaDisableReranker')) $('nvidiaDisableReranker').checked = baseline;
+}
+
+function renderSourceSelectors(catalog) {
+  const datasets = catalog?.datasets || [];
+  const groundtruth = catalog?.groundtruth || [];
+  const preferredGroundtruth = groundtruth.find(row => row.valid && /groundtruth_500/i.test(row.id))?.id
+    || groundtruth.find(row => row.valid && row.id !== 'groundtruth:none')?.id
+    || 'groundtruth:none';
+  fillSourceSelect('runDataset', datasets, 'dataset', 'dataset:wns-default');
+  fillSourceSelect('nvidiaDataset', datasets, 'dataset', 'dataset:wns-default');
+  fillSourceSelect('runGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
+  fillSourceSelect('nvidiaGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
+  syncDatasetChunkers();
+  syncRunMode();
+}
+
 async function refresh() {
   $('statusPill').textContent = 'Refreshing';
   try {
     const data = await api('/api/results?retrieval_limit=0&reranker_limit=0&detail_evidence_limit=360&detail_evidence_per_combo=1');
-    state = { operational: data.operational || {}, files: data.files || [], options: data.options || {} };
+    state = {
+      operational: data.operational || {},
+      files: data.files || [],
+      options: data.options || {},
+      sourceCatalog: data.source_catalog || {datasets: [], groundtruth: []},
+    };
+    renderSourceSelectors(state.sourceCatalog);
     renderOperational();
     $('statusPill').textContent = 'Live';
   } catch (e) {
@@ -1517,7 +1193,7 @@ async function loadOptions() {
 
 function selectedParams() {
   const p = new URLSearchParams();
-  selectedValues('runSheet').forEach(v => p.append('sheet', v));
+  expandedSelection('runSheet', activeDatasetSheets()).forEach(v => p.append('sheet', v));
   selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
   selectedValues('runStore').forEach(v => p.append('store', v));
   selectedValues('runRerankerMain').forEach(v => p.append('reranker', v));
@@ -1526,7 +1202,11 @@ function selectedParams() {
   p.set('chunk_limit', limit);
   p.set('query_limit', $('runQueryLimit')?.value || '0');
   p.set('top_k', $('runTopK')?.value || '10');
-  p.set('groundtruth', $('runGroundtruth')?.value || 'data/groundtruth/groundtruth_500.csv');
+  p.set('dataset_id', $('runDataset')?.value || 'dataset:wns-default');
+  p.set('groundtruth_id', $('runGroundtruth')?.value || 'groundtruth:none');
+  if (($('runGroundtruth')?.value || 'groundtruth:none') === 'groundtruth:none') {
+    ($('runQueries')?.value || '').split('\n').map(value => value.trim()).filter(Boolean).forEach(query => p.append('query', query));
+  }
   if ($('runFresh')?.checked) p.set('fresh_run', '1');
   p.set('max_runs', String(Math.max(updateSelectedMatrixCount(), 1)));
   return p;
@@ -1546,10 +1226,8 @@ async function runNvidiaAction(kind) {
   p.set('batch_size', $('nvidiaBatchSize')?.value || '2');
   p.set('top_k', $('nvidiaTopK')?.value || '10');
   p.set('reranker_top_k', $('nvidiaRerankerTopK')?.value || '5');
-  const dataPath = ($('nvidiaDataPath')?.value || 'data/pdfs').trim();
-  const groundtruth = ($('nvidiaGroundtruth')?.value || 'data/groundtruth/groundtruth_500.csv').trim();
-  if (dataPath) p.set('path', dataPath);
-  if (groundtruth) p.set('groundtruth', groundtruth);
+  p.set('dataset_id', $('nvidiaDataset')?.value || 'dataset:wns-default');
+  p.set('groundtruth_id', $('nvidiaGroundtruth')?.value || 'groundtruth:none');
   if ($('nvidiaCreateCollection')?.checked) p.set('create_collection', '1');
   if ($('nvidiaPoll')?.checked) p.set('poll', '1');
   if (kind === 'smoke') {
@@ -1558,7 +1236,10 @@ async function runNvidiaAction(kind) {
     if (query) p.append('query', query);
     if ($('nvidiaAgentic')?.checked) p.set('agentic', '1');
   }
-  if ($('nvidiaDisableReranker')?.checked) p.set('disable_reranker', '1');
+  const disableReranker = kind === 'benchmark'
+    ? ($('nvidiaBenchmarkMode')?.value || 'baseline') === 'baseline'
+    : $('nvidiaDisableReranker')?.checked;
+  if (disableReranker) p.set('disable_reranker', '1');
   $('nvidiaStatus').textContent = 'Running';
   $('nvidiaOutput').textContent = `POST ${endpoints[kind]}?${p.toString()}\n`;
   const res = await fetch(`${endpoints[kind]}?${p.toString()}`, {method:'POST'});
@@ -1690,6 +1371,18 @@ async function runAction(kind) {
 ['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
 ['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));
+$('runDataset')?.addEventListener('input', () => {
+  syncDatasetChunkers();
+  syncRunMode();
+});
+$('runGroundtruth')?.addEventListener('input', syncRunMode);
+$('nvidiaGroundtruth')?.addEventListener('input', syncRunMode);
+$('uploadType')?.addEventListener('input', () => {
+  const groundtruth = $('uploadType').value === 'groundtruth';
+  if ($('datasetFile')) $('datasetFile').accept = groundtruth ? '.csv,.xlsx' : '.pdf,.zip,.csv,.txt,.md';
+  if ($('uploadSubmitBtn')) $('uploadSubmitBtn').textContent = groundtruth ? 'Register reusable ground truth' : 'Upload into isolated project';
+});
+$('nvidiaBenchmarkMode')?.addEventListener('input', () => { syncNvidiaBenchmarkMode(); renderNvidiaRag(state.operational?.nvidia_rag || {}); });
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
 $('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
@@ -1707,68 +1400,12 @@ $('runNvidiaSmokeBtn')?.addEventListener('click', () => runNvidiaAction('smoke')
 $('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 $('runNvidiaBenchmarkBtn')?.addEventListener('click', () => runNvidiaAction('benchmark').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 document.addEventListener('click', e => {
-  const evidenceButton = e.target.closest('.view-project-evidence');
-  if (evidenceButton) {
-    openProjectEvidence(evidenceButton.dataset.comboId || '');
-    return;
-  }
-  const pageButton = e.target.closest('.recommendation-page-btn');
-  if (pageButton && recommendationState.tablePayload && recommendationState.tableResult) {
-    const delta = Number(pageButton.dataset.pageDelta);
-    if (Number.isInteger(delta) && delta !== 0) {
-      recommendationState.tablePage += delta;
-      renderRecommendationTable(
-        recommendationState.tablePayload,
-        recommendationState.tableResult,
-        {preservePage: true},
-      );
-    }
-    return;
-  }
   const btn = e.target.closest('.mini-run-btn');
   if (btn) setRunSelection(btn.dataset.sheet, btn.dataset.embedding, btn.dataset.store, btn.dataset.reranker || 'all');
 });
-async function selectRecommendationSource(sourceType) {
-  const normalized = sourceType === 'uploaded_project' ? 'uploaded_project' : 'official';
-  recommendationState.controller?.abort();
-  recommendationState.generation += 1;
-  recommendationState.sourceType = normalized;
-  recommendationState.active = null;
-  $('recommendationOfficialSetField').hidden = normalized !== 'official';
-  $('recommendationProjectField').hidden = normalized !== 'uploaded_project';
-  $('recommendationRunField').hidden = normalized !== 'uploaded_project';
-  closeRecommendationEvidence();
-  if (normalized === 'official') {
-    showOfficialRecommendations();
-    return;
-  }
-  if (!recommendationState.projects.length) await loadResultSources();
-  if (recommendationState.sourceType !== 'uploaded_project') return;
-  const projectId = $('recommendationProject')?.value || recommendationState.projects[0]?.project_id;
-  if (projectId) await loadProjectRuns(projectId);
-  else if (recommendationState.sourceType === 'uploaded_project') {
-    clearRecommendationView('No uploaded projects with matrix results');
-  }
-}
-
-$('recommendationSource')?.addEventListener('change', event => {
-  selectRecommendationSource(event.target.value).catch(console.error);
-});
-$('recommendationOfficialSet')?.addEventListener('change', () => {
-  if (recommendationState.sourceType === 'official') showOfficialRecommendations();
-});
-$('recommendationProject')?.addEventListener('change', event => {
-  if (event.target.value) loadProjectRuns(event.target.value).catch(console.error);
-});
-$('recommendationRun')?.addEventListener('change', event => {
-  const projectId = $('recommendationProject')?.value;
-  if (projectId && event.target.value) loadProjectRun(projectId, event.target.value).catch(console.error);
-});
-$('projectEvidenceMore')?.addEventListener('click', () => loadProjectEvidencePage({append: true}).catch(console.error));
-$('projectEvidenceDialog')?.addEventListener('close', closeRecommendationEvidence);
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => showPage(btn.dataset.page || 'overview')));
 document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListener('click', openStatusDialog));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
 $('projectQueryBtn')?.addEventListener('click', () => runProjectQuery().catch(err => { $('projectQueryStatus').textContent='Error'; table($('projectQueryTable'), [{error:String(err)}], [{key:'error', label:'Error'}]); }));
-loadOptions().then(refresh).then(loadResultSources).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });
+loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

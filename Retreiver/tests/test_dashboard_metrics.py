@@ -2,15 +2,8 @@ import csv
 import json
 import subprocess
 import tempfile
-import threading
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError
-from urllib.parse import quote
-from urllib.request import urlopen
-
-import pytest
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -88,7 +81,6 @@ def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(
             dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = old
 
     assert len(evaluation["benchmark_reference"]["summary"]) == 15
-    assert dashboard.official_evaluated_count(evaluation) == 180
     app = Path(__file__).resolve().parents[1] / "web" / "app.js"
     payload = json.dumps(evaluation)
     js = f"""
@@ -149,6 +141,140 @@ def test_frontend_initial_load_uses_lazy_evidence_limits():
     assert "detail_evidence_limit=360" in text
     assert "retrieval_limit=60000" not in text
     assert "reranker_limit=60000" not in text
+
+
+def test_nvidia_baseline_and_reranked_results_are_independently_visible():
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app_text = app.read_text(encoding="utf-8")
+    assert 'id="nvidiaBenchmarkMode"' in index
+    assert '<option value="baseline">Baseline</option>' in index
+    assert '<option value="reranked">Reranked</option>' in index
+    assert "$('nvidiaBenchmarkMode')?.addEventListener('input'" in app_text
+    payload = {
+        "health": {"ok": True},
+        "benchmark": {
+            "report": {"ok": False, "created_at": "stale", "error": "stale failed latest report"},
+            "summary": [],
+            "baseline": {
+                "report": {
+                    "ok": True,
+                    "groundtruth_rows": 500,
+                    "evaluated_rows": 500,
+                    "successful_queries": 500,
+                },
+                "summary": [{
+                    "pipeline": "NVIDIA RAG Blueprint baseline",
+                    "evaluated_queries": 500,
+                    "successful_queries": 500,
+                    "recall_at_5": 0.81,
+                    "mrr": 0.72,
+                    "ndcg_at_5": 0.76,
+                    "avg_latency_seconds": 0.41,
+                }],
+            },
+            "reranked": {
+                "report": {
+                    "ok": True,
+                    "groundtruth_rows": 500,
+                    "evaluated_rows": 498,
+                    "successful_queries": 497,
+                },
+                "summary": [{
+                    "pipeline": "NVIDIA RAG Blueprint reranked",
+                    "evaluated_queries": 498,
+                    "successful_queries": 497,
+                    "recall_at_5": 0.91,
+                    "mrr": 0.84,
+                    "ndcg_at_5": 0.88,
+                }],
+            },
+        },
+    }
+    js = f"""
+const fs=require('fs'), vm=require('vm');
+const elements={{}};
+function el(id) {{
+  return elements[id] ||= {{id,value:id === 'nvidiaBenchmarkMode' ? 'baseline' : 'all',textContent:'',innerHTML:'',classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};
+}}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+const payload={json.dumps(payload)};
+renderNvidiaRag(payload);
+globalThis.__baseline=[document.getElementById('nvidiaBenchmarkHint').textContent, document.getElementById('nvidiaBenchmarkCards').innerHTML, document.getElementById('nvidiaBenchmarkTable').innerHTML].join(' ');
+document.getElementById('nvidiaBenchmarkMode').value='reranked';
+renderNvidiaRag(payload);
+globalThis.__reranked=[document.getElementById('nvidiaBenchmarkHint').textContent, document.getElementById('nvidiaBenchmarkCards').innerHTML, document.getElementById('nvidiaBenchmarkTable').innerHTML].join(' ');
+`, context);
+const baseline=context.__baseline;
+const reranked=context.__reranked;
+if (!baseline.includes('Baseline') || !baseline.includes('500 evaluated') || !baseline.includes('500 successful') || !baseline.includes('81.0%') || !baseline.includes('0.720') || baseline.includes('91.0%')) {{
+  console.error('baseline', baseline); process.exit(1);
+}}
+if (!reranked.includes('Reranked') || !reranked.includes('498 evaluated') || !reranked.includes('497 successful') || !reranked.includes('91.0%') || !reranked.includes('0.840') || !reranked.includes('—s') || reranked.includes('0.000s') || reranked.includes('81.0%')) {{
+  console.error('reranked', reranked); process.exit(1);
+}}
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_nvidia_legacy_reranked_artifact_is_not_mislabeled_as_baseline():
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    payload = {
+        "health": {"ok": True},
+        "benchmark": {
+            "report": {"ok": True, "reranker_enabled": True, "evaluated_rows": 500, "successful_queries": 500},
+            "summary": [{"evaluated_queries": 500, "successful_queries": 500, "recall_at_5": 0.91, "mrr": 0.84}],
+        },
+    }
+    js = f"""
+const fs=require('fs'), vm=require('vm');
+const elements={{}};
+function el(id) {{ return elements[id] ||= {{id,value:id === 'nvidiaBenchmarkMode' ? 'baseline' : 'all',textContent:'',innerHTML:'',classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}}; }}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+const payload={json.dumps(payload)};
+renderNvidiaRag(payload);
+globalThis.__baseline=document.getElementById('nvidiaBenchmarkCards').innerHTML;
+document.getElementById('nvidiaBenchmarkMode').value='reranked';
+renderNvidiaRag(payload);
+globalThis.__reranked=document.getElementById('nvidiaBenchmarkCards').innerHTML;
+`, context);
+if (context.__baseline.includes('91.0%') || !context.__reranked.includes('91.0%')) process.exit(1);
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_source_mode_disables_incompatible_legacy_actions():
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    js = f"""
+const fs=require('fs'), vm=require('vm');
+const elements={{}};
+function el(id) {{ return elements[id] ||= {{id,value:'',textContent:'',innerHTML:'',disabled:false,checked:false,hidden:false,classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}}; }}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+state.sourceCatalog={{datasets:[{{id:'dataset:wns-default',kind:'default'}},{{id:'project:demo',kind:'project'}}]}};
+document.getElementById('runDataset').value='project:demo';
+document.getElementById('runGroundtruth').value='groundtruth:none';
+syncRunMode();
+globalThis.__disabled=['runParseMineruBtn','runIngestBtn','runSmokeBtn','runFullGtBtn','runRerankerBtn','runRerankedEvalBtn','runEvalBtn','runHallucinationBtn','runHallucinationLlmBtn'].every(id=>document.getElementById(id).disabled);
+globalThis.__primary=document.getElementById('runCompletePipelineBtn').disabled;
+`, context);
+if (!context.__disabled || context.__primary) process.exit(1);
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_smoke_counts_use_summary_without_loading_json_rows():
@@ -213,7 +339,7 @@ def test_document_repository_page_does_not_show_summary_cards():
     assert "Review queue" not in app
 
 
-def test_user_project_upload_is_isolated_and_creates_manifest_and_canonical_corpus():
+def test_user_project_upload_is_isolated_and_creates_manifest_and_search_index():
     import scripts.serve_benchmark_dashboard as dashboard
 
     with tempfile.TemporaryDirectory() as td:
@@ -233,14 +359,13 @@ def test_user_project_upload_is_isolated_and_creates_manifest_and_canonical_corp
         assert project["project_id"].startswith("karthik-demo-data_")
         assert (project_root / "raw_uploads" / "policy.txt").exists()
         assert (project_root / "manifest.json").exists()
-        assert (project_root / "extracted_text" / "documents.jsonl").exists()
-        assert not (project_root / "search_index.json").exists()
+        assert (project_root / "search_index.json").exists()
         manifest = json.loads((project_root / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["storage_layout"]["runs"].endswith("/runs")
         assert "data/uploads" not in json.dumps(manifest)
 
 
-def test_project_query_uses_uploaded_text_without_fake_matrix_rows():
+def test_project_query_uses_uploaded_text_and_expands_selected_matrix():
     import scripts.serve_benchmark_dashboard as dashboard
 
     with tempfile.TemporaryDirectory() as td:
@@ -255,23 +380,23 @@ def test_project_query_uses_uploaded_text_without_fake_matrix_rows():
             result = dashboard.query_user_project(
                 project["project_id"],
                 "cancelled flight refund",
+                {
+                    "chunkers": ["fixed_tok1200_ov150", "Heading_sections_l2"],
+                    "embeddings": ["gte_multilingual_base"],
+                    "vector_stores": ["FAISS", "Qdrant"],
+                    "rerankers": ["bge-reranker-base", "none"],
+                },
                 top_k=3,
             )
         finally:
             dashboard.USER_PROJECTS_DIR = old
 
         assert result["ok"] is True
-        assert result["mode"] == "lexical_preview"
-        assert "combo_count" not in result
-        assert "rows" not in result
-        assert "selections" not in result
-        assert result["query"] == "cancelled flight refund"
-        assert result["hits"][0]["pdf_name"] == "refund.txt"
-        assert "Cancelled flight customers" in result["hits"][0]["paragraph"]
-        run_root = Path(td) / "user_projects" / project["project_id"] / "runs" / result["run_id"]
-        manifest = json.loads((run_root / "manifest.json").read_text())
-        assert manifest["mode"] == "lexical_preview"
-        assert "selections" not in manifest
+        assert result["mode"] == "evidence_only"
+        assert result["combo_count"] == 8
+        assert result["rows"][0]["query"] == "cancelled flight refund"
+        assert result["rows"][0]["hits"][0]["pdf_name"] == "refund.txt"
+        assert "Cancelled flight customers" in result["rows"][0]["hits"][0]["paragraph"]
 
 
 def test_frontend_has_multi_select_controls_project_query_and_matrix_count():
@@ -287,13 +412,18 @@ def test_frontend_has_multi_select_controls_project_query_and_matrix_count():
     assert "updateSelectedMatrixCount" in app
     assert "/api/project-query" in app
     assert "projectQueryTable" in index
-    assert "Lexical preview" in index
-    assert "Search this project" in index
-    assert "projectSelections()" not in app
-    assert "lexical_preview" in app
-    assert "selections: projectSelections()" not in app
+    assert "Evidence-only mode" in index
     assert "Type a specific test query" in index
     assert "id=\"runQueries\"" in index
+    assert 'id="runDataset"' in index
+    assert 'id="nvidiaDataset"' in index
+    assert 'id="uploadType"' in index
+    assert 'id="nvidiaDataPath"' not in index
+    assert "p.set('dataset_id'" in app
+    assert "p.set('groundtruth_id'" in app
+    assert "form.append('upload_type'" in app
+    assert "p.set('path'" not in app
+    assert "p.set('groundtruth'" not in app
     assert "Qwen vs no-reranker diagnosis" not in index
     assert "qwenAnalysis" not in index
     assert "renderQwenAnalysis" not in app
@@ -318,176 +448,15 @@ benchmarkOptions={{
 globalThis.__defaultCount=selectedMatrixComboCount();
 document.getElementById('runRerankerMain').selectedOptions=[{{value:'none'}}];
 globalThis.__noneCount=selectedMatrixComboCount();
+state.sourceCatalog={{datasets:[{{id:'project:demo',kind:'uploaded_project',sheets:['uploaded_chunks']}}],groundtruth:[]}};
+document.getElementById('runDataset').value='project:demo';
+document.getElementById('runRerankerMain').selectedOptions=[{{value:'all'}}];
+globalThis.__projectCount=selectedMatrixComboCount();
 `, context);
-if (context.__defaultCount !== 180 || context.__noneCount !== 60) {{
-  console.error(JSON.stringify({{defaultCount: context.__defaultCount, noneCount: context.__noneCount}}));
+if (context.__defaultCount !== 180 || context.__noneCount !== 60 || context.__projectCount !== 36) {{
+  console.error(JSON.stringify({{defaultCount: context.__defaultCount, noneCount: context.__noneCount, projectCount: context.__projectCount}}));
   process.exit(1);
 }}
 """
     proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-
-
-def test_project_result_http_endpoints_are_exact_no_store_and_safely_mapped(monkeypatch: pytest.MonkeyPatch):
-    import scripts.serve_benchmark_dashboard as dashboard
-    from source.services.project_run_results import ProjectRunResultsError
-
-    project_id = "alpha_0123456789abcdef0123456789abcdef"
-    run_id = "run_0123456789abcdef0123456789abcdef"
-
-    class FakeResults:
-        def result_sources(self, *, official_configured: int, official_evaluated: int):
-            return {"official": {"source_type": "official", "configured": official_configured, "evaluated": official_evaluated}, "projects": [{"project_id": project_id, "label": "Alpha"}]}
-
-        def project_runs(self, supplied_project_id: str):
-            if supplied_project_id != project_id:
-                raise ProjectRunResultsError("not_found", "Project result was not found", 404)
-            return [{"project_id": project_id, "run_id": run_id}]
-
-        def project_run_results(self, supplied_project_id: str, supplied_run_id: str):
-            if (supplied_project_id, supplied_run_id) != (project_id, run_id):
-                raise ProjectRunResultsError("not_found", "Run result was not found", 404)
-            return {"source_type": "uploaded_project", "project_id": project_id, "run_id": run_id, "rows": []}
-
-        def project_run_evidence(self, supplied_project_id: str, supplied_run_id: str, combo_id: str, *, limit: int, offset: int):
-            if (supplied_project_id, supplied_run_id, combo_id) != (project_id, run_id, "combo"):
-                raise ProjectRunResultsError("not_found", "Combination evidence was not found", 404)
-            return {"project_id": project_id, "run_id": run_id, "combo_id": combo_id, "rows": [], "next_offset": None, "limit": limit, "offset": offset}
-
-    monkeypatch.setattr(dashboard, "project_result_service", lambda: FakeResults())
-    monkeypatch.setattr(
-        dashboard,
-        "read_evaluation",
-        lambda: {
-            "summary": [],
-            "reranked": {"summary": []},
-            "benchmark_reference": {
-                "summary": [{}, {}],
-                "report": {"config_rows": 0, "official_matrix_rows": 180},
-            },
-        },
-    )
-    monkeypatch.setattr(dashboard, "official_evaluated_count", lambda _evaluation: 2)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        paths = (
-            "/api/result-sources",
-            f"/api/project-runs?project_id={quote(project_id)}",
-            f"/api/project-run-results?project_id={quote(project_id)}&run_id={quote(run_id)}",
-            f"/api/project-run-evidence?project_id={quote(project_id)}&run_id={quote(run_id)}&combo_id=combo&limit=2&offset=0",
-        )
-        payloads = []
-        for path in paths:
-            with urlopen(base + path, timeout=5) as response:
-                assert response.headers["Cache-Control"] == "no-store, max-age=0"
-                payloads.append(json.loads(response.read()))
-        assert payloads[0]["official"] == {"source_type": "official", "configured": 180, "evaluated": 2}
-        assert payloads[1][0]["run_id"] == run_id
-        assert payloads[2]["source_type"] == "uploaded_project"
-        assert payloads[3]["limit"] == 2
-
-        for bad_path in (
-            "/api/project-runs",
-            f"/api/project-runs?project_id={quote(project_id)}&extra=/srv/private",
-            f"/api/project-run-evidence?project_id={quote(project_id)}&run_id={quote(run_id)}&combo_id=combo&limit=999&offset=0",
-            "/api/project-runs?project_id=missing_0123456789abcdef0123456789abcdef",
-        ):
-            with pytest.raises(HTTPError) as caught:
-                urlopen(base + bad_path, timeout=5)
-            body = json.loads(caught.value.read())
-            assert set(body) == {"error"}
-            assert set(body["error"]) == {"code", "message"}
-            assert "/srv" not in json.dumps(body)
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
-def test_official_evaluated_count_excludes_failed_or_unmeasured_rows():
-    import scripts.serve_benchmark_dashboard as dashboard
-
-    official_key = next(iter(dashboard.official_matrix_keys()))
-    chunker, embedding, store, reranker = official_key
-    base = {
-        "sheet": chunker,
-        "embedding": embedding,
-        "store": store,
-        "reranker": reranker,
-    }
-    failed = {**base, "status": "failed"}
-    failed_with_stale_metrics = {
-        **base,
-        "status": "completed",
-        "query_count": "1",
-        "error_code": "reranker_failed",
-    }
-    unmeasured = {**base, "status": "completed"}
-    measured = {**base, "status": "completed", "query_count": "1"}
-
-    assert dashboard.official_evaluated_count({
-        "summary": [failed],
-        "reranked": {"summary": []},
-        "benchmark_reference": {"summary": []},
-    }) == 0
-    assert dashboard.official_evaluated_count({
-        "summary": [failed_with_stale_metrics],
-        "reranked": {"summary": []},
-        "benchmark_reference": {"summary": []},
-    }) == 0
-    assert dashboard.official_evaluated_count({
-        "summary": [unmeasured],
-        "reranked": {"summary": []},
-        "benchmark_reference": {"summary": []},
-    }) == 0
-    assert dashboard.official_evaluated_count({
-        "summary": [measured],
-        "reranked": {"summary": []},
-        "benchmark_reference": {"summary": []},
-    }) == 1
-
-
-def test_benchmark_reference_skips_failed_rows_and_uses_measured_archive(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import scripts.serve_benchmark_dashboard as dashboard
-
-    official_key = next(iter(dashboard.official_matrix_keys()))
-    chunker, embedding, store, reranker = official_key
-    base = {
-        "chunker": chunker,
-        "embedding": embedding,
-        "vector_store": store,
-        "reranker": reranker,
-    }
-    latest = tmp_path / "latest.csv"
-    archive = tmp_path / "archive.csv"
-    failed = tmp_path / "failed.csv"
-    _write_csv(latest, [{**base, "status": "completed", "query_count": ""}])
-    _write_csv(archive, [{**base, "status": "completed", "query_count": "1"}])
-    _write_csv(failed, [{**base, "status": "failed", "query_count": "1"}])
-    monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {official_key})
-    monkeypatch.setattr(
-        dashboard,
-        "benchmark_reference_sources",
-        lambda: [
-            ("modular_matrix", latest),
-            ("modular_run:archive", archive),
-            ("modular_run:failed", failed),
-        ],
-    )
-
-    reference = dashboard.read_benchmark_reference()
-
-    assert len(reference["summary"]) == 1
-    assert reference["summary"][0]["source"] == "modular_run:archive"
-    assert reference["summary"][0]["status"] == "completed"
-    assert dashboard.official_evaluated_count({
-        "summary": [],
-        "reranked": {"summary": []},
-        "benchmark_reference": reference,
-    }) == 1

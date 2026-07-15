@@ -43,7 +43,7 @@ BENCHMARK_INPUT_PATH = ROOT / "data" / "benchmark_input.csv"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 GROUNDTRUTH_DIR = ROOT / "data" / "groundtruth"
 LIVE_EMBEDDINGS = ["gte_multilingual_base", "jina_v3"]
-LIVE_RERANKERS = ["bge-reranker-base", "qwen3_4b_rerank"]
+LIVE_RERANKERS = ["bge-reranker-base", "qwen3_4b_rerank", "Amazon Rerank v1"]
 ARCHIVE_DIRS = [
     "data/faiss_indexes",
     "data/retrieval_smoke",
@@ -73,11 +73,25 @@ def cfg_options() -> dict[str, list[str]]:
     }
 
 
-def choose(values: list[str] | None, allowed: list[str]) -> list[str]:
-    raw = [v for v in (values or []) if v]
+def normalize_reranker(value: str) -> str:
+    raw = str(value or "").strip()
+    normalized = "_".join(part for part in raw.lower().replace(":", " ").replace("-", " ").split() if part)
+    if normalized in {"none", "no_reranker", "baseline"}:
+        return "none"
+    if normalized in {"qwen", "qwen3", "qwen3_4b", "qwen3_4b_rerank", "qwen3_4b_reranker", "qwen3_reranker_4b_seq_cls"}:
+        return "qwen3_4b_rerank"
+    if normalized in {"amazon", "amazon_rerank", "amazon_rerank_v1", "amazon_rerank_v1_0", "amazon_bedrock", "amazon_bedrock_rerank"} or ("amazon" in normalized and "rerank" in normalized):
+        return "Amazon Rerank v1"
+    if normalized in {"bge", "bge_reranker", "bge_reranker_base"}:
+        return "bge-reranker-base"
+    return raw
+
+
+def choose(values: list[str] | None, allowed: list[str], normalize=None) -> list[str]:
+    raw = [normalize(v) if normalize else v for v in (values or []) if v]
     if not raw or "all" in raw:
         return allowed
-    return [v for v in raw if v in allowed]
+    return [v for v in raw if v in allowed or v == "none"]
 
 
 def find_groundtruth(value: str) -> Path | None:
@@ -98,12 +112,13 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-def extraction_audit_issues() -> list[str]:
-    if not PDF_AUDIT_PATH.exists():
-        return ["data/pdf_extraction_audit.csv missing. Run scripts/run_chunking_pipeline.py --mode all with MinerU/layout extraction before live benchmark ingestion."]
-    rows = read_csv_rows(PDF_AUDIT_PATH)
+def extraction_audit_issues(audit_path: Path | None = None) -> list[str]:
+    audit_path = audit_path or PDF_AUDIT_PATH
+    if not audit_path.exists():
+        return [f"{audit_path} missing. Run extraction/chunking before live benchmark ingestion."]
+    rows = read_csv_rows(audit_path)
     if not rows:
-        return ["data/pdf_extraction_audit.csv is empty. Extraction audit evidence is required before live benchmark ingestion."]
+        return [f"{audit_path} is empty. Extraction audit evidence is required before live benchmark ingestion."]
     bad_statuses = {"failed", "text_only_review", "needs_ocr", "partial_ocr_review"}
     issues: list[str] = []
     for row in rows:
@@ -130,20 +145,42 @@ def workbook_sheet_names(path: Path) -> list[str]:
         return []
 
 
-def chunking_gap(sheets: list[str]) -> tuple[list[str], list[str], bool]:
-    available = workbook_sheet_names(WORKBOOK_PATH)
+def normalized_queries(values: list[str] | None) -> list[str]:
+    return [query for value in (values or []) if (query := str(value).strip())]
+
+
+def dataset_sheet_options(workbook_path: Path, configured_sheets: list[str]) -> list[str]:
+    if workbook_path.resolve() == WORKBOOK_PATH.resolve():
+        return configured_sheets
+    return workbook_sheet_names(workbook_path)
+
+
+def chunking_gap(
+    sheets: list[str],
+    workbook_path: Path = WORKBOOK_PATH,
+    benchmark_input_path: Path = BENCHMARK_INPUT_PATH,
+) -> tuple[list[str], list[str], bool]:
+    available = workbook_sheet_names(workbook_path)
     missing = [sheet for sheet in sheets if sheet not in available]
-    can_rebuild = BENCHMARK_INPUT_PATH.exists()
+    can_rebuild = (
+        benchmark_input_path.exists()
+        and workbook_path.resolve() == WORKBOOK_PATH.resolve()
+        and benchmark_input_path.resolve() == BENCHMARK_INPUT_PATH.resolve()
+    )
     return available, missing, can_rebuild
 
 
-def ensure_chunking_workbook(sheets: list[str]) -> None:
-    available, missing, can_rebuild = chunking_gap(sheets)
+def ensure_chunking_workbook(
+    sheets: list[str],
+    workbook_path: Path = WORKBOOK_PATH,
+    benchmark_input_path: Path = BENCHMARK_INPUT_PATH,
+) -> None:
+    available, missing, can_rebuild = chunking_gap(sheets, workbook_path, benchmark_input_path)
     if not missing:
         return
     if not can_rebuild:
         raise RuntimeError(
-            "Selected chunker sheet(s) are missing and data/benchmark_input.csv is unavailable: "
+            f"Selected chunker sheet(s) are missing from {workbook_path} and cannot be rebuilt here: "
             + ", ".join(missing)
         )
     log(
@@ -153,7 +190,7 @@ def ensure_chunking_workbook(sheets: list[str]) -> None:
         + ", ".join(available or ["none"])
     )
     run_cmd([sys.executable, "scripts/run_chunking_pipeline.py", "--mode", "chunk-only"], "chunking workbook rebuild")
-    available_after, missing_after, _ = chunking_gap(sheets)
+    available_after, missing_after, _ = chunking_gap(sheets, workbook_path, benchmark_input_path)
     if missing_after:
         raise RuntimeError(
             "Chunking rebuild finished but selected sheet(s) are still missing: "
@@ -196,34 +233,43 @@ def faiss_import_ok() -> tuple[bool, str]:
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
     load_env()
     options = cfg_options()
-    sheets = choose(args.sheets, options["sheets"])
+    workbook_path = Path(args.workbook).resolve() if getattr(args, "workbook", "") else WORKBOOK_PATH
+    benchmark_input_path = Path(args.benchmark_input).resolve() if getattr(args, "benchmark_input", "") else BENCHMARK_INPUT_PATH
+    audit_path = Path(args.pdf_audit).resolve() if getattr(args, "pdf_audit", "") else PDF_AUDIT_PATH
+    sheets = choose(args.sheets, dataset_sheet_options(workbook_path, options["sheets"]))
     embeddings = choose(args.embeddings, [e for e in options["embeddings"] if e in LIVE_EMBEDDINGS])
     stores = choose(args.stores, options["stores"])
-    if args.rerankers and "none" in args.rerankers:
+    evidence_only = bool(getattr(args, "evidence_only", False))
+    if evidence_only:
         rerankers: list[str] = []
+    elif args.rerankers and "none" in [normalize_reranker(r) for r in args.rerankers]:
+        rerankers = []
     else:
-        rerankers = choose(args.rerankers, LIVE_RERANKERS)
-    gt = find_groundtruth(args.groundtruth)
+        rerankers = choose(args.rerankers, LIVE_RERANKERS, normalize=normalize_reranker)
+    gt = None if evidence_only else find_groundtruth(args.groundtruth)
     missing: list[str] = []
     warnings: list[str] = []
 
-    available_sheets, missing_sheets, can_rebuild_chunking = chunking_gap(sheets)
-    if not WORKBOOK_PATH.exists() and not can_rebuild_chunking:
-        missing.append("Missing data/chunking_methods_output_v2.xlsx and data/benchmark_input.csv. Run PDF extraction/chunking first.")
+    available_sheets, missing_sheets, can_rebuild_chunking = chunking_gap(sheets, workbook_path, benchmark_input_path)
+    if not workbook_path.exists() and not can_rebuild_chunking:
+        missing.append(f"Missing selected workbook: {workbook_path}")
     elif missing_sheets:
         message = (
-            "Selected chunker sheet(s) are missing from data/chunking_methods_output_v2.xlsx: "
+            f"Selected chunker sheet(s) are missing from {workbook_path}: "
             + ", ".join(missing_sheets)
             + ". Available sheets: "
             + ", ".join(available_sheets or ["none"])
         )
         if can_rebuild_chunking:
-            warnings.append(message + ". Full run will rebuild chunking from data/benchmark_input.csv before ingestion.")
+            warnings.append(message + ". Full run will rebuild chunking from the selected benchmark input before ingestion.")
         else:
-            missing.append(message + ". Run PDF extraction/chunking first.")
-    if not gt:
+            missing.append(message + ". Regenerate the selected dataset workbook first.")
+    queries = normalized_queries(getattr(args, "query", []))
+    if evidence_only and not queries:
+        missing.append("Evidence-only mode requires at least one --query value.")
+    elif not evidence_only and not gt:
         missing.append("Missing ground-truth CSV/XLSX under data/groundtruth/ or in the selected groundtruth path.")
-    audit_issues = extraction_audit_issues()
+    audit_issues = [] if getattr(args, "skip_extraction_audit", False) else extraction_audit_issues(audit_path)
     if audit_issues:
         message = "Extraction audit is not final-product clean: " + "; ".join(audit_issues)
         if args.allow_partial_extraction:
@@ -241,7 +287,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     if unsupported_embeddings:
         missing.append("Selected embedding is not supported by the live DB ingestion runner yet: " + ", ".join(unsupported_embeddings))
 
-    unsupported_rerankers = [r for r in (args.rerankers or []) if r not in {"all", "none", *LIVE_RERANKERS}]
+    unsupported_rerankers = [r for r in [normalize_reranker(v) for v in (args.rerankers or [])] if r not in {"all", "none", *LIVE_RERANKERS}]
     if unsupported_rerankers:
         missing.append("Selected reranker is not supported by the live reranker runner yet: " + ", ".join(unsupported_rerankers))
 
@@ -255,6 +301,13 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         env_name = reranker_envs.get(reranker)
         if env_name and not os.getenv(env_name):
             missing.append(f"{reranker} selected but {env_name} is not set. Run setup_all_on_vm.sh or set it explicitly.")
+        if reranker == "Amazon Rerank v1":
+            if not (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")):
+                missing.append("Amazon Rerank v1 selected but AWS_REGION/AWS_DEFAULT_REGION is not set.")
+            try:
+                import boto3  # type: ignore[import-not-found]  # noqa: F401
+            except Exception as exc:
+                missing.append("Amazon Rerank v1 selected but boto3 import failed: " + repr(exc))
 
     service_checks: list[dict[str, Any]] = []
     model_adapter = service_base_from_endpoint(os.getenv("MODEL_ADAPTER_URL", "http://127.0.0.1:5000"))
@@ -290,6 +343,11 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": warnings,
         "service_checks": service_checks,
         "groundtruth": str(gt.relative_to(ROOT)) if gt and gt.is_relative_to(ROOT) else str(gt or ""),
+        "mode": "evidence_only" if evidence_only else "evaluated",
+        "workbook": str(workbook_path),
+        "benchmark_input": str(benchmark_input_path),
+        "pdf_audit": "" if getattr(args, "skip_extraction_audit", False) else str(audit_path),
+        "queries": queries,
         "sheets": sheets,
         "embeddings": embeddings,
         "stores": stores,
@@ -341,6 +399,12 @@ def main() -> int:
     parser.add_argument("--stores", nargs="*", default=["all"])
     parser.add_argument("--rerankers", nargs="*", default=["all"])
     parser.add_argument("--groundtruth", default="")
+    parser.add_argument("--workbook", default="")
+    parser.add_argument("--benchmark-input", default="")
+    parser.add_argument("--pdf-audit", default="")
+    parser.add_argument("--skip-extraction-audit", action="store_true")
+    parser.add_argument("--evidence-only", action="store_true")
+    parser.add_argument("--query", action="append", default=[])
     parser.add_argument("--chunk-limit", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=0)
     parser.add_argument("--top-k", type=int, default=10)
@@ -364,23 +428,40 @@ def main() -> int:
     if info["warnings"]:
         for warning in info["warnings"]:
             log("WARNING " + warning)
-    archive_fresh_dirs(run_id)
+    if args.fresh_run and not args.evidence_only:
+        archive_fresh_dirs(run_id)
 
     sheets = info["sheets"]
     embeddings = info["embeddings"]
     stores = info["stores"]
     rerankers = info["rerankers"]
-    gt = str(ROOT / info["groundtruth"] if not Path(info["groundtruth"]).is_absolute() else Path(info["groundtruth"]))
     max_combos = str(info["combo_count"])
+    workbook = Path(info.get("workbook") or args.workbook or WORKBOOK_PATH).resolve()
+    benchmark_input = Path(info.get("benchmark_input") or args.benchmark_input or BENCHMARK_INPUT_PATH).resolve()
+    evidence_only = bool(args.evidence_only or info.get("mode") == "evidence_only")
 
-    ensure_chunking_workbook(sheets)
+    ensure_chunking_workbook(sheets, workbook, benchmark_input)
 
-    ingest_cmd = [sys.executable, "scripts/run_long_db_ingestion.py", "--run-id", run_id, "--skip-existing-store-success", "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores]
+    ingest_cmd = [sys.executable, "scripts/run_long_db_ingestion.py", "--run-id", run_id, "--skip-existing-store-success", "--workbook", str(workbook), "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores]
     if args.chunk_limit:
         ingest_cmd += ["--limit", str(args.chunk_limit)]
     run_cmd(ingest_cmd, "ingestion")
 
-    retrieval_cmd = [sys.executable, "scripts/run_retrieval_smoke_from_vm_dbs.py", "--run-id", run_id, "--queries-file", gt, "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores, "--top-k", str(args.top_k), "--max-combos", max_combos]
+    retrieval_base = [sys.executable, "scripts/run_retrieval_smoke_from_vm_dbs.py", "--run-id", run_id]
+    if evidence_only:
+        queries = normalized_queries(list(info.get("queries") or args.query))
+        retrieval_cmd = [*retrieval_base, "--queries", *queries, "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores, "--top-k", str(args.top_k), "--max-combos", max_combos]
+        if args.query_limit:
+            retrieval_cmd += ["--query-limit", str(args.query_limit)]
+        run_cmd(retrieval_cmd, "evidence-only retrieval")
+        run_cmd([sys.executable, "scripts/collect_vm_dashboard_artifacts.py"], "dashboard artifact refresh")
+        log("COMPLETE PIPELINE FINISHED mode=evidence_only metrics=not_applicable")
+        return 0
+
+    groundtruth_value = info["groundtruth"]
+    gt_path = Path(groundtruth_value)
+    gt = str(ROOT / gt_path if not gt_path.is_absolute() else gt_path)
+    retrieval_cmd = [*retrieval_base, "--queries-file", gt, "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores, "--top-k", str(args.top_k), "--max-combos", max_combos]
     if args.query_limit:
         retrieval_cmd += ["--query-limit", str(args.query_limit)]
     run_cmd(retrieval_cmd, "ground-truth retrieval")
