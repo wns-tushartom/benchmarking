@@ -152,6 +152,19 @@ def test_frontend_initial_load_uses_lazy_evidence_limits():
     assert "reranker_limit=60000" not in text
 
 
+def test_operational_render_defines_evaluation_before_reading_groundtruth_status() -> None:
+    app = Path(__file__).resolve().parents[1] / "web" / "app.js"
+    text = app.read_text(encoding="utf-8")
+    render_operational = text.split("function renderOperational()", 1)[1].split(
+        "function renderPreflight", 1
+    )[0]
+
+    declaration = "const evaluation = op.evaluation || {};"
+    status_read = "evaluation?.report?.groundtruth_rows"
+    assert declaration in render_operational
+    assert render_operational.index(declaration) < render_operational.index(status_read)
+
+
 def test_metrics_exposes_shared_dataset_groundtruth_and_result_set_selectors() -> None:
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")

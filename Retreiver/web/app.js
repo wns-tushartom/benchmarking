@@ -1517,6 +1517,7 @@ function operationalRerankRows() {
 
 function renderOperational() {
   const op = state.operational || {};
+  const evaluation = op.evaluation || {};
   const ingestion = op.ingestion || {};
   const rows = ingestion.rows || [];
   const latest = latestRows(rows);
