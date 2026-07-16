@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import subprocess
 import tempfile
 import threading
@@ -169,6 +170,66 @@ def test_metrics_exposes_shared_dataset_groundtruth_and_result_set_selectors() -
     assert "$('metricsResultSet')?.addEventListener('input'" in app
 
 
+def test_run_pipeline_can_explicitly_allow_audited_text_only_documents() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="runAllowPartialExtraction"' in index
+    assert "Allow audited text-only documents" in index
+    assert "if ($('runAllowPartialExtraction')?.checked) p.set('allow_partial_extraction', '1');" in app
+
+
+def test_advanced_pipeline_controls_use_the_six_approved_stage_names_in_order() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+
+    expected = [
+        "Extraction",
+        "Embedding",
+        "Vector-store ingestion",
+        "Retrieval",
+        "Reranking",
+        "Evaluation",
+    ]
+    labels = re.findall(r'data-pipeline-stage="[^"]+"[^>]*>\s*<h3>([^<]+)</h3>', index)
+    assert labels == expected
+    assert 'id="runParseMineruBtn"' in index
+    assert 'id="runIngestBtn"' in index
+    assert 'id="runFullGtBtn"' in index
+    assert 'id="runRerankerBtn"' in index
+    assert 'id="runRerankedEvalBtn"' in index
+    assert 'id="runEvalBtn"' in index
+
+
+def test_grounding_audit_is_visibly_disabled_until_the_feature_is_active() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+
+    assert re.search(
+        r'<button[^>]+data-page="hallucination"[^>]+disabled[^>]+aria-disabled="true"',
+        index,
+    )
+    assert re.search(r'id="runHallucinationBtn"[^>]+disabled', index)
+    assert re.search(r'id="runHallucinationLlmBtn"[^>]+disabled', index)
+    assert 'data-feature-state="disabled"' in index
+    assert "Not active in this build" in index
+
+
+def test_preflight_keeps_operator_summary_primary_and_diagnostics_collapsed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="runReadinessSummary"' in index
+    assert re.search(r'<details[^>]+id="runTechnicalDiagnostics"(?![^>]+open)', index)
+    assert "Technical readiness details" in index
+    assert "Ready to run the selected pipeline." in app
+    assert "Resolve before running:" in app
+    assert "groundtruth_id" in app
+    assert "payload.groundtruth ||" not in app
+
+
 def test_nvidia_baseline_and_reranked_results_are_independently_visible():
     root = Path(__file__).resolve().parents[1]
     app = root / "web" / "app.js"
@@ -306,9 +367,9 @@ if (!context.__disabled || context.__primary) process.exit(1);
 def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
-    assert "/recommendations.js?v=20260715-metrics-sources" in index
-    assert "/app.js?v=20260715-metrics-sources" in index
-    assert "/styles.css?v=20260715-metrics-sources" in index
+    assert "/recommendations.js?v=20260716-extraction-override" in index
+    assert "/app.js?v=20260716-meeting-hardening" in index
+    assert "/styles.css?v=20260716-meeting-hardening" in index
     assert "20260709-query-ui" not in index
 
 
@@ -362,6 +423,78 @@ def test_evidence_browser_wording_is_clear_about_display_rows_vs_raw_artifacts()
     assert "Not total document chunks" in app
     assert "Retrieved evidence excerpts" in app
     assert "Benchmark final top 5 evidence" in app
+
+
+def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="globalDataset"' in index
+    assert 'id="globalGroundtruth"' in index
+    assert 'id="globalSourceContext"' in index
+    for mirror_id in (
+        "runDataset",
+        "runGroundtruth",
+        "nvidiaDataset",
+        "nvidiaGroundtruth",
+        "metricsDataset",
+        "metricsGroundtruth",
+        "recommendationDataset",
+        "recommendationGroundtruth",
+    ):
+        assert f'data-source-mirror><select id="{mirror_id}"' in index
+    assert "function applyGlobalSourceContext" in app
+    assert "fillSourceSelect('globalDataset'" in app
+    assert "fillSourceSelect('globalGroundtruth'" in app
+    assert "$('globalDataset')?.addEventListener('change'" in app
+    assert "$('globalGroundtruth')?.addEventListener('change'" in app
+
+
+def test_run_pipeline_depth_controls_are_explicit_and_chunk_limit_is_fixed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
+    pipeline = (root / "scripts" / "run_complete_pipeline.py").read_text(encoding="utf-8")
+
+    assert 'id="runRetrievalTopK"' in index
+    assert 'id="runRerankedOutputK"' in index
+    assert 'id="runLimit"' not in index
+    assert 'id="rerankerLimit"' not in index
+    assert "Chunk limit" not in index
+    assert "Reranker artifact limit" not in index
+    assert "p.set('retrieval_top_k'" in app
+    assert "p.set('reranked_output_k'" in app
+    assert "p.set('chunk_limit'" not in app
+    assert "$('runTopK')" not in app
+    assert "$('rerankerLimit')" not in app
+    assert "p.set('limit', '0')" in app
+    assert '"--chunk-limit"' not in server
+    assert 'parser.add_argument("--chunk-limit"' not in pipeline
+
+
+def test_dashboard_publishes_document_readiness_without_losing_last_success():
+    root = Path(__file__).resolve().parents[1]
+    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
+    assert "from scripts.dashboard_snapshot_state import publish_document_readiness" in server
+    assert "document_repository = publish_document_readiness(ROOT, read_document_repository())" in server
+    assert '"document_repository_latest_attempt": document_repository.get("latest_attempt", {})' in server
+
+
+def test_dashboard_query_upload_reuses_hardened_parser_contract():
+    root = Path(__file__).resolve().parents[1]
+    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
+    index = (root / "web" / "index.html").read_text(encoding="utf-8")
+    app = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert 'upload_type not in {"dataset", "groundtruth", "queries"}' in server
+    assert "payload = parse_query_upload(original, content)" in server
+    assert 'id="runQueryFile"' in index
+    assert 'accept=".txt,.csv,.xlsx"' in index
+    assert 'id="runQueryUploadBtn"' in index
+    assert "async function uploadRunQueries()" in app
+    assert "form.append('upload_type', 'queries')" in app
+    assert "$('runQueries').value = payload.queries.join('\\n')" in app
 
 
 def test_document_repository_page_does_not_show_summary_cards():
@@ -435,7 +568,7 @@ def test_project_query_uses_uploaded_text_without_fake_matrix_rows():
         assert "selections" not in manifest
 
 
-def test_frontend_has_multi_select_controls_project_query_and_matrix_count():
+def test_frontend_has_multi_select_controls_without_legacy_lexical_preview():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     app_path = root / "web" / "app.js"
@@ -446,14 +579,16 @@ def test_frontend_has_multi_select_controls_project_query_and_matrix_count():
     assert 'id="runRerankerMain" multiple' in index
     assert "selectedValues(" in app
     assert "updateSelectedMatrixCount" in app
-    assert "/api/project-query" in app
-    assert "projectQueryTable" in index
-    assert "Lexical preview" in index
-    assert "Search this project" in index
+    assert "/api/project-query" not in app
+    assert "projectQueryTable" not in index
+    assert "Lexical preview" not in index
+    assert "Search this project" not in index
+    assert "function runProjectQuery()" not in app
+    assert "function renderProjectQuery(" not in app
     assert "projectSelections()" not in app
-    assert "lexical_preview" in app
+    assert "lexical_preview" not in app
     assert "selections: projectSelections()" not in app
-    assert "Type a specific test query" in index
+    assert "Evidence-only queries" in index
     assert "id=\"runQueries\"" in index
     assert 'id="runDataset"' in index
     assert 'id="nvidiaDataset"' in index

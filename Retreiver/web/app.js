@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { const el = $(id); if (el) el.textContent = value; };
 let state = { operational: {}, files: [], options: {}, sourceCatalog: {datasets: [], groundtruth: []} };
 let benchmarkOptions = {};
+let globalSourceContextState = {officialGroundtruthId: ''};
 
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num = (v) => Number.parseFloat(v || 0) || 0;
@@ -10,7 +11,12 @@ const fmt = (v, d = 3) => Number.isFinite(num(v)) ? num(v).toFixed(d) : '—';
 const fmtInt = (v) => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : '0';
 const costLabel = (r) => /openai|amazon/i.test(`${r.embedding || ''} ${r.reranker || ''}`) ? 'commercial key/cost' : 'open-source/VM cost';
 
+function sourceStateModule() {
+  return globalThis.DashboardSourceState || null;
+}
+
 function canonicalRerankerName(value) {
+  if (sourceStateModule()) return sourceStateModule().canonicalRerankerName(value);
   const raw = String(value || '').trim();
   if (!raw) return 'none';
   const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -25,10 +31,12 @@ function canonicalRerankerName(value) {
 }
 
 function canonicalMetricRow(row, extra = {}) {
+  if (sourceStateModule()) return sourceStateModule().canonicalMetricRow(row, extra);
   return {...row, ...extra, reranker: canonicalRerankerName(row?.reranker || row?.reranking_model || 'none')};
 }
 
 function metricRowKey(row) {
+  if (sourceStateModule()) return sourceStateModule().metricRowKey(row);
   return `${row.sheet || ''}|${row.embedding || ''}|${row.store || ''}|${canonicalRerankerName(row.reranker || 'none')}`;
 }
 
@@ -622,6 +630,7 @@ function filterBySelect(rows, mapping) {
 }
 
 function metricScore(r) {
+  if (sourceStateModule()) return sourceStateModule().metricScore(r);
   return num(r.winner_score) || ((0.45*num(r.recall_at_5)) + (0.30*num(r.mrr)) + (0.20*num(r.ndcg_at_5)) + (0.05*(1/(1+num(r.avg_latency_seconds)))));
 }
 
@@ -1172,38 +1181,17 @@ function renderRecommendationSource(payload) {
 
 function officialRecommendationPayload(resultSet = 'official') {
   const evaluation = state.operational?.evaluation || {};
-  const baseline = resultSet === 'baseline';
-  const evidenceCounts = new Map();
-  (state.operational?.benchmark_detail_evidence || []).forEach(evidence => {
-    const key = metricRowKey(canonicalMetricRow(evidence));
-    evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
-  });
-  const sourceRows = baseline
-    ? [
-        ...(evaluation?.summary || []),
-        ...(evaluation?.reranked?.summary || []),
-      ].filter(row => canonicalRerankerName(row?.reranker || row?.reranking_model || 'none') === 'none')
-    : (evaluation?.benchmark_reference?.summary || []);
-  const rows = dedupeMetricRows(sourceRows).map(row => {
-    const official = canonicalMetricRow(row, {status: row.status || 'completed'});
-    const key = metricRowKey(official);
-    return {
-      ...official,
-      combo_id: key,
-      winner_score: metricScore(official),
-      evidence_count: evidenceCounts.has(key) ? evidenceCounts.get(key) : null,
-    };
-  });
   const descriptor = recommendationState.official || {};
-  return {
-    source_type: 'official',
-    result_set: baseline ? 'baseline' : 'official',
-    scoring_mode: 'retrieval_labels',
-    metric_k: 5,
-    configured: baseline ? rows.length : (descriptor.configured ?? 180),
-    evaluated: baseline ? rows.length : (descriptor.evaluated ?? rows.length),
-    rows,
-  };
+  const sourceState = sourceStateModule();
+  if (!sourceState) throw new Error('Dashboard source-state module is unavailable');
+  if (resultSet === 'baseline') {
+    return sourceState.baselineResultPayload(evaluation, state.operational?.benchmark_detail_evidence || []);
+  }
+  return sourceState.officialResultPayload(
+    evaluation,
+    {configured: descriptor.configured ?? 180, evaluated: descriptor.evaluated},
+    state.operational?.benchmark_detail_evidence || [],
+  );
 }
 
 function setSelectOptionLabel(selectId, value, label) {
@@ -1220,10 +1208,24 @@ function showOfficialRecommendations() {
   const baselineLabel = `No-reranker baseline — ${baselineCount} measured`;
   setSelectOptionLabel('recommendationOfficialSet', 'baseline', baselineLabel);
   setSelectOptionLabel('metricsResultSet', 'baseline', baselineLabel);
+  renderCanonicalResultPayload(payload);
+}
+
+function renderCanonicalResultPayload(payload) {
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const scored = payload?.scoring_mode === 'retrieval_labels';
+  const best = scored ? rows[0] || null : null;
+  const fastest = scored
+    ? rows.filter(row => num(row.avg_latency_seconds) > 0).sort((a, b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null
+    : null;
+  setText('bestR5Status', best ? `${(num(best.recall_at_5) * 100).toFixed(1)}%` : '—');
+  setText('bestConfigNote', best ? pipelineLabel(best) : (scored ? 'best accuracy score' : 'quality unavailable without labels'));
+  setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
+  setText('bestLatencyNote', fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency');
   renderRecommendationSource(payload);
   renderMetricsSource(payload);
   syncSourceSelectorControls();
-  renderPipelineComparison(state.operational?.evaluation || {}, payload.rows);
+  if (scored) renderPipelineComparison(state.operational?.evaluation || {}, rows);
 }
 
 function populateRecommendationProjects() {
@@ -1313,7 +1315,8 @@ async function loadResultSources() {
     populateRecommendationDatasets();
     populateRecommendationGroundtruths();
     syncSourceSelectorControls();
-    if (recommendationState.sourceType === 'official') showOfficialRecommendations();
+    if ($('globalDataset') && $('globalGroundtruth')) await applyGlobalSourceContext();
+    else if (recommendationState.sourceType === 'official') showOfficialRecommendations();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
     clearRecommendationView('Result sources unavailable');
@@ -1356,8 +1359,8 @@ async function loadProjectRun(projectId, runId) {
     ) {
       throw new Error('Project run response identity mismatch');
     }
-    renderRecommendationSource(payload);
-    renderMetricsSource(payload);
+    const normalizedPayload = sourceStateModule()?.normalizeResultPayload(payload) || payload;
+    renderCanonicalResultPayload(normalizedPayload);
     syncSourceSelectorControls();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
@@ -1443,66 +1446,31 @@ async function uploadDataset(ev) {
   $('uploadOutput').textContent = JSON.stringify(payload, null, 2);
   if (res.ok) {
     await refresh();
-    if ($('projectSelect') && payload.project_id) $('projectSelect').value = payload.project_id;
   }
 }
 
-function renderUserProjects(projects) {
-  const el = $('projectSelect');
-  if (!el) return;
-  const current = el.value;
-  if (!projects || !projects.length) {
-    el.innerHTML = '<option value="">Upload a project first</option>';
-    return;
-  }
-  el.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.label || p.project_id)} · ${fmtInt(p.chunk_count || 0)} chunks</option>`).join('');
-  el.value = projects.some(p => p.project_id === current) ? current : projects[0].project_id;
-}
+async function uploadRunQueries() {
+  const file = $('runQueryFile')?.files?.[0];
+  if (!file) throw new Error('Choose a TXT, CSV, or XLSX query file first.');
 
-function renderProjectQuery(payload) {
-  const status = $('projectQueryStatus');
-  const created = payload.created_at ? new Date(payload.created_at).toLocaleString() : '—';
-  if (status) status.textContent = payload.mode === 'lexical_preview'
-    ? `Lexical preview · ${fmtInt((payload.hits || []).length)} hits · ${created}`
-    : 'Unexpected query mode';
-  const rows = (payload.hits || []).map(hit => ({
-    ...hit,
-    source: hit.pdf_name || '—',
-    page: hit.page_number || '—',
-    snippet: hit.paragraph || '',
-  }));
-  table($('projectQueryTable'), rows, [
-    {key:'rank', label:'Rank'},
-    {key:'source', label:'Source'},
-    {key:'page', label:'Page'},
-    {key:'score', label:'Lexical score', render:r=>fmt(r.score, 4)},
-    {key:'snippet', label:'Project evidence', render:r=>esc((r.snippet || payload.message || '').slice(0, 500))},
-  ]);
-}
+  const form = new FormData();
+  form.append('file', file);
+  form.append('upload_type', 'queries');
+  const status = $('runQueryUploadStatus');
+  if (status) status.textContent = `Validating ${file.name}...`;
 
-async function runProjectQuery() {
-  const projectId = $('projectSelect')?.value || '';
-  const query = ($('projectQueryInput')?.value || '').trim();
-  const topK = Number($('projectQueryTopK')?.value || 5);
-  if (!projectId || !query) {
-    $('projectQueryStatus').textContent = 'Choose an active project and enter a query';
-    return;
+  const res = await fetch('/api/upload-dataset', {method: 'POST', body: form});
+  const payload = await res.json();
+  if (!res.ok) {
+    const message = payload?.error?.message || payload?.message || 'Query upload failed validation.';
+    throw new Error(message);
   }
-  if (!Number.isInteger(topK) || topK < 1 || topK > 50) {
-    $('projectQueryStatus').textContent = 'Hits shown must be between 1 and 50';
-    return;
+  if (!Array.isArray(payload.queries) || !payload.queries.length) {
+    throw new Error('The query file did not contain any validated queries.');
   }
-  $('projectQueryStatus').textContent = 'Searching active project';
-  const payload = await api('/api/project-query', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      project_id: projectId,
-      query,
-      top_k: topK,
-    }),
-  });
-  renderProjectQuery(payload);
+
+  $('runQueries').value = payload.queries.join('\n');
+  if (status) status.textContent = `${payload.queries.length} validated queries loaded from ${file.name}.`;
 }
 
 
@@ -1560,11 +1528,10 @@ function renderOperational() {
   const optsForStatus = matrixOptions();
   const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
   const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
-  const evaluation = op.evaluation || {};
   const repo = op.document_repository || {};
-  const evalRows = evaluatedRows(evaluation);
-  const best = evalRows[0] || null;
-  const fastest = evalRows.filter(r => num(r.avg_latency_seconds) > 0).sort((a,b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null;
+  const officialPayload = recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations
+    ? officialRecommendationPayload('official')
+    : null;
 
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
@@ -1577,10 +1544,6 @@ function renderOperational() {
   const evidenceRowsLoaded = retrieval.length + rerank.length;
   $('retrievalStatus').textContent = String(evidenceRowsLoaded);
   $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
-  setText('bestR5Status', best ? `${(num(best.recall_at_5)*100).toFixed(1)}%` : '—');
-  setText('bestConfigNote', best ? pipelineLabel(best) : 'best accuracy score');
-  setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
-  setText('bestLatencyNote', fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency');
   setText('embeddingStatus', embeddings.length ? embeddings.join(' + ') : '—');
   setText('dbStatus', stores.length ? stores.join(' + ') : '—');
   syncStatusDialog();
@@ -1594,12 +1557,10 @@ function renderOperational() {
   renderCoverage(rows);
   renderServices(health);
   renderRetrieval(retrieval, rerank);
-  renderEvaluation(op.evaluation);
-  if (recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations) showOfficialRecommendations();
+  if (officialPayload) renderCanonicalResultPayload(officialPayload);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
   renderDocumentRepository(op.document_repository || {});
-  renderUserProjects(op.user_projects || []);
   updateSelectedMatrixCount();
 
   table($('ingestionTable'), latest.slice(0, 18), [
@@ -1714,18 +1675,76 @@ function syncNvidiaBenchmarkMode() {
   if ($('nvidiaDisableReranker')) $('nvidiaDisableReranker').checked = baseline;
 }
 
+function setSourceMirrorValue(id, value) {
+  const select = $(id);
+  if (!select) return false;
+  const exists = Array.from(select.options || []).some(option => option.value === value && !option.disabled);
+  if (exists) select.value = value;
+  return exists;
+}
+
+function clearGlobalResultViews(message) {
+  recommendationState.active = null;
+  clearRecommendationView(message);
+  setText('metricsSourceContext', message);
+  setText('qualityInsight', message);
+  if ($('qualityTable')) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.className = 'empty-cell';
+    cell.textContent = 'No completed result for the global data context';
+    row.appendChild(cell);
+    $('qualityTable').replaceChildren(row);
+  }
+}
+
+async function applyGlobalSourceContext({syncResults = true} = {}) {
+  const datasetId = $('globalDataset')?.value || 'dataset:wns-default';
+  const groundtruthId = $('globalGroundtruth')?.value || 'groundtruth:none';
+  ['runDataset', 'nvidiaDataset'].forEach(id => setSourceMirrorValue(id, datasetId));
+  ['runGroundtruth', 'nvidiaGroundtruth'].forEach(id => setSourceMirrorValue(id, groundtruthId));
+  syncDatasetChunkers();
+  syncRunMode();
+
+  const datasetLabel = $('globalDataset')?.selectedOptions?.[0]?.textContent || datasetId;
+  const groundtruthLabel = $('globalGroundtruth')?.selectedOptions?.[0]?.textContent || groundtruthId;
+  setText('globalSourceContext', `${datasetLabel} · ${groundtruthLabel}`);
+  if (!syncResults) return;
+
+  if (datasetId === 'dataset:wns-default') {
+    if (groundtruthId !== globalSourceContextState.officialGroundtruthId) {
+      clearGlobalResultViews('No completed official result for the selected global ground truth');
+      return;
+    }
+    setSourceMirrorValue('recommendationDataset', 'official');
+    setSourceMirrorValue('recommendationGroundtruth', 'groundtruth:official');
+    await selectRecommendationDataset('official');
+    return;
+  }
+
+  await selectRecommendationDataset(datasetId);
+  if (recommendationState.sourceType !== 'uploaded_project') return;
+  if (!setSourceMirrorValue('recommendationGroundtruth', groundtruthId)) {
+    clearGlobalResultViews('No completed run for the selected dataset and ground truth');
+    return;
+  }
+  await selectRecommendationGroundtruth(groundtruthId);
+}
+
 function renderSourceSelectors(catalog) {
   const datasets = catalog?.datasets || [];
   const groundtruth = catalog?.groundtruth || [];
   const preferredGroundtruth = groundtruth.find(row => row.valid && /groundtruth_500/i.test(row.id))?.id
     || groundtruth.find(row => row.valid && row.id !== 'groundtruth:none')?.id
     || 'groundtruth:none';
+  globalSourceContextState.officialGroundtruthId = preferredGroundtruth;
+  fillSourceSelect('globalDataset', datasets, 'dataset', 'dataset:wns-default');
+  fillSourceSelect('globalGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
   fillSourceSelect('runDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('nvidiaDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('runGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
   fillSourceSelect('nvidiaGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
-  syncDatasetChunkers();
-  syncRunMode();
+  applyGlobalSourceContext({syncResults: false}).catch(console.error);
 }
 
 async function refresh() {
@@ -1765,17 +1784,16 @@ function selectedParams() {
   selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
   selectedValues('runStore').forEach(v => p.append('store', v));
   selectedValues('runRerankerMain').forEach(v => p.append('reranker', v));
-  const limit = $('runLimit')?.value || '0';
-  p.set('limit', limit);
-  p.set('chunk_limit', limit);
   p.set('query_limit', $('runQueryLimit')?.value || '0');
-  p.set('top_k', $('runTopK')?.value || '10');
+  p.set('retrieval_top_k', $('runRetrievalTopK')?.value || '10');
+  p.set('reranked_output_k', $('runRerankedOutputK')?.value || '5');
   p.set('dataset_id', $('runDataset')?.value || 'dataset:wns-default');
   p.set('groundtruth_id', $('runGroundtruth')?.value || 'groundtruth:none');
   if (($('runGroundtruth')?.value || 'groundtruth:none') === 'groundtruth:none') {
     ($('runQueries')?.value || '').split('\n').map(value => value.trim()).filter(Boolean).forEach(query => p.append('query', query));
   }
   if ($('runFresh')?.checked) p.set('fresh_run', '1');
+  if ($('runAllowPartialExtraction')?.checked) p.set('allow_partial_extraction', '1');
   p.set('max_runs', String(Math.max(updateSelectedMatrixCount(), 1)));
   return p;
 }
@@ -1822,10 +1840,20 @@ function renderPreflight(payload) {
   const missing = payload.missing || [];
   const warnings = payload.warnings || [];
   const checks = payload.service_checks || [];
+  const diagnostics = $('runTechnicalDiagnostics');
+  const summary = $('runReadinessSummary');
+  const evidenceOnly = payload.groundtruth_id === 'groundtruth:none';
   $('runStatus').textContent = ok ? 'Ready' : 'Needs inputs';
+  if (summary) {
+    summary.textContent = ok
+      ? `Ready to run the selected pipeline.${warnings.length ? ` ${warnings.length} warning(s) are available in technical details.` : ''}`
+      : `Resolve before running: ${missing.slice(0, 3).join('; ') || 'review technical readiness details'}`;
+    summary.classList.toggle('warn', !ok);
+  }
+  if (diagnostics) diagnostics.open = false;
   $('runResultCards').innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Requirements</span><strong>${ok ? 'Ready' : 'Blocked'}</strong><small>${missing.length ? `${missing.length} item(s) needed` : 'All required inputs found'}</small></article>
     <article class="run-result-card"><span>Pipeline size</span><strong>${esc(payload.combo_count || 0)}</strong><small>chunker · embedding · DB combinations</small></article>
-    <article class="run-result-card"><span>Ground truth</span><strong>${esc(payload.groundtruth || '—')}</strong><small>${payload.query_limit ? `${payload.query_limit} query limit` : 'all queries'}</small></article>`;
+    <article class="run-result-card"><span>Mode</span><strong>${evidenceOnly ? 'Evidence-only' : 'Evaluated'}</strong><small>${payload.query_limit ? `${payload.query_limit} query limit` : 'all queries'}</small></article>`;
   const rows = [
     ...missing.map(x => ({type:'Needed', item:x})),
     ...warnings.map(x => ({type:'Warning', item:x})),
@@ -1908,12 +1936,12 @@ async function runAction(kind) {
     ($('runQueries')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean).forEach(q => p.append('query', q));
   }
   if (kind === 'full') {
-    p.set('top_k', $('runTopK')?.value || '10');
+    p.set('top_k', $('runRetrievalTopK')?.value || '10');
     p.set('max_runs', String(benchmarkOptions.matrix_count || 180));
   }
   if (kind === 'rerank') {
-    p.set('top_k', $('runTopK')?.value || '10');
-    p.set('limit', $('rerankerLimit')?.value || '100');
+    p.set('top_k', $('runRerankedOutputK')?.value || '5');
+    p.set('limit', '0');
     const mainChoices = selectedValues('runRerankerMain');
     let selected = [];
     if (mainChoices.includes('all')) {
@@ -1924,7 +1952,7 @@ async function runAction(kind) {
     selected.forEach(r => p.append('reranker', r));
   }
   if (kind === 'hallucination' || kind === 'hallucinationLlm') {
-    p.set('limit', $('rerankerLimit')?.value || '120');
+    p.set('limit', '0');
     if (kind === 'hallucinationLlm') p.set('use_llm', '1');
   }
   $('runStatus').textContent = 'Running';
@@ -1937,8 +1965,13 @@ async function runAction(kind) {
 }
 
 ['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
-['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderEvaluation(state.operational?.evaluation || {})));
+['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => {
+  const payload = recommendationState.active || officialRecommendationPayload('official');
+  renderMetricsSource(payload);
+}));
 ['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));
+$('globalDataset')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
+$('globalGroundtruth')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
 $('runDataset')?.addEventListener('input', () => {
   syncDatasetChunkers();
   syncRunMode();
@@ -1954,6 +1987,7 @@ $('nvidiaBenchmarkMode')?.addEventListener('input', () => { syncNvidiaBenchmarkM
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
 $('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runQueryUploadBtn')?.addEventListener('click', () => uploadRunQueries().catch(e => { if ($('runQueryUploadStatus')) $('runQueryUploadStatus').textContent = String(e); }));
 $('runParseMineruBtn')?.addEventListener('click', () => runAction('parseMineru').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
@@ -2091,5 +2125,4 @@ document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click
 document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListener('click', openStatusDialog));
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
-$('projectQueryBtn')?.addEventListener('click', () => runProjectQuery().catch(err => { $('projectQueryStatus').textContent='Error'; table($('projectQueryTable'), [{error:String(err)}], [{key:'error', label:'Error'}]); }));
 loadOptions().then(refresh).then(loadResultSources).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

@@ -93,17 +93,23 @@ def load_retrieval_artifacts(path: Path, limit: int) -> list[Path]:
     return files[:limit] if limit else files
 
 
-def rerank_one(payload: dict[str, Any], reranker: str, top_k: int) -> dict[str, Any]:
+def rerank_one(
+    payload: dict[str, Any],
+    reranker: str,
+    output_k: int,
+    candidate_k: int = 0,
+) -> dict[str, Any]:
     reranker = canonical_reranker(reranker)
-    hits = payload.get("hits") or []
+    retrieved_hits = payload.get("hits") or []
+    hits = retrieved_hits[:candidate_k] if candidate_k else retrieved_hits
     docs = [str(h.get("paragraph") or "") for h in hits]
     start = time.perf_counter()
     if reranker == "Amazon Rerank v1":
-        response = amazon_rerank(payload.get("query", ""), docs, top_k)
+        response = amazon_rerank(payload.get("query", ""), docs, output_k)
     else:
         env, default_url = RERANKERS[reranker]
         url = os.environ.get(env, default_url)
-        response = post_json(url, {"query": payload.get("query", ""), "documents": docs, "top_k": top_k})
+        response = post_json(url, {"query": payload.get("query", ""), "documents": docs, "top_k": output_k})
     elapsed = time.perf_counter() - start
     ranked_hits = []
     for i, item in enumerate(response.get("results", []), 1):
@@ -123,7 +129,10 @@ def rerank_one(payload: dict[str, Any], reranker: str, top_k: int) -> dict[str, 
         "retrieval_seconds": payload.get("retrieval_seconds", 0),
         "total_seconds": round(float(payload.get("retrieval_seconds") or 0) + elapsed, 6),
         "retrieved_count": len(ranked_hits),
-        "top_k": top_k,
+        "retrieval_top_k": int(payload.get("retrieval_top_k") or payload.get("top_k") or len(retrieved_hits)),
+        "reranked_output_k": output_k,
+        "candidate_count": len(hits),
+        "top_k": output_k,
         "hits": ranked_hits,
         "base_artifact": payload.get("artifact", ""),
         "reranker_model": response.get("model", ""),
@@ -135,7 +144,8 @@ def main() -> int:
     parser.add_argument("--retrieval-dir", default="data/retrieval_smoke")
     parser.add_argument("--out-dir", default="data/reranker_smoke")
     parser.add_argument("--rerankers", nargs="*", default=["bge-reranker-base", "qwen3_4b_rerank"])
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=5, help="Final reranked hits retained per query")
+    parser.add_argument("--candidate-k", type=int, default=0, help="Retrieved candidates sent to reranker; 0 = every hit in each artifact")
     parser.add_argument("--limit-artifacts", type=int, default=0, help="0 = all retrieval artifacts")
     args = parser.parse_args()
 
@@ -163,7 +173,7 @@ def main() -> int:
                 reranker = canonical_reranker(requested_reranker)
                 if reranker not in RERANKERS:
                     raise ValueError(f"Unknown reranker {requested_reranker}; known={sorted(RERANKERS)}")
-                result = rerank_one(payload, reranker, args.top_k)
+                result = rerank_one(payload, reranker, args.top_k, args.candidate_k)
                 name = f"{safe_name(payload.get('sheet',''))}_{safe_name(payload.get('embedding',''))}_{safe_name(payload.get('store',''))}_{safe_name(reranker)}_{safe_name(payload.get('query',''))}.json"
                 (out_dir / name).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"OK reranker={reranker} sheet={payload.get('sheet')} embedding={payload.get('embedding')} store={payload.get('store')} query={payload.get('query')!r} seconds={result['rerank_seconds']}", flush=True)

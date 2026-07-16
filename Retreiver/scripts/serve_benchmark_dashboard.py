@@ -52,6 +52,8 @@ from source.services.project_workspace import (
     UploadTooLargeError,
     UploadValidationError,
 )
+from scripts.dashboard_snapshot_state import publish_document_readiness
+from scripts.pipeline_run_contract import parse_query_upload
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -865,6 +867,16 @@ def add_multi(cmd: list[str], flag: str, values: list[str]) -> None:
         cmd.extend(vals)
 
 
+def validated_positive_depth(name: str, value: str, *, maximum: int = 100) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} depth must be a positive integer") from None
+    if parsed < 1 or parsed > maximum:
+        raise ValueError(f"{name} depth must be between 1 and {maximum}")
+    return parsed
+
+
 def validated_multi(name: str, values: list[str], allowed: list[str] | tuple[str, ...]) -> list[str]:
     permitted = {str(value) for value in allowed}
     selected = [value for value in values if value and value != "all"]
@@ -972,10 +984,19 @@ def complete_pipeline_cmd(
         if groundtruth is None or groundtruth.path is None:
             raise ValueError(f"Ground-truth source is not runnable: {groundtruth_id}")
         cmd += ["--groundtruth", str(groundtruth.path)]
-    cmd += ["--top-k", qs.get("top_k", ["10"])[0] or "10"]
-    chunk_limit = qs.get("chunk_limit", qs.get("limit", ["0"]))[0] or "0"
+    retrieval_top_k = validated_positive_depth(
+        "Retrieval Top K",
+        qs.get("retrieval_top_k", qs.get("top_k", ["10"]))[0] or "10",
+    )
+    reranked_output_k = validated_positive_depth(
+        "Reranked Output K",
+        qs.get("reranked_output_k", qs.get("reranker_top_k", ["5"]))[0] or "5",
+    )
+    if reranked_output_k > retrieval_top_k:
+        raise ValueError("Reranked Output K cannot exceed Retrieval Top K")
+    cmd += ["--top-k", str(retrieval_top_k), "--reranked-output-k", str(reranked_output_k)]
     query_limit = qs.get("query_limit", ["0"])[0] or "0"
-    cmd += ["--chunk-limit", chunk_limit, "--query-limit", query_limit]
+    cmd += ["--query-limit", query_limit]
     if qs.get("fresh_run", ["0"])[0] == "1":
         cmd.append("--fresh-run")
     if qs.get("allow_partial_extraction", ["0"])[0] == "1":
@@ -1655,7 +1676,7 @@ class Handler(SimpleHTTPRequestHandler):
             evaluation = read_evaluation()
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
-            document_repository = read_document_repository()
+            document_repository = publish_document_readiness(ROOT, read_document_repository())
             user_projects = list_user_projects()
             nvidia_rag = read_nvidia_rag()
             reranker_analysis = read_reranker_analysis()
@@ -1692,6 +1713,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "failed_pdf_count": pdf_audit.get("needs_ocr_count") or 0,
                     "pdf_audit": pdf_audit,
                     "document_repository": document_repository,
+                    "document_repository_latest_attempt": document_repository.get("latest_attempt", {}),
                     "user_projects": user_projects,
                     "known_matrix_count": benchmark_options().get("matrix_count"),
                     "options_formula": "5 chunkers × 3 embeddings × 4 vector stores × 1 retrieval × 3 rerankers = 180",
@@ -1805,7 +1827,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 label_field = form.getfirst("label", Path(original).stem)
                 upload_type = str(form.getfirst("upload_type", "dataset"))
-                if upload_type not in {"dataset", "groundtruth"}:
+                if upload_type not in {"dataset", "groundtruth", "queries"}:
                     raise ValueError("invalid upload type")
             except (AttributeError, EOFError, KeyError, OSError, TypeError, ValueError):
                 self.close_connection = True
@@ -1820,7 +1842,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             try:
-                if upload_type == "groundtruth":
+                if upload_type == "queries":
+                    payload = parse_query_upload(original, content)
+                elif upload_type == "groundtruth":
                     payload = register_groundtruth_upload(
                         ROOT, original, content, str(label_field)
                     )

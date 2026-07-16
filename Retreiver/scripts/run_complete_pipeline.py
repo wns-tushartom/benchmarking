@@ -354,11 +354,43 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "rerankers": rerankers,
         "combo_count": combo_count,
         "query_limit": args.query_limit,
-        "chunk_limit": args.chunk_limit,
+        "chunk_limit": 0,
         "top_k": args.top_k,
+        "retrieval_top_k": args.top_k,
+        "reranked_output_k": args.reranked_output_k,
         "fresh_run": args.fresh_run,
         "allow_partial_extraction": args.allow_partial_extraction,
     }
+
+
+def run_manifest_payload(run_id: str, info: dict[str, Any], *, status: str) -> dict[str, Any]:
+    """Build stable run metadata without browser-controlled chunk limiting."""
+    return {
+        "run_id": run_id,
+        "status": status,
+        "mode": info.get("mode", "evaluated"),
+        "sheets": list(info.get("sheets") or []),
+        "embeddings": list(info.get("embeddings") or []),
+        "stores": list(info.get("stores") or []),
+        "rerankers": list(info.get("rerankers") or []),
+        "combo_count": int(info.get("combo_count") or 0),
+        "query_limit": int(info.get("query_limit") or 0),
+        "chunk_limit": 0,
+        "retrieval_top_k": int(info.get("retrieval_top_k") or info.get("top_k") or 10),
+        "reranked_output_k": int(info.get("reranked_output_k") or 5),
+    }
+
+
+def write_run_manifest(root: Path, run_id: str, info: dict[str, Any], *, status: str) -> Path:
+    path = root / "data" / "pipeline_runs" / run_id / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(run_manifest_payload(run_id, info, status=status), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
 
 
 def archive_fresh_dirs(run_id: str) -> None:
@@ -405,13 +437,17 @@ def main() -> int:
     parser.add_argument("--skip-extraction-audit", action="store_true")
     parser.add_argument("--evidence-only", action="store_true")
     parser.add_argument("--query", action="append", default=[])
-    parser.add_argument("--chunk-limit", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=0)
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=10, help="Retrieval candidates per query")
+    parser.add_argument("--reranked-output-k", type=int, default=5, help="Final reranked hits retained per query")
     parser.add_argument("--fresh-run", action="store_true")
     parser.add_argument("--allow-partial-extraction", action="store_true", help="Dangerous/debug only: allow live pipeline to run with missing/text-only/partial extraction audit rows.")
     parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
+    if args.top_k < 1 or args.reranked_output_k < 1:
+        parser.error("retrieval and reranked output depths must be positive")
+    if args.reranked_output_k > args.top_k:
+        parser.error("--reranked-output-k cannot exceed --top-k")
 
     os.chdir(ROOT)
     info = preflight(args)
@@ -423,6 +459,10 @@ def main() -> int:
         return 2
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    info["chunk_limit"] = 0
+    info["retrieval_top_k"] = args.top_k
+    info["reranked_output_k"] = args.reranked_output_k
+    write_run_manifest(ROOT, run_id, info, status="running")
     log("COMPLETE PIPELINE START")
     log(json.dumps(info, ensure_ascii=False))
     if info["warnings"]:
@@ -443,8 +483,6 @@ def main() -> int:
     ensure_chunking_workbook(sheets, workbook, benchmark_input)
 
     ingest_cmd = [sys.executable, "scripts/run_long_db_ingestion.py", "--run-id", run_id, "--skip-existing-store-success", "--workbook", str(workbook), "--sheets", *sheets, "--embeddings", *embeddings, "--stores", *stores]
-    if args.chunk_limit:
-        ingest_cmd += ["--limit", str(args.chunk_limit)]
     run_cmd(ingest_cmd, "ingestion")
 
     retrieval_base = [sys.executable, "scripts/run_retrieval_smoke_from_vm_dbs.py", "--run-id", run_id]
@@ -455,6 +493,7 @@ def main() -> int:
             retrieval_cmd += ["--query-limit", str(args.query_limit)]
         run_cmd(retrieval_cmd, "evidence-only retrieval")
         run_cmd([sys.executable, "scripts/collect_vm_dashboard_artifacts.py"], "dashboard artifact refresh")
+        write_run_manifest(ROOT, run_id, info, status="completed")
         log("COMPLETE PIPELINE FINISHED mode=evidence_only metrics=not_applicable")
         return 0
 
@@ -469,7 +508,7 @@ def main() -> int:
     run_cmd([sys.executable, "scripts/evaluate_retrieval_groundtruth.py", "--groundtruth", gt, "--smoke-dir", "data/retrieval_smoke", "--out-dir", "data/evaluation"], "no-reranker evaluation")
 
     if rerankers:
-        run_cmd([sys.executable, "scripts/run_reranker_smoke_from_retrieval.py", "--rerankers", *rerankers, "--top-k", str(args.top_k), "--limit-artifacts", "0"], "reranker pass")
+        run_cmd([sys.executable, "scripts/run_reranker_smoke_from_retrieval.py", "--rerankers", *rerankers, "--candidate-k", str(args.top_k), "--top-k", str(args.reranked_output_k), "--limit-artifacts", "0"], "reranker pass")
         run_cmd([sys.executable, "scripts/evaluate_retrieval_groundtruth.py", "--groundtruth", gt, "--smoke-dir", "data/reranker_smoke", "--out-dir", "data/evaluation_reranked"], "reranked evaluation")
         if "qwen3_4b_rerank" in rerankers:
             run_cmd([sys.executable, "scripts/analyze_reranker_lift.py", "--reranker", "qwen3_4b_rerank"], "Qwen vs no-reranker analysis")
@@ -477,6 +516,7 @@ def main() -> int:
         log("reranker stage skipped because reranker=none")
 
     run_cmd([sys.executable, "scripts/collect_vm_dashboard_artifacts.py"], "dashboard artifact refresh")
+    write_run_manifest(ROOT, run_id, info, status="completed")
     log("COMPLETE PIPELINE FINISHED")
     return 0
 

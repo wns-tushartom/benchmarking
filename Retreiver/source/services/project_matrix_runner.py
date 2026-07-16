@@ -375,14 +375,54 @@ def _combo_identity(
 
 def _retrieval_identity(
     project_id: str,
-    run_id: str,
+    corpus_sha256: str,
+    chunk_sha256: str,
     chunker_id: str,
     embedding_id: str,
     vector_store_id: str,
+    embedding_config_sha256: str,
+    vector_config_sha256: str,
 ) -> str:
-    return "|".join(
-        (project_id, run_id, chunker_id, embedding_id, vector_store_id)
-    )
+    payload = {
+        "project_id": project_id,
+        "corpus_sha256": corpus_sha256,
+        "chunk_sha256": chunk_sha256,
+        "chunker_id": chunker_id,
+        "embedding_id": embedding_id,
+        "vector_store_id": vector_store_id,
+        "embedding_config_sha256": embedding_config_sha256,
+        "vector_config_sha256": vector_config_sha256,
+    }
+    return f"project_{_sha256_bytes(_canonical_bytes(payload))[:40]}"
+
+
+def _index_receipt_path(index_root: Path, namespace: str) -> Path:
+    return index_root / f"index_{_sha256_bytes(namespace.encode('utf-8'))}.json"
+
+
+def _load_index_receipt(path: Path, expected: Mapping[str, Any]) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(_read_regular_bytes(path).decode("utf-8"))
+    except (FileNotFoundError, UnicodeError, json.JSONDecodeError, ProjectMatrixRunnerError):
+        return None
+    if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
+        return None
+    dimensions = payload.get("dimensions")
+    vector_count = payload.get("vector_count")
+    if (
+        type(dimensions) is not int
+        or dimensions < 1
+        or type(vector_count) is not int
+        or vector_count < 1
+        or not isinstance(payload.get("physical_namespace"), str)
+        or not payload["physical_namespace"]
+        or not isinstance(payload.get("embedding"), dict)
+        or payload["embedding"].get("canonical_id") != expected.get("embedding_id")
+        or payload["embedding"].get("dimensions") != dimensions
+        or payload["embedding"].get("vector_count") != vector_count
+    ):
+        return None
+    return payload
 
 
 def _safe_error_code(stage: str) -> str:
@@ -488,10 +528,12 @@ class ProjectMatrixRunner:
         *,
         namespace: str,
         index_root: Path,
+        load_existing: bool = False,
     ) -> Any:
         kwargs = _adapter_kwargs(configuration)
         if canonical_id == "FAISS":
             kwargs["index_root"] = str(index_root)
+            kwargs["load_existing"] = load_existing
         return classes["vector_stores"][canonical_id](
             name=canonical_id,
             namespace=namespace,
@@ -515,6 +557,7 @@ class ProjectMatrixRunner:
         validated = self._load_request(project_id, run_id, run_layout["root"])
         request = validated.request
         documents, project_manifest = self._load_documents(project_id)
+        project_index_root = self.workspace.layout(project_id)["indexes"]
         questions = self._load_questions(project_id, request)
         catalog, catalog_sha256 = _load_catalog(self.catalog_path)
         classes = production_adapter_classes(self.catalog_path)
@@ -569,6 +612,7 @@ class ProjectMatrixRunner:
             tuple[str, str],
             tuple[Any, list[list[float]], list[list[float]], dict[str, Any]],
         ] = {}
+        reused_query_embedding_cache: dict[str, tuple[Any, list[list[float]]]] = {}
         retrieval_cache: dict[
             tuple[str, str, str],
             tuple[
@@ -603,6 +647,32 @@ class ProjectMatrixRunner:
             retrieval_key = (chunker_id, embedding_id, vector_store_id)
             embedding_config = techniques["embeddings"][embedding_id]
             vector_config = techniques["vector_stores"][vector_store_id]
+            chunk_sha256 = str((chunk_artifact or {}).get("sha256") or "")
+            embedding_config_sha256 = _config_sha256(embedding_config)
+            vector_config_sha256 = _config_sha256(vector_config)
+            namespace = _retrieval_identity(
+                project_id,
+                project_manifest["corpus_sha256"],
+                chunk_sha256,
+                chunker_id,
+                embedding_id,
+                vector_store_id,
+                embedding_config_sha256,
+                vector_config_sha256,
+            )
+            index_receipt_expected = {
+                "schema_version": 1,
+                "project_id": project_id,
+                "corpus_sha256": project_manifest["corpus_sha256"],
+                "chunk_sha256": chunk_sha256,
+                "chunker_id": chunker_id,
+                "embedding_id": embedding_id,
+                "vector_store_id": vector_store_id,
+                "embedding_config_sha256": embedding_config_sha256,
+                "vector_config_sha256": vector_config_sha256,
+                "namespace": namespace,
+            }
+            index_receipt_path = _index_receipt_path(project_index_root, namespace)
             reranker_config = techniques["rerankers"][reranker_id]
             combination_config = {
                 "chunker": {"id": chunker_id, **techniques["chunkers"][chunker_id]},
@@ -640,78 +710,174 @@ class ProjectMatrixRunner:
                     failure_stage = "chunking"
                     raise RuntimeError("project chunker failed")
                 if retrieval_key not in retrieval_cache:
-                    embedding_key = (chunker_id, embedding_id)
-                    if embedding_key not in embedding_cache:
-                        failure_stage = "embedding"
-                        embedding_adapter = self._new_embedding(
-                            embedding_id, embedding_config, classes
+                    persisted_index = _load_index_receipt(
+                        index_receipt_path, index_receipt_expected
+                    )
+                    index_reused = persisted_index is not None
+                    if index_reused:
+                        assert persisted_index is not None
+                        if embedding_id not in reused_query_embedding_cache:
+                            failure_stage = "embedding"
+                            embedding_adapter = self._new_embedding(
+                                embedding_id, embedding_config, classes
+                            )
+                            query_vectors = embedding_adapter.embed_many(
+                                question.query for question in questions
+                            )
+                            if len(query_vectors) != len(questions):
+                                raise RuntimeError("query embedding count mismatch")
+                            reused_query_embedding_cache[embedding_id] = (
+                                embedding_adapter,
+                                query_vectors,
+                            )
+                        else:
+                            embedding_adapter, query_vectors = reused_query_embedding_cache[
+                                embedding_id
+                            ]
+                        embedding_receipt = dict(persisted_index["embedding"])
+                        dimensions = int(persisted_index["dimensions"])
+                        vectors: list[list[float]] = []
+                        failure_stage = "vector_store"
+                        vector_adapter = self._new_vector_store(
+                            vector_store_id,
+                            vector_config,
+                            classes,
+                            namespace=namespace,
+                            index_root=project_index_root,
+                            load_existing=True,
                         )
-                        vectors = embedding_adapter.embed_many(
-                            chunk.paragraph for chunk in chunks
-                        )
-                        if len(vectors) != len(chunks) or not vectors:
-                            raise RuntimeError("embedding vector count mismatch")
-                        dimensions = len(vectors[0])
-                        if dimensions < 1 or any(
-                            len(vector) != dimensions
-                            or any(not math.isfinite(float(value)) for value in vector)
-                            for vector in vectors
-                        ):
-                            raise RuntimeError("embedding vectors are invalid")
-                        query_vectors = embedding_adapter.embed_many(
-                            question.query for question in questions
-                        )
-                        if len(query_vectors) != len(questions):
-                            raise RuntimeError("query embedding count mismatch")
-                        embedding_receipt = {
-                            "canonical_id": embedding_id,
-                            "adapter_class": type(embedding_adapter).__name__,
-                            "dimensions": dimensions,
-                            "vector_count": len(vectors),
-                            "provider_metadata": dict(
-                                getattr(
-                                    embedding_adapter,
-                                    "last_response_metadata",
-                                    {},
-                                )
-                                or {}
-                            ),
+                        if vector_store_id == "PGVector":
+                            vector_adapter.dimensions = dimensions
+                            vector_adapter.pg_vector_type = (
+                                "halfvec" if dimensions > 2000 else "vector"
+                            )
+                        upsert_metrics = {
+                            "vector_count": int(persisted_index["vector_count"])
                         }
-                        embedding_cache[embedding_key] = (
-                            embedding_adapter,
-                            vectors,
-                            query_vectors,
-                            embedding_receipt,
-                        )
                     else:
-                        (
-                            embedding_adapter,
-                            vectors,
-                            query_vectors,
-                            embedding_receipt,
-                        ) = embedding_cache[embedding_key]
-                    failure_stage = "vector_store"
-                    namespace = _retrieval_identity(
-                        project_id,
-                        run_id,
-                        chunker_id,
-                        embedding_id,
-                        vector_store_id,
-                    )
-                    vector_adapter = self._new_vector_store(
-                        vector_store_id,
-                        vector_config,
-                        classes,
-                        namespace=namespace,
-                        index_root=run_layout["indexes"],
-                    )
+                        embedding_key = (chunker_id, embedding_id)
+                        if embedding_key not in embedding_cache:
+                            failure_stage = "embedding"
+                            embedding_adapter = self._new_embedding(
+                                embedding_id, embedding_config, classes
+                            )
+                            vectors = embedding_adapter.embed_many(
+                                chunk.paragraph for chunk in chunks
+                            )
+                            if len(vectors) != len(chunks) or not vectors:
+                                raise RuntimeError("embedding vector count mismatch")
+                            dimensions = len(vectors[0])
+                            if dimensions < 1 or any(
+                                len(vector) != dimensions
+                                or any(not math.isfinite(float(value)) for value in vector)
+                                for vector in vectors
+                            ):
+                                raise RuntimeError("embedding vectors are invalid")
+                            query_vectors = embedding_adapter.embed_many(
+                                question.query for question in questions
+                            )
+                            if len(query_vectors) != len(questions):
+                                raise RuntimeError("query embedding count mismatch")
+                            embedding_receipt = {
+                                "canonical_id": embedding_id,
+                                "adapter_class": type(embedding_adapter).__name__,
+                                "dimensions": dimensions,
+                                "vector_count": len(vectors),
+                                "provider_metadata": dict(
+                                    getattr(
+                                        embedding_adapter,
+                                        "last_response_metadata",
+                                        {},
+                                    )
+                                    or {}
+                                ),
+                            }
+                            embedding_cache[embedding_key] = (
+                                embedding_adapter,
+                                vectors,
+                                query_vectors,
+                                embedding_receipt,
+                            )
+                        else:
+                            (
+                                embedding_adapter,
+                                vectors,
+                                query_vectors,
+                                embedding_receipt,
+                            ) = embedding_cache[embedding_key]
+                        failure_stage = "vector_store"
+                        vector_adapter = self._new_vector_store(
+                            vector_store_id,
+                            vector_config,
+                            classes,
+                            namespace=namespace,
+                            index_root=project_index_root,
+                        )
+                        upsert_metrics = vector_adapter.upsert(chunks, vectors)
+                        physical_namespace = str(vector_adapter.physical_namespace)
+                        _atomic_json(
+                            index_receipt_path,
+                            {
+                                **index_receipt_expected,
+                                "physical_namespace": physical_namespace,
+                                "dimensions": dimensions,
+                                "vector_count": int(
+                                    upsert_metrics.get("vector_count", len(vectors))
+                                ),
+                                "embedding": dict(embedding_receipt),
+                            },
+                        )
                     physical_namespace = str(vector_adapter.physical_namespace)
-                    upsert_metrics = vector_adapter.upsert(chunks, vectors)
                     failure_stage = "retrieval"
                     retrieval_rows: list[dict[str, Any]] = []
                     for question, query_vector in zip(questions, query_vectors):
                         retrieval_start = time.perf_counter()
-                        hits = vector_adapter.search(query_vector, request.top_k)
+                        try:
+                            hits = vector_adapter.search(query_vector, request.top_k)
+                        except Exception:
+                            if not index_reused or retrieval_rows:
+                                raise
+                            failure_stage = "embedding"
+                            vectors = embedding_adapter.embed_many(
+                                chunk.paragraph for chunk in chunks
+                            )
+                            if len(vectors) != len(chunks) or not vectors:
+                                raise RuntimeError("embedding vector count mismatch")
+                            dimensions = len(vectors[0])
+                            if dimensions < 1 or any(
+                                len(vector) != dimensions
+                                or any(not math.isfinite(float(value)) for value in vector)
+                                for vector in vectors
+                            ):
+                                raise RuntimeError("embedding vectors are invalid")
+                            embedding_receipt = {
+                                "canonical_id": embedding_id,
+                                "adapter_class": type(embedding_adapter).__name__,
+                                "dimensions": dimensions,
+                                "vector_count": len(vectors),
+                                "provider_metadata": dict(
+                                    getattr(embedding_adapter, "last_response_metadata", {})
+                                    or {}
+                                ),
+                            }
+                            failure_stage = "vector_store"
+                            upsert_metrics = vector_adapter.upsert(chunks, vectors)
+                            physical_namespace = str(vector_adapter.physical_namespace)
+                            index_reused = False
+                            _atomic_json(
+                                index_receipt_path,
+                                {
+                                    **index_receipt_expected,
+                                    "physical_namespace": physical_namespace,
+                                    "dimensions": dimensions,
+                                    "vector_count": int(
+                                        upsert_metrics.get("vector_count", len(vectors))
+                                    ),
+                                    "embedding": dict(embedding_receipt),
+                                },
+                            )
+                            failure_stage = "retrieval"
+                            hits = vector_adapter.search(query_vector, request.top_k)
                         retrieval_latency = time.perf_counter() - retrieval_start
                         retrieval_by_question[question.question_id] = hits
                         retrieval_latency_by_question[
@@ -749,6 +915,7 @@ class ProjectMatrixRunner:
                             "canonical_id": vector_store_id,
                             "adapter_class": type(vector_adapter).__name__,
                             "physical_namespace": physical_namespace,
+                            "reused": index_reused,
                             "vector_count": int(
                                 upsert_metrics.get("vector_count", len(vectors))
                             ),

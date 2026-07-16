@@ -477,7 +477,11 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
         receipt["adapters"]["vector_store"]["physical_namespace"]
         for receipt in second_manifest["receipts"]
     }
-    assert physical.isdisjoint(second_physical)
+    assert physical == second_physical
+    assert all(
+        receipt["adapters"]["vector_store"]["reused"] is True
+        for receipt in second_manifest["receipts"]
+    )
 
 
 def test_embeddings_are_cached_by_chunker_and_embedding_across_stores(
@@ -517,6 +521,95 @@ def test_embeddings_are_cached_by_chunker_and_embedding_across_stores(
         receipt["adapters"]["vector_store"]["canonical_id"]
         for receipt in manifest["receipts"]
     } == {"Qdrant", "Weaviate"}
+
+
+def test_later_reranker_run_reuses_project_owned_vector_index(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    embedding_batches: list[list[object]] = []
+    collection_creates: list[str] = []
+
+    def counted_embedding_post(
+        url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+        timeout: int = 120,
+    ) -> dict[str, object]:
+        values = payload.get("input") or payload.get("inputs") or payload.get("texts")
+        assert isinstance(values, list)
+        embedding_batches.append(values)
+        return _fake_embedding_post(url, payload, headers, timeout)
+
+    original_create = _FakeQdrantClient.create_collection
+
+    def counted_create(self, *, collection_name: str, **kwargs: object) -> None:
+        collection_creates.append(collection_name)
+        original_create(self, collection_name=collection_name, **kwargs)
+
+    monkeypatch.setattr(remote_embeddings, "_post_json", counted_embedding_post)
+    monkeypatch.setattr(_FakeQdrantClient, "create_collection", counted_create)
+
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    first_payload = _request_payload(alpha_id, rerankers=["Qwen3:4B Rerank"])
+    first_payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    first_payload["selections"]["vector_stores"] = ["Qdrant"]  # type: ignore[index]
+    first_run_id, first_root = _create_run_request(workspace, first_payload)
+    assert ProjectMatrixRunner(workspace).run(alpha_id, first_run_id)["state"] == "completed"
+
+    first_batches = len(embedding_batches)
+    second_payload = _request_payload(alpha_id, rerankers=["Qwen3:4B Rerank"])
+    second_payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    second_payload["selections"]["vector_stores"] = ["Qdrant"]  # type: ignore[index]
+    second_run_id, second_root = _create_run_request(workspace, second_payload)
+    ProjectMatrixRunner(workspace).run(alpha_id, second_run_id)
+
+    first_manifest = json.loads((first_root / "manifest.json").read_text(encoding="utf-8"))
+    second_manifest = json.loads((second_root / "manifest.json").read_text(encoding="utf-8"))
+    first_receipt = first_manifest["receipts"][0]
+    second_receipt = second_manifest["receipts"][0]
+
+    assert len(collection_creates) == 1
+    assert len(embedding_batches) == first_batches + 1  # query vectors only on reuse
+    assert second_receipt["adapters"]["vector_store"]["reused"] is True
+    assert (
+        second_receipt["adapters"]["vector_store"]["physical_namespace"]
+        == first_receipt["adapters"]["vector_store"]["physical_namespace"]
+    )
+    assert list(workspace.layout(alpha_id)["indexes"].glob("*.json"))
+
+
+def test_missing_backing_collection_rebuilds_registered_project_index(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    collection_creates: list[str] = []
+    original_create = _FakeQdrantClient.create_collection
+
+    def counted_create(self, *, collection_name: str, **kwargs: object) -> None:
+        collection_creates.append(collection_name)
+        original_create(self, collection_name=collection_name, **kwargs)
+
+    monkeypatch.setattr(_FakeQdrantClient, "create_collection", counted_create)
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    payload = _request_payload(alpha_id, rerankers=["Qwen3:4B Rerank"])
+    payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+    payload["selections"]["vector_stores"] = ["Qdrant"]  # type: ignore[index]
+
+    first_run_id, _ = _create_run_request(workspace, payload)
+    assert ProjectMatrixRunner(workspace).run(alpha_id, first_run_id)["state"] == "completed"
+    _FakeQdrantClient.collections.clear()
+
+    second_run_id, second_root = _create_run_request(workspace, payload)
+    assert ProjectMatrixRunner(workspace).run(alpha_id, second_run_id)["state"] == "completed"
+    second_manifest = json.loads((second_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert len(collection_creates) == 2
+    assert second_manifest["receipts"][0]["adapters"]["vector_store"]["reused"] is False
 
 
 def test_chunker_failure_is_isolated_without_cloned_evidence(

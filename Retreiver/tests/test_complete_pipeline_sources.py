@@ -147,6 +147,59 @@ def test_evaluated_mode_uses_selected_workbook_and_groundtruth(
     assert "reranked evaluation" in stages
 
 
+def test_evaluated_mode_separates_retrieval_and_reranked_output_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "project.xlsx"
+    groundtruth = tmp_path / "questions.csv"
+    workbook.touch()
+    groundtruth.write_text("query,answer\nq,a\n", encoding="utf-8")
+
+    calls = _run_main_with_captured_stages(
+        monkeypatch,
+        tmp_path,
+        [
+            "--workbook",
+            str(workbook),
+            "--groundtruth",
+            str(groundtruth),
+            "--top-k",
+            "20",
+            "--reranked-output-k",
+            "5",
+            "--rerankers",
+            "bge-reranker-base",
+        ],
+        _ready_info(groundtruth=str(groundtruth)),
+    )
+
+    retrieval_cmd = next(cmd for cmd, stage in calls if stage == "ground-truth retrieval")
+    reranker_cmd = next(cmd for cmd, stage in calls if stage == "reranker pass")
+    assert retrieval_cmd[retrieval_cmd.index("--top-k") + 1] == "20"
+    assert reranker_cmd[reranker_cmd.index("--candidate-k") + 1] == "20"
+    assert reranker_cmd[reranker_cmd.index("--top-k") + 1] == "5"
+    assert reranker_cmd[reranker_cmd.index("--limit-artifacts") + 1] == "0"
+
+
+def test_run_manifest_persists_depth_contract_and_unlimited_chunks() -> None:
+    payload = pipeline.run_manifest_payload(
+        "20260716_120000",
+        {
+            **_ready_info(),
+            "retrieval_top_k": 20,
+            "reranked_output_k": 5,
+        },
+        status="running",
+    )
+
+    assert payload["run_id"] == "20260716_120000"
+    assert payload["status"] == "running"
+    assert payload["retrieval_top_k"] == 20
+    assert payload["reranked_output_k"] == 5
+    assert payload["chunk_limit"] == 0
+
+
 def test_normalized_queries_rejects_blank_values() -> None:
     assert pipeline.normalized_queries(["  ", "real question", "\n"]) == ["real question"]
 

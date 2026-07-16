@@ -455,6 +455,46 @@ def test_complete_pipeline_command_resolves_dataset_and_groundtruth_ids(tmp_path
     assert default_sheet_cmd[default_sheet_cmd.index("--sheets") + 1] == "uploaded_chunks"
 
 
+def test_complete_pipeline_command_separates_retrieval_and_reranked_depth(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+
+    cmd = complete_pipeline_cmd(
+        {
+            "dataset_id": ["dataset:wns-default"],
+            "groundtruth_id": ["groundtruth:repository:repository.csv"],
+            "retrieval_top_k": ["20"],
+            "reranked_output_k": ["5"],
+        },
+        root=root,
+    )
+
+    assert cmd[cmd.index("--top-k") + 1] == "20"
+    assert cmd[cmd.index("--reranked-output-k") + 1] == "5"
+
+
+@pytest.mark.parametrize(
+    ("retrieval_top_k", "reranked_output_k"),
+    [("0", "5"), ("ten", "5"), ("10", "0"), ("10", "11")],
+)
+def test_complete_pipeline_command_rejects_invalid_depths(
+    tmp_path: Path,
+    retrieval_top_k: str,
+    reranked_output_k: str,
+) -> None:
+    root = _fixture_root(tmp_path)
+
+    with pytest.raises(ValueError, match="depth|positive|cannot exceed"):
+        complete_pipeline_cmd(
+            {
+                "dataset_id": ["dataset:wns-default"],
+                "groundtruth_id": ["groundtruth:repository:repository.csv"],
+                "retrieval_top_k": [retrieval_top_k],
+                "reranked_output_k": [reranked_output_k],
+            },
+            root=root,
+        )
+
+
 def test_complete_pipeline_command_enforces_evidence_only_queries(tmp_path: Path) -> None:
     root = _fixture_root(tmp_path)
 

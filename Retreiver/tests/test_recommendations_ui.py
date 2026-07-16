@@ -6,6 +6,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "web" / "index.html"
 APP = ROOT / "web" / "app.js"
+SOURCE_STATE = ROOT / "web" / "source-state.js"
 STYLES = ROOT / "web" / "styles.css"
 
 
@@ -39,10 +40,10 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert "No-reranker baseline — measured results" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260715-metrics-sources"' in index
-    assert 'src="/recommendations.js?v=20260715-metrics-sources"' in index
-    assert index.index('/recommendations.js?v=20260715-metrics-sources') < index.index(
-        '/app.js?v=20260715-metrics-sources'
+    assert 'href="/styles.css?v=20260716-meeting-hardening"' in index
+    assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
+    assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
+        '/app.js?v=20260716-meeting-hardening'
     )
 
     for endpoint in (
@@ -119,6 +120,7 @@ const context = {{
   }},
 }};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
   globalThis.__loadProjectRun = loadProjectRun;
@@ -184,6 +186,7 @@ const context = {{
   fetch(url) {{return new Promise(resolve => pending.set(url, payload => resolve({{ok:true,json:async()=>payload,text:async()=>JSON.stringify(payload)}})));}},
 }};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
   globalThis.__loadProjectRun = loadProjectRun;
@@ -237,6 +240,7 @@ const context = {{
   fetch(url) {{return new Promise(resolve => pending.set(url, payload => resolve({{ok:true,json:async()=>payload,text:async()=>JSON.stringify(payload)}})));}},
 }};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
   globalThis.__selectRecommendationSource = selectRecommendationSource;
@@ -278,6 +282,7 @@ const context = {{
   fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),
 }};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
   const row={{
@@ -488,6 +493,7 @@ const context = {{
   fetch() {{throw new Error('unexpected fetch');}},
 }};
 vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
   const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',recall_at_5:0.964,mrr:0.888433,ndcg_at_5:0.902323,avg_latency_seconds:0.024932915}};

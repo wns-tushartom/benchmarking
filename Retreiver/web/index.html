@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260715-metrics-sources" />
+  <link rel="stylesheet" href="/styles.css?v=20260716-meeting-hardening" />
 </head>
 <body>
   <main class="shell">
@@ -16,6 +16,11 @@
         <div class="hero-actions">
           <button id="refreshBtn" type="button">Refresh live data</button>
           <span id="statusPill" class="status-pill muted-pill">Loading</span>
+        </div>
+        <div class="global-source-bar" aria-label="Global data context">
+          <label>Dataset<select id="globalDataset"></select></label>
+          <label>Ground truth<select id="globalGroundtruth"></select></label>
+          <small id="globalSourceContext">Loading shared data context…</small>
         </div>
       </div>
       <div class="hero-panel">
@@ -38,7 +43,7 @@
       <button class="tab-btn" data-page="compare" type="button">Recommendations</button>
       <button class="tab-btn" data-page="run" type="button">Run pipeline</button>
       <button class="tab-btn" data-page="evidence" type="button">Top 5 hits evidence</button>
-      <button class="tab-btn" data-page="hallucination" type="button">Grounding audit</button>
+      <button class="tab-btn feature-disabled" data-page="hallucination" type="button" disabled aria-disabled="true" title="Not active in this build">Grounding audit</button>
       <button class="tab-btn" data-page="nvidia" type="button">NVIDIA RAG</button>
       <button class="tab-btn" data-page="repository" type="button">Repository</button>
       <button class="tab-btn" data-page="upload" type="button">Documents</button>
@@ -110,8 +115,8 @@
           <span class="mini-stat">Shared with Recommendations</span>
         </div>
         <div class="result-source-bar">
-          <label>Dataset<select id="metricsDataset"><option value="official">Official WNS corpus</option></select></label>
-          <label>Ground truth<select id="metricsGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
+          <label hidden data-source-mirror><select id="metricsDataset"><option value="official">Official WNS corpus</option></select></label>
+          <label hidden data-source-mirror><select id="metricsGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
           <label>Result set<select id="metricsResultSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
         </div>
         <p id="metricsSourceContext" class="result-context">Viewing: Official WNS benchmark</p>
@@ -141,8 +146,8 @@
         </div>
         <div class="result-source-bar">
           <label hidden>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
-          <label>Dataset<select id="recommendationDataset"><option value="official">Official WNS corpus</option></select></label>
-          <label>Ground truth<select id="recommendationGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
+          <label hidden data-source-mirror><select id="recommendationDataset"><option value="official">Official WNS corpus</option></select></label>
+          <label hidden data-source-mirror><select id="recommendationGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
           <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
           <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
           <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
@@ -189,15 +194,16 @@
           <label>Embeddings<select id="runEmbedding" multiple size="4"></select><small>Turn embedding adapters on/off from frontend</small></label>
           <label>Vector DBs<select id="runStore" multiple size="4"></select><small>Run against selected stores</small></label>
           <label>Rerankers<select id="runRerankerMain" multiple size="4"></select><small>Choose BGE/Qwen/Amazon/none</small></label>
-          <label>Dataset<select id="runDataset"></select><small id="runDatasetHint">Choose the corpus to ingest and retrieve</small></label>
-          <label>Ground truth<select id="runGroundtruth"></select><small>Choose a validated file or None for evidence-only</small></label>
-          <label>Top K<input id="runTopK" value="10" /><small>initial vector results retrieved per query</small></label>
-          <label>Chunk limit<input id="runLimit" value="0" /><small>0 means all chunks</small></label>
+          <label hidden data-source-mirror><select id="runDataset"></select><small id="runDatasetHint">Choose the corpus to ingest and retrieve</small></label>
+          <label hidden data-source-mirror><select id="runGroundtruth"></select><small>Choose a validated file or None for evidence-only</small></label>
+          <label>Retrieval Top K<input id="runRetrievalTopK" type="number" min="1" max="100" value="10" /><small>Candidate chunks retrieved per query before reranking</small></label>
+          <label>Reranked Output K<input id="runRerankedOutputK" type="number" min="1" max="100" value="5" /><small>Final chunks retained after reranking; cannot exceed Retrieval Top K</small></label>
           <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
           <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
-          <label id="runQueryField" class="query-field" hidden>Type a specific test query (evidence-only)<textarea id="runQueries">What to do when flights have been cancelled
+          <label class="check-row"><input id="runAllowPartialExtraction" type="checkbox" /> Allow audited text-only documents <small>Explicitly permits PyPDF2 fallback/review rows while preserving the extraction warning.</small></label>
+          <label id="runQueryField" class="query-field" hidden>Evidence-only queries<textarea id="runQueries">What to do when flights have been cancelled
 How to add infant manually
-Passenger wants return refund due to illness</textarea><small>Required in evidence-only mode. One query per line.</small></label>
+Passenger wants return refund due to illness</textarea><span class="inline-upload"><input id="runQueryFile" type="file" accept=".txt,.csv,.xlsx" /><button id="runQueryUploadBtn" type="button">Load query file</button></span><small id="runQueryUploadStatus">Required in evidence-only mode. Type one query per line or load a validated TXT, CSV, or XLSX file.</small></label>
         </div>
         <p id="runModeHint" class="status-note">Evaluated mode — retrieval metrics will use the selected ground truth.</p>
         <div class="run-actions primary-run-actions">
@@ -206,23 +212,58 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
           <button id="runSmokeBtn" type="button">Test typed query evidence</button>
           <button id="runCompletePipelineBtn" type="button">Run pipeline and evaluate</button>
         </div>
+        <p id="runReadinessSummary" class="readiness-summary" aria-live="polite"></p>
         <div id="runResultCards" class="run-result-cards"></div>
-        <div class="table-wrap"><table id="runResultTable"></table></div>
-        <details class="run-log" open><summary>Live execution output</summary><pre id="runOutput" class="run-output"></pre></details>
+        <details id="runTechnicalDiagnostics" class="technical-readiness-details">
+          <summary>Technical readiness details</summary>
+          <div class="table-wrap"><table id="runResultTable"></table></div>
+        </details>
+        <details class="run-log"><summary>Raw execution output</summary><pre id="runOutput" class="run-output"></pre></details>
         <details class="advanced-run-actions">
           <summary>Advanced pipeline controls</summary>
-          <p id="advancedRunHint">Use these controls only for targeted troubleshooting of the default WNS pipeline.</p>
-          <div class="run-actions">
-            <button id="runParseMineruBtn" type="button">Parse PDFs</button>
-            <button id="runIngestBtn" type="button">Ingest selected components only</button>
-            <button id="runFullGtBtn" type="button">Run full GT retrieval only</button>
-            <button id="runRerankerBtn" type="button">Run reranker stage only</button>
-            <button id="runRerankedEvalBtn" type="button">Evaluate reranked results only</button>
-            <button id="runEvalBtn" type="button">Evaluate ground-truth baseline only</button>
-            <button id="runHallucinationBtn" type="button">Evaluate grounding risk</button>
-            <button id="runHallucinationLlmBtn" type="button">LLM grounding audit</button>
+          <p id="advancedRunHint">Target one stage when diagnosing the default WNS pipeline. For meeting demos, use Run pipeline and evaluate above.</p>
+          <div class="pipeline-stage-grid" aria-label="Advanced pipeline stages">
+            <article data-pipeline-stage="extraction">
+              <h3>Extraction</h3>
+              <p>Parse source PDFs and refresh audited document text.</p>
+              <button id="runParseMineruBtn" type="button">Run extraction</button>
+            </article>
+            <article data-pipeline-stage="embedding">
+              <h3>Embedding</h3>
+              <p>Generate vectors for selected chunkers and embedding models. This runs atomically with vector-store ingestion.</p>
+              <span class="stage-contract">Paired with ingestion</span>
+            </article>
+            <article data-pipeline-stage="vector-store-ingestion">
+              <h3>Vector-store ingestion</h3>
+              <p>Write generated vectors to the selected vector stores.</p>
+              <button id="runIngestBtn" type="button">Embed and ingest</button>
+            </article>
+            <article data-pipeline-stage="retrieval">
+              <h3>Retrieval</h3>
+              <p>Retrieve candidates for the selected ground-truth queries.</p>
+              <button id="runFullGtBtn" type="button">Run retrieval</button>
+            </article>
+            <article data-pipeline-stage="reranking">
+              <h3>Reranking</h3>
+              <p>Rerank existing retrieval candidates without limiting artifacts.</p>
+              <button id="runRerankerBtn" type="button">Run reranking</button>
+            </article>
+            <article data-pipeline-stage="evaluation">
+              <h3>Evaluation</h3>
+              <p>Score baseline retrieval or completed reranked results against ground truth.</p>
+              <div class="stage-actions">
+                <button id="runRerankedEvalBtn" type="button">Evaluate reranked</button>
+                <button id="runEvalBtn" type="button">Evaluate baseline</button>
+              </div>
+            </article>
           </div>
-          <label class="advanced-limit">Reranker artifact limit<input id="rerankerLimit" value="0" /><small>0 means all artifacts</small></label>
+          <div class="advanced-grounding-actions">
+            <strong>Grounding audit</strong>
+            <div class="run-actions">
+              <button id="runHallucinationBtn" type="button" disabled aria-disabled="true">Evaluate grounding risk</button>
+              <button id="runHallucinationLlmBtn" type="button" disabled aria-disabled="true">LLM grounding audit</button>
+            </div>
+          </div>
         </details>
       </section>
     </section>
@@ -242,14 +283,16 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
       </section>
     </section>
 
-    <section class="page" data-page-panel="hallucination">
-      <section class="panel">
+    <section class="page feature-disabled-page" data-page-panel="hallucination" data-feature-state="disabled">
+      <section class="panel disabled-feature-panel">
         <div class="section-head">
-          <div><h2>Grounding and hallucination audit</h2><p>Checks whether retrieved evidence is enough to support the expected answer. Optional LLM judge can be run from the test page when an API key is configured.</p></div>
-          <span class="mini-stat" id="hallucinationHint">Waiting for audit</span>
+          <div><h2>Grounding audit</h2><p>Not active in this build. This stage will evaluate whether generated answers are supported by retrieved evidence after the post-reranking LLM layer is implemented.</p></div>
+          <span class="mini-stat">Planned</span>
         </div>
-        <div id="hallucinationSummary" class="comparison-grid"></div>
-        <div class="table-wrap"><table id="hallucinationTable"></table></div>
+        <div class="disabled-feature-state"><strong>Unavailable for the meeting build</strong><span>No grounding score is calculated or implied.</span></div>
+        <span id="hallucinationHint" hidden></span>
+        <div id="hallucinationSummary" hidden></div>
+        <table id="hallucinationTable" hidden></table>
       </section>
     </section>
 
@@ -286,8 +329,8 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
           <div class="run-grid nvidia-run-grid">
             <label>NVIDIA query<textarea id="nvidiaQuery">refund old ticket and issue new ticket</textarea></label>
             <label>Collection<input id="nvidiaCollection" value="multimodal_data" /></label>
-            <label>Dataset<select id="nvidiaDataset"></select><small>Uses the same global corpus registry</small></label>
-            <label>Ground truth<select id="nvidiaGroundtruth"></select><small id="nvidiaGroundtruthHint">Required for benchmark; None is smoke-only</small></label>
+            <label hidden data-source-mirror><select id="nvidiaDataset"></select><small>Uses the same global corpus registry</small></label>
+            <label hidden data-source-mirror><select id="nvidiaGroundtruth"></select><small id="nvidiaGroundtruthHint">Required for benchmark; None is smoke-only</small></label>
             <label>Smoke mode<select id="nvidiaMode"><option value="search">Search / rerank</option><option value="generate">Generate answer</option></select></label>
             <label>Top K<input id="nvidiaTopK" value="10" /></label>
             <label>Reranker top K<input id="nvidiaRerankerTopK" value="5" /></label>
@@ -348,19 +391,7 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
           <label>Label<input id="datasetLabel" name="label" placeholder="travel-refunds-june" /></label>
           <button id="uploadSubmitBtn" type="submit">Upload into isolated project</button>
         </form>
-        <section class="panel-soft project-query-panel">
-          <div class="section-head">
-            <div><h2>Lexical preview</h2><p>Search only the active uploaded project with token overlap. Embeddings, vector databases, rerankers, and accuracy scoring are not executed here.</p></div>
-            <span id="projectQueryStatus" class="mini-stat">Choose an active project</span>
-          </div>
-          <div class="run-grid">
-            <label>Active project<select id="projectSelect"></select></label>
-            <label>Search this project<textarea id="projectQueryInput">cancelled flight refund policy</textarea></label>
-            <label>Hits shown<input id="projectQueryTopK" type="number" min="1" max="50" value="5" /></label>
-          </div>
-          <div class="run-actions"><button id="projectQueryBtn" type="button">Search this project</button></div>
-          <div class="table-wrap"><table id="projectQueryTable"></table></div>
-        </section>
+
         <div class="upload-guidance">
           <h3>What happens after upload</h3>
           <ol>
@@ -398,7 +429,8 @@ Passenger wants return refund due to illness</textarea><small>Required in eviden
       </details>
     </section>
   </main>
-  <script src="/recommendations.js?v=20260715-metrics-sources"></script>
-  <script src="/app.js?v=20260715-metrics-sources"></script>
+  <script src="/source-state.js?v=20260716-canonical-source"></script>
+  <script src="/recommendations.js?v=20260716-extraction-override"></script>
+  <script src="/app.js?v=20260716-meeting-hardening"></script>
 </body>
 </html>
