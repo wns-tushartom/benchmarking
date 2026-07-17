@@ -57,6 +57,7 @@ class DatasetSource:
     ready: bool
     validation: str
     sheets: tuple[str, ...] = ()
+    chunk_counts_by_strategy: tuple[tuple[str, int], ...] = ()
     document_path: Path | None = None
     workbook_path: Path | None = None
     manifest_path: Path | None = None
@@ -69,6 +70,7 @@ class DatasetSource:
             "kind": self.kind,
             "document_count": self.document_count,
             "chunk_count": self.chunk_count,
+            "chunk_counts_by_strategy": dict(self.chunk_counts_by_strategy),
             "ready": self.ready,
             "validation": self.validation,
             "sheets": list(self.sheets),
@@ -169,6 +171,30 @@ def _runnable_workbook_sheets(path: Path | None) -> list[str]:
             workbook.close()
     except Exception:
         return []
+
+
+def _workbook_chunk_counts(path: Path | None) -> tuple[tuple[str, int], ...]:
+    if path is None:
+        return ()
+    try:
+        import openpyxl  # type: ignore
+
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            required = {"id", "pdf_name", "paragraph"}
+            counts: list[tuple[str, int]] = []
+            for worksheet in workbook.worksheets:
+                rows = worksheet.iter_rows(values_only=True)
+                headers = {str(value).strip().lower() for value in next(rows, ()) if value is not None}
+                if not required.issubset(headers):
+                    continue
+                count = sum(1 for row in rows if any(value is not None and str(value).strip() for value in row))
+                counts.append((str(worksheet.title), count))
+            return tuple(counts)
+        finally:
+            workbook.close()
+    except Exception:
+        return ()
 
 
 def _table_metadata(path: Path) -> tuple[int, list[str]] | None:
@@ -419,6 +445,7 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
             default_ready,
             "ready" if default_ready else "documents_chunks_or_workbook_missing",
             sheets=_workbook_sheet_names(workbook),
+            chunk_counts_by_strategy=_workbook_chunk_counts(workbook),
             document_path=pdf_dir,
             workbook_path=workbook,
         )
@@ -460,6 +487,7 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
                     ready,
                     "ready" if ready else "manifest_index_content_or_workbook_missing",
                     sheets=_workbook_sheet_names(workbook_path),
+                    chunk_counts_by_strategy=_workbook_chunk_counts(workbook_path),
                     document_path=document_path,
                     workbook_path=workbook_path,
                     manifest_path=manifest_path,

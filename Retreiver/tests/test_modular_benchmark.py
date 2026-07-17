@@ -320,7 +320,7 @@ renderCoverage([]);
 globalThis.__coverageHint = document.getElementById('coverageHint').textContent;
 globalThis.__coverageHtml = document.getElementById('coverageTable').innerHTML;
 `, context);
-if (!context.__coverageHtml.includes('metrics')) {{
+if (!context.__coverageHtml.includes('Done · open Metrics')) {{
   console.error(context.__coverageHtml);
   process.exit(1);
 }}

@@ -138,6 +138,7 @@ def test_build_source_catalog_discovers_allowlisted_sources_and_truthful_counts(
     assert list(datasets) == ["dataset:wns-default", "project:customer-demo"]
     assert datasets["dataset:wns-default"]["document_count"] == 2
     assert datasets["dataset:wns-default"]["chunk_count"] == 3
+    assert datasets["dataset:wns-default"]["chunk_counts_by_strategy"] == {"uploaded_chunks": 3}
     assert datasets["dataset:wns-default"]["ready"] is True
     assert datasets["dataset:wns-default"]["sheets"] == ["uploaded_chunks"]
     assert datasets["project:customer-demo"]["label"] == "Customer demo"

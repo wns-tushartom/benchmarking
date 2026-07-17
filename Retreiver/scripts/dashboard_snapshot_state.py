@@ -25,12 +25,30 @@ def _normalized(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     uploaded = snapshot.get("uploaded", [])
     if not isinstance(rows, list) or not isinstance(uploaded, list):
         raise ValueError("document readiness rows must be arrays")
+
+    def count_map(name: str) -> dict[str, int]:
+        raw = snapshot.get(name, {})
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"document readiness {name} must be an object")
+        normalized: dict[str, int] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"document readiness {name} has invalid counts")
+            normalized[key] = value
+        return normalized
+
+    audit_status = snapshot.get("audit_status", "unknown")
+    if not isinstance(audit_status, str):
+        raise ValueError("document readiness audit_status must be a string")
     return {
         "rows": rows,
         "total": total,
         "ready_count": ready,
         "review_count": review,
         "uploaded": uploaded,
+        "audit_status": audit_status,
+        "parser_counts": count_map("parser_counts"),
+        "review_reason_counts": count_map("review_reason_counts"),
         "captured_at": datetime.now(timezone.utc).isoformat(),
     }
 

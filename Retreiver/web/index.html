@@ -135,6 +135,11 @@
         </div>
         <div id="qualityInsight" class="insight-strip"></div>
         <div class="table-wrap"><table id="qualityTable"></table></div>
+        <details id="incompleteMetricsPanel" class="diagnostic-details hidden">
+          <summary id="incompleteMetricsSummary">Incomplete combinations</summary>
+          <p>These artifacts are visible for diagnosis but receive no score or rank until every required metric is present.</p>
+          <div class="table-wrap compact"><table id="incompleteMetricsTable"></table></div>
+        </details>
       </section>
     </section>
 
@@ -429,8 +434,8 @@ Passenger wants return refund due to illness</textarea><span class="inline-uploa
       </details>
     </section>
   </main>
-  <script src="/source-state.js?v=20260716-canonical-source"></script>
+  <script src="/source-state.js?v=20260716-metrics-integrity"></script>
   <script src="/recommendations.js?v=20260716-extraction-override"></script>
-  <script src="/app.js?v=20260716-meeting-hardening"></script>
+  <script src="/app.js?v=20260716-metrics-integrity"></script>
 </body>
 </html>

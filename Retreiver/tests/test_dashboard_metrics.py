@@ -58,6 +58,47 @@ if (context.__rows.length !== 2 || !context.__stage.includes('Vector DB componen
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate() -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    complete = {
+        "chunker": "Heading_sections_l2",
+        "embedding": "gte_multilingual_base",
+        "vector_store": "FAISS",
+        "reranker": "bge-reranker-base",
+        "query_count": "500",
+        "recall_at_1": "0.7",
+        "recall_at_3": "0.8",
+        "recall_at_5": "0.9",
+        "recall_at_10": "0.95",
+        "mrr": "0.82",
+        "precision_at_5": "0.4",
+        "ndcg_at_5": "0.86",
+        "avg_first_relevant_rank": "1.7",
+        "no_hit_queries": "10",
+        "avg_latency_ms": "30",
+    }
+    partial = {**complete, "mrr": "", "ndcg_at_5": "", "avg_latency_ms": ""}
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write_csv(root / "runs" / "latest" / "modular_summary.csv", [partial])
+        _write_csv(root / "runs" / "archive" / "complete" / "modular_summary.csv", [complete])
+        old = dashboard.MODULAR_DIR, dashboard.FULL_DIR
+        dashboard.MODULAR_DIR, dashboard.FULL_DIR = root / "runs" / "latest", root / "full"
+        try:
+            reference = dashboard.read_benchmark_reference()
+        finally:
+            dashboard.MODULAR_DIR, dashboard.FULL_DIR = old
+
+    assert len(reference["summary"]) == 1
+    row = reference["summary"][0]
+    assert row["mrr"] == "0.82"
+    assert row["ndcg_at_5"] == "0.86"
+    assert row["avg_latency_seconds"] == pytest.approx(0.03)
+    assert reference["report"]["complete_metric_rows"] == 1
+    assert reference["report"]["incomplete_metric_rows"] == 0
+
+
 def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count():
     import scripts.serve_benchmark_dashboard as dashboard
     from benchmarking.core.config import generate_matrix, load_benchmark_config
@@ -163,6 +204,25 @@ def test_operational_render_defines_evaluation_before_reading_groundtruth_status
     status_read = "evaluation?.report?.groundtruth_rows"
     assert declaration in render_operational
     assert render_operational.index(declaration) < render_operational.index(status_read)
+
+
+def test_completed_coverage_cells_open_the_exact_metrics_combination() -> None:
+    app = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'coverage-metric-btn' in app
+    assert "function showMetricsCombination(" in app
+    assert "showPage('metrics')" in app
+    assert "qualityComboFilter" in app
+    assert "data-combo=" in app
+    assert "const label = v.status === 'metrics' ? 'metrics' : 'ok';" not in app
+
+
+def test_dataset_chunk_labels_are_per_strategy_not_a_fake_global_total() -> None:
+    app = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert "chunk_counts_by_strategy" in app
+    assert "chunks/strategy" in app
+    assert "documents · ${fmtInt(row.chunk_count || 0)} chunks" not in app
 
 
 def test_metrics_exposes_shared_dataset_groundtruth_and_result_set_selectors() -> None:
@@ -381,7 +441,7 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260716-meeting-hardening" in index
+    assert "/app.js?v=20260716-metrics-integrity" in index
     assert "/styles.css?v=20260716-meeting-hardening" in index
     assert "20260709-query-ui" not in index
 
@@ -508,6 +568,61 @@ def test_dashboard_query_upload_reuses_hardened_parser_contract():
     assert "async function uploadRunQueries()" in app
     assert "form.append('upload_type', 'queries')" in app
     assert "$('runQueries').value = payload.queries.join('\\n')" in app
+
+
+def test_document_repository_reports_audit_reason_and_parser_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    pdf_dir = tmp_path / "data" / "pdfs"
+    pdf_dir.mkdir(parents=True)
+    (pdf_dir / "one.pdf").write_bytes(b"%PDF-1.4\n")
+    audit_path = tmp_path / "data" / "pdf_extraction_audit.csv"
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "PDF_DIR", pdf_dir)
+    monkeypatch.setattr(dashboard, "PDF_AUDIT_PATH", audit_path)
+    monkeypatch.setattr(dashboard, "read_pdf_chunk_counts", lambda: {"one.pdf": 3})
+
+    missing = dashboard.read_document_repository()
+    assert missing["audit_status"] == "missing"
+    assert missing["review_reason_counts"] == {"audit_missing": 1}
+    assert missing["parser_counts"] == {}
+
+    _write_csv(audit_path, [{
+        "pdf_name": "one.pdf",
+        "status": "text_only_review",
+        "parser_method": "PyPDF2_fallback",
+        "needs_ocr_review": "true",
+    }])
+    fallback = dashboard.read_document_repository()
+    assert fallback["audit_status"] == "text_only_fallback"
+    assert fallback["parser_counts"] == {"PyPDF2_fallback": 1}
+    assert fallback["review_reason_counts"] == {"text_only_fallback": 1}
+
+
+def test_document_readiness_summary_explains_live_and_preserved_states() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    script = f"""
+const fs=require('fs'), vm=require('vm');
+const elements={{}};
+function el(id){{return elements[id] ||= {{id,value:'all',textContent:'',innerHTML:'',classList:{{toggle(){{}},add(){{}},remove(){{}}}},addEventListener(){{}},querySelectorAll(){{return[];}},setAttribute(){{}}}};}}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+globalThis.__missing=documentReadinessSummary({{total:225,ready_count:0,review_count:225,audit_status:'missing',display_source:'latest_attempt'}});
+globalThis.__fallback=documentReadinessSummary({{total:225,ready_count:0,review_count:225,audit_status:'text_only_fallback',parser_counts:{{PyPDF2_fallback:225}},display_source:'latest_attempt'}});
+globalThis.__preserved=documentReadinessSummary({{total:225,ready_count:225,review_count:0,audit_status:'clean',display_source:'last_successful',latest_attempt:{{total:225,ready_count:0,review_count:225,audit_status:'missing'}}}});
+`, context);
+console.log(JSON.stringify({{missing:context.__missing,fallback:context.__fallback,preserved:context.__preserved}}));
+"""
+    proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    summaries = json.loads(proc.stdout)
+    assert "extraction audit missing" in summaries["missing"]
+    assert "text-only fallback" in summaries["fallback"]
+    assert "preserved clean snapshot" in summaries["preserved"]
+    assert "latest attempt: extraction audit missing" in summaries["preserved"]
 
 
 def test_document_repository_page_does_not_show_summary_cards():

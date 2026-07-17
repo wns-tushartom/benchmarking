@@ -43,7 +43,7 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert 'href="/styles.css?v=20260716-meeting-hardening"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/app.js?v=20260716-meeting-hardening'
+        '/app.js?v=20260716-metrics-integrity'
     )
 
     for endpoint in (
@@ -496,8 +496,8 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
-  const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',recall_at_5:0.964,mrr:0.888433,ndcg_at_5:0.902323,avg_latency_seconds:0.024932915}};
-  const qdrant = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'bge-reranker-base',recall_at_5:0.90,mrr:0.80,ndcg_at_5:0.81,avg_latency_seconds:0.01}};
+  const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',evaluated_queries:500,recall_at_1:0.8,recall_at_3:0.92,recall_at_5:0.964,recall_at_10:0.98,mrr:0.888433,precision_at_5:0.4,ndcg_at_5:0.902323,avg_first_relevant_rank:1.4,no_hit_queries:5,avg_latency_seconds:0.024932915}};
+  const qdrant = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'bge-reranker-base',evaluated_queries:500,recall_at_1:0.7,recall_at_3:0.84,recall_at_5:0.90,recall_at_10:0.95,mrr:0.80,precision_at_5:0.35,ndcg_at_5:0.81,avg_first_relevant_rank:1.8,no_hit_queries:12,avg_latency_seconds:0.01}};
   state = {{operational:{{
     evaluation:{{
       summary:[{{sheet:'legacy',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'none',winner_score:1,recall_at_5:1}}],

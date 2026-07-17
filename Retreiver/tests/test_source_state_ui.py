@@ -31,6 +31,11 @@ const SourceState = require({json.dumps(str(SOURCE_STATE))});
 def test_initial_official_and_toggle_return_have_identical_canonical_rows_and_winner() -> None:
     result = _run_node(
         """
+const completeMetrics = {
+  evaluated_queries:500,recall_at_1:.7,recall_at_3:.8,recall_at_5:.9,recall_at_10:.95,
+  mrr:.82,precision_at_5:.4,ndcg_at_5:.86,avg_first_relevant_rank:1.7,
+  no_hit_queries:10,avg_latency_seconds:.03,
+};
 const evaluation = {
   summary: [
     {sheet:'stale',embedding:'stale',store:'Qdrant',reranker:'none',winner_score:.99,status:'completed'},
@@ -40,9 +45,9 @@ const evaluation = {
     {sheet:'base',embedding:'base',store:'FAISS',reranker:'baseline',winner_score:.4,status:'completed'},
   ]},
   benchmark_reference: {summary: [
-    {sheet:'official',embedding:'bge',store:'FAISS',reranker:'bge_reranker_base',winner_score:.9,status:'completed'},
-    {sheet:'official',embedding:'bge',store:'FAISS',reranker:'bge-reranker-base',winner_score:.1,status:'completed'},
-    {sheet:'official',embedding:'amazon',store:'Qdrant',reranker:'amazon_rerank_v1',winner_score:.8},
+    {...completeMetrics,sheet:'official',embedding:'bge',store:'FAISS',reranker:'bge_reranker_base',winner_score:.9,status:'completed'},
+    {...completeMetrics,sheet:'official',embedding:'bge',store:'FAISS',reranker:'bge-reranker-base',winner_score:.1,status:'completed'},
+    {...completeMetrics,sheet:'official',embedding:'amazon',store:'Qdrant',reranker:'amazon_rerank_v1',winner_score:.8},
     {sheet:'failed',embedding:'x',store:'Qdrant',reranker:'qwen',winner_score:1,status:'failed'},
     {sheet:'nvidia',embedding:'x',store:'NVIDIA',reranker:'qwen',winner_score:1,status:'completed',source_type:'nvidia'},
     {sheet:'not-reranked',embedding:'x',store:'Qdrant',reranker:'none',winner_score:1,status:'completed'},
@@ -111,6 +116,49 @@ console.log(JSON.stringify({
         "source_type": "uploaded_project",
         "scoring_mode": "evidence_only",
         "rowIds": ["uploaded-row"],
+    }
+
+
+def test_official_rows_missing_required_metrics_are_reported_but_never_ranked() -> None:
+    result = _run_node(
+        """
+const complete = {
+  sheet:'complete',embedding:'gte',store:'FAISS',reranker:'bge-reranker-base',status:'completed',
+  evaluated_queries:500,recall_at_1:.7,recall_at_3:.8,recall_at_5:.9,recall_at_10:.95,
+  mrr:.82,precision_at_5:.4,ndcg_at_5:.86,avg_first_relevant_rank:1.7,
+  no_hit_queries:10,avg_latency_seconds:.03,winner_score:.88,
+};
+const incomplete = {
+  sheet:'incomplete',embedding:'bge',store:'Qdrant',reranker:'qwen3_4b_rerank',status:'completed',
+  evaluated_queries:500,recall_at_1:.7,recall_at_3:.8,recall_at_5:.91,recall_at_10:.95,
+  mrr:'',precision_at_5:.4,ndcg_at_5:null,avg_first_relevant_rank:1.8,
+  no_hit_queries:12,avg_latency_seconds:'',
+};
+const payload = SourceState.officialResultPayload(
+  {benchmark_reference:{summary:[incomplete,complete]}},
+  {configured:180,evaluated:180},
+);
+console.log(JSON.stringify({
+  ranked:payload.rows.map(row => row.combo_id),
+  incomplete:payload.incomplete_rows.map(row => ({id:row.combo_id,missing:row.missing_metrics})),
+  discovered:payload.discovered,
+  evaluated:payload.evaluated,
+  incompleteScore:SourceState.metricScore(incomplete),
+}));
+"""
+    )
+
+    assert result == {
+        "ranked": ["complete|gte|FAISS|bge-reranker-base"],
+        "incomplete": [
+            {
+                "id": "incomplete|bge|Qdrant|Qwen3:4B Rerank",
+                "missing": ["mrr", "ndcg_at_5", "avg_latency_seconds"],
+            }
+        ],
+        "discovered": 2,
+        "evaluated": 1,
+        "incompleteScore": None,
     }
 
 

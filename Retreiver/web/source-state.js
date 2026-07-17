@@ -35,12 +35,26 @@
 
   function metricScore(row) {
     const explicit = finite(row?.winner_score);
-    if (explicit !== null && explicit !== 0) return explicit;
-    const recall = finite(row?.recall_at_5) || 0;
-    const mrr = finite(row?.mrr) || 0;
-    const ndcg = finite(row?.ndcg_at_5) || 0;
-    const latency = finite(row?.avg_latency_seconds) || 0;
+    if (explicit !== null) return explicit;
+    const recall = finite(row?.recall_at_5);
+    const mrr = finite(row?.mrr);
+    const ndcg = finite(row?.ndcg_at_5);
+    const latency = finite(row?.avg_latency_seconds);
+    if ([recall, mrr, ndcg, latency].some(value => value === null)) return null;
     return (0.45 * recall) + (0.30 * mrr) + (0.20 * ndcg) + (0.05 * (1 / (1 + latency)));
+  }
+
+  const OFFICIAL_METRICS = Object.freeze([
+    'recall_at_1', 'recall_at_3', 'recall_at_5', 'recall_at_10',
+    'mrr', 'precision_at_5', 'ndcg_at_5', 'avg_first_relevant_rank',
+    'no_hit_queries', 'avg_latency_seconds',
+  ]);
+
+  function officialMetricCompleteness(row) {
+    const missing = OFFICIAL_METRICS.filter(field => finite(row?.[field]) === null);
+    const queryCount = finite(row?.evaluated_queries);
+    if (queryCount === null || queryCount <= 0) missing.unshift('evaluated_queries');
+    return Object.freeze({complete: missing.length === 0, missing_metrics: Object.freeze(missing)});
   }
 
   function canonicalMetricRow(row, extra) {
@@ -72,36 +86,48 @@
       if (reranked ? row.reranker === 'none' : row.reranker !== 'none') return;
       const comboId = metricRowKey(row);
       if (!byId.has(comboId)) {
+        const score = metricScore(row);
         byId.set(comboId, Object.assign({}, row, {
           combo_id: comboId,
-          winner_score: metricScore(row),
+          winner_score: score,
         }));
       }
     });
     return [...byId.values()].sort((left, right) =>
-      metricScore(right) - metricScore(left) || left.combo_id.localeCompare(right.combo_id)
+      (metricScore(right) ?? -Infinity) - (metricScore(left) ?? -Infinity) || left.combo_id.localeCompare(right.combo_id)
     );
   }
 
   function officialResultPayload(evaluation, descriptor, evidenceRows) {
     const referenceRows = evaluation?.benchmark_reference?.summary || [];
-    const rows = normalizeOfficialRows(referenceRows, true);
+    const discoveredRows = normalizeOfficialRows(referenceRows, true);
     const evidenceCounts = new Map();
     (Array.isArray(evidenceRows) ? evidenceRows : []).forEach(raw => {
       const key = metricRowKey(canonicalMetricRow(raw));
       evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
     });
-    const decorated = rows.map(row => Object.assign({}, row, {
-      evidence_count: evidenceCounts.has(row.combo_id) ? evidenceCounts.get(row.combo_id) : null,
-    }));
+    const rows = [];
+    const incompleteRows = [];
+    discoveredRows.forEach(row => {
+      const completeness = officialMetricCompleteness(row);
+      const next = Object.freeze(Object.assign({}, row, completeness, {
+        evidence_count: evidenceCounts.has(row.combo_id) ? evidenceCounts.get(row.combo_id) : null,
+      }));
+      (completeness.complete ? rows : incompleteRows).push(next);
+    });
     return Object.freeze({
       source_type: 'official',
       result_set: 'official',
       scoring_mode: 'retrieval_labels',
       metric_k: 5,
       configured: descriptor?.configured ?? 180,
-      evaluated: descriptor?.evaluated ?? decorated.length,
-      rows: Object.freeze(decorated),
+      evaluated: rows.length,
+      reported_evaluated: descriptor?.evaluated ?? discoveredRows.length,
+      discovered: discoveredRows.length,
+      matrix_complete: rows.length >= (descriptor?.configured ?? 180),
+      stability_status: rows.length >= (descriptor?.configured ?? 180) ? 'complete' : 'partial',
+      rows: Object.freeze(rows),
+      incomplete_rows: Object.freeze(incompleteRows),
     });
   }
 
@@ -178,6 +204,7 @@
     canonicalMetricRow,
     metricRowKey,
     metricScore,
+    officialMetricCompleteness,
     officialResultPayload,
     baselineResultPayload,
     normalizeResultPayload,

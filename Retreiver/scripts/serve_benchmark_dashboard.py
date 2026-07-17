@@ -7,6 +7,7 @@ import csv
 import cgi
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -460,6 +461,41 @@ def benchmark_row_is_evaluated(row: dict[str, Any]) -> bool:
     return query_count > 0 or metric_recorded
 
 
+BENCHMARK_COMPLETE_METRICS = (
+    "recall_at_1",
+    "recall_at_3",
+    "recall_at_5",
+    "recall_at_10",
+    "mrr",
+    "precision_at_5",
+    "ndcg_at_5",
+    "avg_first_relevant_rank",
+    "no_hit_queries",
+    "avg_latency_seconds",
+)
+
+
+def benchmark_missing_metrics(row: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    raw_query_count = row.get("evaluated_queries", row.get("query_count"))
+    try:
+        query_count = float(str(raw_query_count))
+    except (TypeError, ValueError):
+        query_count = 0.0
+    if not math.isfinite(query_count) or query_count <= 0:
+        missing.append("evaluated_queries")
+    for field in BENCHMARK_COMPLETE_METRICS:
+        raw = row.get(field)
+        try:
+            value = float(str(raw))
+        except (TypeError, ValueError):
+            missing.append(field)
+            continue
+        if not math.isfinite(value):
+            missing.append(field)
+    return missing
+
+
 def official_evaluated_count(evaluation: dict[str, Any]) -> int:
     official = official_matrix_keys()
     seen: set[tuple[str, str, str, str]] = set()
@@ -518,11 +554,21 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
                 return value
         return ""
 
-    latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms") or 0
-    try:
-        latency_s = float(latency_ms) / 1000.0
-    except (TypeError, ValueError):
-        latency_s = 0.0
+    latency_seconds = row.get("avg_latency_seconds")
+    if latency_seconds is None or latency_seconds == "":
+        latency_ms = row.get("avg_latency_ms") or row.get("avg_query_latency_ms") or row.get("p50_query_latency_ms")
+        if latency_ms is None or latency_ms == "":
+            latency_s: Any = ""
+        else:
+            try:
+                latency_s = float(latency_ms) / 1000.0
+            except (TypeError, ValueError):
+                latency_s = ""
+    else:
+        try:
+            latency_s = float(latency_seconds)
+        except (TypeError, ValueError):
+            latency_s = ""
     embedding = row.get("embedding") or row.get("embedding_model") or ""
     reranker = canonical_reranker_name(row.get("reranker") or row.get("reranking_model") or "none")
     return {
@@ -541,6 +587,8 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
         "mrr": value_or_empty("mrr"),
         "precision_at_5": value_or_empty("precision_at_5"),
         "ndcg_at_5": value_or_empty("ndcg_at_5", "ndcg_at_10"),
+        "avg_first_relevant_rank": value_or_empty("avg_first_relevant_rank"),
+        "no_hit_queries": value_or_empty("no_hit_queries"),
         "avg_latency_seconds": latency_s,
         "cost": "commercial" if re.search(r"openai|amazon", f"{embedding} {reranker}", re.I) else "oss",
     }
@@ -580,8 +628,7 @@ def official_matrix_keys() -> set[tuple[str, str, str, str]]:
 
 
 def read_benchmark_reference() -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     official_keys = official_matrix_keys()
     skipped_non_official = 0
     for source, path in benchmark_reference_sources():
@@ -591,17 +638,20 @@ def read_benchmark_reference() -> dict[str, Any]:
             if key not in official_keys:
                 skipped_non_official += 1
                 continue
-            if key in seen:
-                continue
             if not benchmark_row_is_evaluated(normalized):
                 continue
-            seen.add(key)
-            rows.append(normalized)
+            current = selected.get(key)
+            if current is None or len(benchmark_missing_metrics(normalized)) < len(benchmark_missing_metrics(current)):
+                selected[key] = normalized
+    rows = list(selected.values())
+    complete_rows = sum(1 for row in rows if not benchmark_missing_metrics(row))
     return {
         "summary": sort_summary(rows),
         "report": {
             "source": "modular/full benchmark artifacts",
             "config_rows": len(rows),
+            "complete_metric_rows": complete_rows,
+            "incomplete_metric_rows": len(rows) - complete_rows,
             "official_matrix_rows": len(official_keys),
             "skipped_non_official_rows": skipped_non_official,
             "openai_rows": sum(1 for r in rows if "openai" in str(r.get("embedding", "")).lower()),
@@ -827,24 +877,52 @@ def read_document_repository() -> dict[str, Any]:
     chunk_counts = read_pdf_chunk_counts()
     files = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
     rows = []
+    parser_counts: dict[str, int] = {}
+    review_reason_counts: dict[str, int] = {}
+
+    def increment(counts: dict[str, int], key: str) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
     for f in files:
         audit = audit_by_name.get(f.name, {})
         chunks = chunk_counts.get(f.name, 0)
+        parser_method = str(audit.get("parser_method") or audit.get("parser") or "").strip()
+        if parser_method:
+            increment(parser_counts, parser_method)
         status = audit.get("status") or ("audit_missing" if audit_missing else ("chunked" if chunks else "present"))
         needs_review = audit_missing or str(audit.get("needs_ocr_review", "")).lower() in {"1", "true", "yes"} or status in {"needs_ocr", "partial_ocr_review", "failed", "text_only_review"}
-        if (audit.get("parser_method") or "") == "PyPDF2_fallback":
+        if parser_method == "PyPDF2_fallback":
             status = "text_only_review"
             needs_review = True
+        if audit_missing:
+            review_reason = "audit_missing"
+        elif parser_method == "PyPDF2_fallback" or status == "text_only_review":
+            review_reason = "text_only_fallback"
+        elif needs_review:
+            review_reason = "audit_review"
+        else:
+            review_reason = ""
+        if review_reason:
+            increment(review_reason_counts, review_reason)
+        if review_reason == "audit_missing":
+            note = "Extraction audit missing; parser provenance unavailable"
+        elif review_reason == "text_only_fallback":
+            note = "Text-only fallback; MinerU/layout extraction not verified"
+        elif review_reason:
+            note = "Review required by extraction audit"
+        else:
+            note = "Ready for benchmark" if chunks else "Present, chunking pending"
         rows.append({
             "pdf_name": f.name,
             "status": "review" if needs_review else status,
             "repository_path": str(f.relative_to(ROOT)),
             "size_mb": f"{f.stat().st_size / (1024*1024):.2f}",
             "chunked_rows": chunks,
-            "parser_method": audit.get("parser_method") or audit.get("parser") or "—",
+            "parser_method": parser_method or "—",
             "pages": audit.get("total_pages") or audit.get("pages") or "—",
             "text_chars": audit.get("text_chars") or "—",
-            "note": "Extraction audit missing" if audit_missing else ("Review in audit" if needs_review else ("Ready for benchmark" if chunks else "Present, chunking pending")),
+            "review_reason": review_reason,
+            "note": note,
         })
     uploaded = []
     upload_dir = ROOT / "data" / "uploads"
@@ -852,11 +930,26 @@ def read_document_repository() -> dict[str, Any]:
         for f in sorted(upload_dir.rglob("*")):
             if f.is_file() and f.suffix.lower() in {".pdf", ".csv", ".xlsx"}:
                 uploaded.append({"path": str(f.relative_to(ROOT)), "size_mb": f"{f.stat().st_size / (1024*1024):.2f}"})
+    ready_count = sum(1 for row in rows if row["chunked_rows"] and row["status"] != "review")
+    review_count = sum(1 for row in rows if row["status"] == "review")
+    if audit_missing:
+        audit_status = "missing"
+    elif not audit_rows:
+        audit_status = "empty"
+    elif rows and review_reason_counts.get("text_only_fallback", 0) == len(rows):
+        audit_status = "text_only_fallback"
+    elif review_count:
+        audit_status = "review_required"
+    else:
+        audit_status = "clean"
     return {
         "rows": rows,
         "total": len(rows),
-        "ready_count": sum(1 for r in rows if r["chunked_rows"] and r["status"] != "review"),
-        "review_count": sum(1 for r in rows if r["status"] == "review"),
+        "ready_count": ready_count,
+        "review_count": review_count,
+        "audit_status": audit_status,
+        "parser_counts": parser_counts,
+        "review_reason_counts": review_reason_counts,
         "uploaded": uploaded[:100],
     }
 

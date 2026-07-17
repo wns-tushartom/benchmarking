@@ -54,3 +54,19 @@ def test_without_prior_success_latest_attempt_remains_visible(tmp_path: Path) ->
 
     assert resolved["display_source"] == "latest_attempt"
     assert resolved["ready_count"] == 0
+
+
+def test_readiness_snapshots_preserve_audit_provenance(tmp_path: Path) -> None:
+    snapshot = {
+        **_snapshot(2, 0, 2),
+        "audit_status": "text_only_fallback",
+        "parser_counts": {"PyPDF2_fallback": 2},
+        "review_reason_counts": {"text_only_fallback": 2},
+    }
+
+    resolved = publish_document_readiness(tmp_path, snapshot)
+
+    assert resolved["audit_status"] == "text_only_fallback"
+    assert resolved["parser_counts"] == {"PyPDF2_fallback": 2}
+    assert resolved["review_reason_counts"] == {"text_only_fallback": 2}
+    assert resolved["latest_attempt"]["audit_status"] == "text_only_fallback"

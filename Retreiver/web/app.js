@@ -236,23 +236,32 @@ function setRunSelection(sheet, embedding, store, reranker = 'all') {
 
 function metricCoverageRows() {
   const evaluation = state.operational?.evaluation || {};
+  const sourceState = sourceStateModule();
   return dedupeMetricRows([
     ...(evaluation.summary || []),
     ...(evaluation.reranked?.summary || []),
     ...(evaluation.benchmark_reference?.summary || []),
   ].filter(r => r.sheet && r.embedding && r.store)
-    .map(r => canonicalMetricRow(r, {
-      status: 'metrics',
-      total_store_seconds: r.total_store_seconds || r.avg_latency_seconds || '',
-    })));
+    .map(r => {
+      const normalized = canonicalMetricRow(r);
+      const completeness = sourceState?.officialMetricCompleteness(normalized) || {complete: true, missing_metrics: []};
+      return canonicalMetricRow(normalized, {
+        status: completeness.complete ? 'metrics' : 'metrics_incomplete',
+        missing_metrics: completeness.missing_metrics,
+      });
+    }));
 }
 
 function coverageEvidenceRows(rows) {
   const map = new Map();
-  latestRows(rows).map(r => canonicalMetricRow(r, {reranker: r.reranker || 'none'})).forEach(r => map.set(metricRowKey(r), r));
+  latestRows(rows).map(r => canonicalMetricRow(r, {
+    reranker: r.reranker || 'none',
+    operational_seconds: r.total_store_seconds || '',
+  })).forEach(r => map.set(metricRowKey(r), r));
   metricCoverageRows().forEach(r => {
     const key = metricRowKey(r);
-    if (!map.has(key)) map.set(key, r);
+    const operational = map.get(key) || {};
+    map.set(key, {...operational, ...r, operational_seconds: operational.operational_seconds || ''});
   });
   return [...map.values()];
 }
@@ -284,10 +293,17 @@ function renderCoverage(rows) {
     {key:'reranker', label:'Reranker'},
     ...stores.map(st => ({key:st, label:st, render:r => {
       const v = r.stores[st];
+      if (v?.status === 'metrics') {
+        const combo = pipelineLabel(v);
+        return `<button class="coverage-metric-btn mini-run-btn" type="button" data-combo="${esc(combo)}" title="Open this completed combination in Metrics">Done · open Metrics</button>`;
+      }
+      if (v?.status === 'metrics_incomplete') {
+        const missing = (v.missing_metrics || []).join(', ') || 'required metrics';
+        return `<span class="badge warn" title="Missing: ${esc(missing)}">metrics incomplete</span>`;
+      }
       if (v) {
-        const label = v.status === 'metrics' ? 'metrics' : 'ok';
-        const timing = v.total_store_seconds ? ` <code>${fmt(v.total_store_seconds, 2)}s</code>` : '';
-        return `<span class="coverage-ok">${label}</span>${timing}`;
+        const timing = v.operational_seconds ? ` <code title="Vector-store ingestion time">ingest ${fmt(v.operational_seconds, 2)}s</code>` : '';
+        return `<span class="coverage-ok">ingested</span>${timing}`;
       }
       if (missingCoverageBlocked(r.reranker, st)) {
         return `<span class="badge warn" title="${esc(state.operational?.amazon_status || 'AWS Bedrock rerank blocked')}">blocked</span>`;
@@ -705,6 +721,18 @@ function renderMetricsSource(payload) {
       ? `Viewing: Official WNS corpus · Official benchmark ground truth · No-reranker baseline`
       : `Viewing: Official WNS corpus · Official benchmark ground truth · Official reranked matrix`;
   setText('metricsSourceContext', context);
+  const incomplete = Array.isArray(payload?.incomplete_rows) ? payload.incomplete_rows : [];
+  const incompletePanel = $('incompleteMetricsPanel');
+  incompletePanel?.classList.toggle('hidden', incomplete.length === 0);
+  setText('incompleteMetricsSummary', `${incomplete.length} incomplete combination${incomplete.length === 1 ? '' : 's'} · unranked`);
+  table($('incompleteMetricsTable'), incomplete, [
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'Vector DB'},
+    {key:'reranker', label:'Reranker'},
+    {key:'status', label:'Artifact status', render:r=>esc(r.status || 'recorded')},
+    {key:'missing_metrics', label:'Missing metrics', render:r=>esc((r.missing_metrics || []).join(', ') || 'unknown')},
+  ]);
   if (payload?.scoring_mode !== 'retrieval_labels') {
     const section = $('qualitySection');
     section?.classList.remove('hidden');
@@ -718,6 +746,12 @@ function renderMetricsSource(payload) {
     summary: Array.isArray(payload?.rows) ? payload.rows : [],
     report: {groundtruth_rows: payload?.evaluated_queries || payload?.query_count || '—'},
   }, false);
+  if (payload?.source_type === 'official' && payload?.result_set === 'official') {
+    setText(
+      'qualityHint',
+      `${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} ranked · ${fmtInt(incomplete.length)} incomplete/unranked · ${fmtInt(payload.configured ?? 180)} configured`,
+    );
+  }
 }
 
 function groupWinner(rows, key) {
@@ -1214,18 +1248,32 @@ function showOfficialRecommendations() {
 function renderCanonicalResultPayload(payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
   const scored = payload?.scoring_mode === 'retrieval_labels';
-  const best = scored ? rows[0] || null : null;
-  const fastest = scored
+  const officialMatrix = payload?.source_type === 'official' && payload?.result_set === 'official';
+  const stable = !officialMatrix || payload?.matrix_complete === true;
+  const best = scored && stable ? rows[0] || null : null;
+  const fastest = scored && stable
     ? rows.filter(row => num(row.avg_latency_seconds) > 0).sort((a, b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null
     : null;
   setText('bestR5Status', best ? `${(num(best.recall_at_5) * 100).toFixed(1)}%` : '—');
-  setText('bestConfigNote', best ? pipelineLabel(best) : (scored ? 'best accuracy score' : 'quality unavailable without labels'));
+  setText('bestConfigNote', best
+    ? pipelineLabel(best)
+    : (officialMatrix && !stable
+      ? `Final winner pending · ${fmtInt(payload.evaluated ?? rows.length)}/${fmtInt(payload.configured ?? 180)} fully scored`
+      : (scored ? 'best accuracy score' : 'quality unavailable without labels')));
   setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
-  setText('bestLatencyNote', fastest ? `${pipelineLabel(fastest)} · avg/query` : 'average query latency');
-  renderRecommendationSource(payload);
+  setText('bestLatencyNote', fastest
+    ? `${pipelineLabel(fastest)} · avg/query`
+    : (officialMatrix && !stable ? 'Final latency winner pending full matrix' : 'average query latency'));
+  const recommendationPayload = stable ? payload : {...payload, rows: []};
+  renderRecommendationSource(recommendationPayload);
+  if (!stable) {
+    setText('recommendationStatus', 'Partial matrix · recommendations locked');
+    setText('recommendationModeNote', 'Completed rows remain visible in Metrics. Final winners unlock only after every configured combination has a complete metric set.');
+  }
+  recommendationState.active = payload;
   renderMetricsSource(payload);
   syncSourceSelectorControls();
-  if (scored) renderPipelineComparison(state.operational?.evaluation || {}, rows);
+  if (scored) renderPipelineComparison(state.operational?.evaluation || {}, stable ? rows : []);
 }
 
 function populateRecommendationProjects() {
@@ -1423,6 +1471,19 @@ function showPage(page) {
   history.replaceState(null, '', `#${page}`);
 }
 
+function showMetricsCombination(combo) {
+  if (!combo) return;
+  showPage('metrics');
+  const payload = recommendationState.active || officialRecommendationPayload('official');
+  ['qualityChunkerFilter', 'qualityEmbeddingFilter', 'qualityDbFilter', 'qualityRerankerFilter'].forEach(id => {
+    if ($(id)) $(id).value = 'all';
+  });
+  renderMetricsSource(payload);
+  if ($('qualityComboFilter')) $('qualityComboFilter').value = combo;
+  renderMetricsSource(payload);
+  $('qualitySection')?.scrollIntoView?.({behavior: 'smooth', block: 'start'});
+}
+
 async function uploadDataset(ev) {
   ev.preventDefault();
   const file = $('datasetFile')?.files?.[0];
@@ -1474,10 +1535,34 @@ async function uploadRunQueries() {
 }
 
 
+function readinessAuditLabel(repo) {
+  const status = repo?.audit_status || 'unknown';
+  if (status === 'missing') return 'extraction audit missing';
+  if (status === 'empty') return 'extraction audit empty';
+  if (status === 'text_only_fallback') return 'text-only fallback; MinerU/layout extraction not verified';
+  if (status === 'review_required') return 'extraction audit requires review';
+  if (status === 'clean') {
+    const parsers = Object.entries(repo?.parser_counts || {}).map(([name, count]) => `${name}: ${count}`).join(', ');
+    return parsers ? `clean extraction audit · ${parsers}` : 'clean extraction audit';
+  }
+  return 'extraction audit state unknown';
+}
+
+function documentReadinessSummary(repo) {
+  const total = Number(repo?.total || 0);
+  const ready = Number(repo?.ready_count || 0);
+  const review = Number(repo?.review_count || 0);
+  if (repo?.display_source === 'last_successful') {
+    const latest = repo?.latest_attempt || {};
+    return `${ready}/${total} ready · preserved clean snapshot · latest attempt: ${readinessAuditLabel(latest)}, ${Number(latest.ready_count || 0)}/${Number(latest.total || total)} ready · ${Number(latest.review_count || 0)} review`;
+  }
+  return `${ready}/${total} ready · ${review} review · ${readinessAuditLabel(repo)}`;
+}
+
 function renderDocumentRepository(repo) {
   const rows = repo?.rows || [];
   const hint = $('documentRepositoryHint');
-  if (hint) hint.textContent = rows.length ? `${repo.ready_count || 0}/${repo.total || rows.length} chunked · ${repo.review_count || 0} in review` : 'No repository scan yet';
+  if (hint) hint.textContent = rows.length ? documentReadinessSummary(repo) : 'No repository scan yet';
   table($('documentRepositoryTable'), rows, [
     {key:'pdf_name', label:'PDF', render:r=>pdfLink(r.pdf_name, (r.pdf_name || '').slice(0, 88) || '—')},
     {key:'status', label:'Readiness'},
@@ -1538,8 +1623,8 @@ function renderOperational() {
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   $('groundTruthStatus').textContent = evaluation?.report?.groundtruth_rows ? `${evaluation.report.groundtruth_rows} rows evaluated` : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending');
-  $('pdfStatus').textContent = `${repo.total || op.known_pdf_count || 0}/${repo.total || op.known_pdf_count || 0}`;
-  $('pdfNote').textContent = `${repo.ready_count || op.extracted_pdf_count || 0} clean chunked · ${repo.review_count || 0} review/text-only`;
+  $('pdfStatus').textContent = `${repo.ready_count || 0}/${repo.total || op.known_pdf_count || 0}`;
+  $('pdfNote').textContent = documentReadinessSummary(repo);
   $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
   const evidenceRowsLoaded = retrieval.length + rerank.length;
@@ -1599,9 +1684,20 @@ function renderOperational() {
   $('files').innerHTML = state.files.length ? state.files.map(f => `<li><code>${esc(f)}</code></li>`).join('') : '<li>No artifact files listed yet</li>';
 }
 
+function datasetChunkSummary(row) {
+  const counts = Object.values(row?.chunk_counts_by_strategy || {})
+    .map(Number)
+    .filter(value => Number.isFinite(value) && value >= 0);
+  if (!counts.length) return 'chunk counts by strategy unavailable';
+  const low = Math.min(...counts);
+  const high = Math.max(...counts);
+  const range = low === high ? fmtInt(high) : `${fmtInt(low)}–${fmtInt(high)}`;
+  return `${fmtInt(counts.length)} chunk strateg${counts.length === 1 ? 'y' : 'ies'} · ${range} chunks/strategy`;
+}
+
 function sourceOption(row, type) {
   const count = type === 'dataset'
-    ? `${fmtInt(row.document_count || 0)} documents · ${fmtInt(row.chunk_count || 0)} chunks`
+    ? `${fmtInt(row.document_count || 0)} documents · ${datasetChunkSummary(row)}`
     : (row.id === 'groundtruth:none' ? 'evidence-only' : `${fmtInt(row.row_count || 0)} queries`);
   const runnable = type === 'dataset' ? row.ready : row.valid;
   return `<option value="${esc(row.id)}"${runnable ? '' : ' disabled'}>${esc(row.label)} · ${esc(count)}${runnable ? '' : ' · unavailable'}</option>`;
@@ -1624,7 +1720,7 @@ function syncDatasetChunkers() {
   const sheets = activeDatasetSheets();
   fillRunMultiSelect('runSheet', sheets, 'All dataset chunkers');
   if ($('runDatasetHint') && dataset) {
-    $('runDatasetHint').textContent = `${fmtInt(dataset.document_count || 0)} documents · ${fmtInt(dataset.chunk_count || 0)} chunks · ${fmtInt(sheets.length)} chunker sheet(s)`;
+    $('runDatasetHint').textContent = `${fmtInt(dataset.document_count || 0)} documents · ${datasetChunkSummary(dataset)}`;
   }
   updateSelectedMatrixCount();
 }
@@ -2003,6 +2099,11 @@ $('runNvidiaSmokeBtn')?.addEventListener('click', () => runNvidiaAction('smoke')
 $('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 $('runNvidiaBenchmarkBtn')?.addEventListener('click', () => runNvidiaAction('benchmark').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 document.addEventListener('click', e => {
+  const coverageButton = e.target.closest('.coverage-metric-btn');
+  if (coverageButton) {
+    showMetricsCombination(coverageButton.dataset.combo || '');
+    return;
+  }
   const evidenceButton = e.target.closest('.view-project-evidence');
   if (evidenceButton) {
     openProjectEvidence(evidenceButton.dataset.comboId || '');
