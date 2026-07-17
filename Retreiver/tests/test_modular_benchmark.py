@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarking.core.config import load_benchmark_config, generate_matrix, config_hash, selected_config
 from benchmarking.core.metrics import mrr, ndcg_at_k, precision_at_k, bootstrap_ci
@@ -36,6 +38,43 @@ def local_smoke_config(root: Path, target: Path) -> Path:
     path = target / "unit.local.json"
     path.write_text(json.dumps(cfg), encoding="utf-8")
     return path
+
+
+def completed_modular_metrics() -> dict:
+    return {
+        "status": "completed",
+        "query_count": "500",
+        "recall_at_1": "0.30",
+        "recall_at_3": "0.40",
+        "recall_at_5": "0.50",
+        "recall_at_10": "0.60",
+        "mrr": "0.40",
+        "precision_at_5": "0.20",
+        "ndcg_at_5": "0.45",
+        "avg_first_relevant_rank": "2.0",
+        "no_hit_queries": "5",
+        "avg_latency_ms": "100",
+    }
+
+
+def write_official_manifest(run_dir: Path, dashboard) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        artifact.name: hashlib.sha256(artifact.read_bytes()).hexdigest()
+        for artifact in run_dir.iterdir()
+        if artifact.is_file() and artifact.name in {"modular_summary.csv", "modular_details.csv"}
+    }
+    artifact_root = run_dir.resolve().as_posix()
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "status": "completed",
+        "run_id": run_dir.name,
+        "config_hash": config_hash(load_benchmark_config(dashboard.CONFIG_PATH)),
+        "dataset_id": dashboard.DEFAULT_DATASET_ID,
+        "groundtruth_id": dashboard.OFFICIAL_GROUNDTRUTH_ID,
+        "query_count": 500,
+        "artifact_root": artifact_root,
+        "artifact_sha256": artifacts,
+    }), encoding="utf-8")
 
 
 class ModularBenchmarkTests(unittest.TestCase):
@@ -188,26 +227,10 @@ class ModularBenchmarkTests(unittest.TestCase):
     def test_dashboard_reference_includes_archived_modular_runs_for_faiss(self):
         import scripts.serve_benchmark_dashboard as dashboard
 
-        fields = [
-            "chunker",
-            "embedding",
-            "vector_store",
-            "reranker",
-            "query_count",
-            "recall_at_1",
-            "recall_at_3",
-            "recall_at_5",
-            "recall_at_10",
-            "mrr",
-            "precision_at_5",
-            "ndcg_at_10",
-            "avg_latency_ms",
-        ]
-
         def write_summary(path: Path, row: dict):
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fields)
+                writer = csv.DictWriter(f, fieldnames=sorted(row))
                 writer.writeheader()
                 writer.writerow(row)
 
@@ -222,17 +245,14 @@ class ModularBenchmarkTests(unittest.TestCase):
                 "embedding": "gte_multilingual_base",
                 "vector_store": "Qdrant",
                 "reranker": "bge-reranker-base",
-                "query_count": "500",
-                "recall_at_5": "0.50",
-                "mrr": "0.40",
-                "avg_latency_ms": "100",
+                **completed_modular_metrics(),
             })
             write_summary(faiss_dir / "modular_summary.csv", {
                 "chunker": "entity_heuristic_w6",
                 "embedding": "gte_multilingual_base",
                 "vector_store": "FAISS",
                 "reranker": "bge-reranker-base",
-                "query_count": "500",
+                **completed_modular_metrics(),
                 "recall_at_5": "0.55",
                 "mrr": "0.45",
                 "avg_latency_ms": "80",
@@ -248,6 +268,8 @@ class ModularBenchmarkTests(unittest.TestCase):
                 "avg_latency_ms": "1",
             })
             full_dir.mkdir(parents=True, exist_ok=True)
+            write_official_manifest(latest_dir, dashboard)
+            write_official_manifest(faiss_dir, dashboard)
 
             old_modular_dir = dashboard.MODULAR_DIR
             old_full_dir = dashboard.FULL_DIR
@@ -267,6 +289,7 @@ class ModularBenchmarkTests(unittest.TestCase):
 
     def test_frontend_coverage_uses_metric_rows_for_faiss_results(self):
         app_path = Path(__file__).resolve().parents[1] / "web" / "app.js"
+        source_state_path = Path(__file__).resolve().parents[1] / "web" / "source-state.js"
         node_script = f'''
 const fs = require('fs');
 const vm = require('vm');
@@ -291,6 +314,7 @@ const document = {{
 }};
 const context = {{
   console,
+  DashboardSourceState: require({str(source_state_path)!r}),
   document,
   window: {{confirm() {{ return true; }}}},
   location: {{hash: '#overview'}},
@@ -313,9 +337,21 @@ state = {{operational: {{evaluation: {{benchmark_reference: {{summary: [{{
   embedding: 'gte_multilingual_base',
   store: 'FAISS',
   reranker: 'bge-reranker-base',
+  status: 'completed',
+  official_provenance: 'trusted',
+  evaluated_queries: 500,
+  recall_at_1: .3,
+  recall_at_3: .4,
+  recall_at_5: .5,
+  recall_at_10: .6,
+  mrr: .4,
+  precision_at_5: .2,
+  ndcg_at_5: .45,
+  avg_first_relevant_rank: 2,
+  no_hit_queries: 5,
   avg_latency_seconds: 0.08,
   source: 'modular_run:faiss_noaws_complete_20260702',
-}}]}}}}}}}};
+}}], report: {{expected_keys:['entity_heuristic_w6|gte_multilingual_base|FAISS|bge-reranker-base']}}}}}}}}}};
 renderCoverage([]);
 globalThis.__coverageHint = document.getElementById('coverageHint').textContent;
 globalThis.__coverageHtml = document.getElementById('coverageTable').innerHTML;
@@ -335,23 +371,19 @@ if (!context.__coverageHint.includes('1/2')) {{
     def test_benchmark_reference_canonicalizes_rerankers_and_dedupes_sources(self):
         import scripts.serve_benchmark_dashboard as dashboard
 
-        fields = ["chunker", "embedding", "vector_store", "reranker", "query_count", "recall_at_5", "mrr", "avg_latency_ms"]
-
         def write_summary(path: Path, reranker: str):
             path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "chunker": "entity_heuristic_w6",
+                "embedding": "gte_multilingual_base",
+                "vector_store": "Qdrant",
+                "reranker": reranker,
+                **completed_modular_metrics(),
+            }
             with path.open("w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fields)
+                writer = csv.DictWriter(f, fieldnames=sorted(row))
                 writer.writeheader()
-                writer.writerow({
-                    "chunker": "entity_heuristic_w6",
-                    "embedding": "gte_multilingual_base",
-                    "vector_store": "Qdrant",
-                    "reranker": reranker,
-                    "query_count": "500",
-                    "recall_at_5": "0.50",
-                    "mrr": "0.40",
-                    "avg_latency_ms": "100",
-                })
+                writer.writerow(row)
 
         old_modular_dir = dashboard.MODULAR_DIR
         old_full_dir = dashboard.FULL_DIR
@@ -363,6 +395,8 @@ if (!context.__coverageHint.includes('1/2')) {{
                 full_dir = root / "data" / "full_benchmark"
                 write_summary(latest / "modular_summary.csv", "qwen3_4b_rerank")
                 write_summary(archived / "modular_summary.csv", "Qwen3:4B Rerank")
+                write_official_manifest(latest, dashboard)
+                write_official_manifest(archived, dashboard)
                 full_dir.mkdir(parents=True)
                 dashboard.MODULAR_DIR = latest
                 dashboard.FULL_DIR = full_dir
@@ -679,6 +713,115 @@ console.log(JSON.stringify({
             self.assertTrue((Path(td) / "manifest.json").exists())
             self.assertTrue((Path(td) / "modular_summary.csv").exists())
             self.assertTrue((Path(td) / "analysis.json").exists())
+            manifest = json.loads((Path(td) / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["run_id"], Path(td).name)
+            self.assertEqual(manifest["dataset_id"], "dataset:wns-default")
+            self.assertEqual(manifest["groundtruth_id"], "groundtruth:repository:qa_text_test.csv")
+            with (Path(td) / "modular_summary.csv").open(encoding="utf-8", newline="") as f:
+                self.assertTrue(all(row["status"] == "completed" for row in csv.DictReader(f)))
+
+    def test_modular_experiment_failure_never_publishes_completed_manifest(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            config_path = local_smoke_config(root, td_path)
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            cfg["techniques"]["chunkers"]["entity_heuristic_w6"]["adapter"] = "missing_adapter"
+            config_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+            with self.assertRaises(KeyError):
+                run_experiment(config_path, root, td_path, max_runs=1, limit_queries=1)
+
+            manifest = json.loads((td_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(manifest["status"], "completed")
+            self.assertFalse((td_path / ".manifest.json.tmp").exists())
+
+    def test_selected_official_run_manifest_is_admitted_without_handcrafted_provenance(self):
+        import scripts.serve_benchmark_dashboard as dashboard
+        from benchmarking.core.registry import Registry
+        from benchmarking.core.schemas import Chunk, SearchHit
+
+        class Chunker:
+            def __init__(self, **kwargs):
+                pass
+
+            def chunk(self):
+                return [Chunk(id=1, pdf_name="unit.pdf", paragraph="refund voucher")]
+
+        class Embedder:
+            dimensions = 2
+
+            def __init__(self, **kwargs):
+                pass
+
+            def embed_many(self, texts):
+                return [[1.0, 0.0] for _ in texts]
+
+        class Store:
+            def __init__(self, **kwargs):
+                self.chunks = []
+
+            def upsert(self, chunks, vectors):
+                self.chunks = chunks
+                return {"upsert_latency_s": 0.001}
+
+            def search(self, vector, top_k=10):
+                return [SearchHit(self.chunks[0], 1.0)]
+
+        class Reranker:
+            def __init__(self, **kwargs):
+                pass
+
+            def rerank(self, query, hits, top_k=10):
+                return hits[:top_k]
+
+        class Evaluator:
+            def __init__(self, **kwargs):
+                pass
+
+            def flags(self, query, hits):
+                return [True for _ in hits]
+
+        registry = Registry()
+        cfg = load_benchmark_config(dashboard.CONFIG_PATH)
+        selections = {
+            "chunker": cfg["matrix"]["chunkers"][0],
+            "embedding": cfg["matrix"]["embeddings"][0],
+            "vector_store": cfg["matrix"]["vector_stores"][0],
+            "index_type": cfg["matrix"]["index_types"][0],
+            "retrieval_method": cfg["matrix"]["retrieval_methods"][0],
+            "reranker": cfg["matrix"]["rerankers"][0],
+            "evaluator": cfg["matrix"]["evaluators"][0],
+        }
+        registry.register("chunker", cfg["techniques"]["chunkers"][selections["chunker"]]["adapter"], Chunker)
+        registry.register("embedding", cfg["techniques"]["embeddings"][selections["embedding"]]["adapter"], Embedder)
+        registry.register("vector_store", cfg["techniques"]["vector_stores"][selections["vector_store"]]["adapter"], Store)
+        registry.register("reranker", cfg["techniques"]["rerankers"][selections["reranker"]]["adapter"], Reranker)
+        registry.register("evaluator", selections["evaluator"], Evaluator)
+
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "selected-official"
+            with patch("benchmarking.core.runner.default_registry", return_value=registry):
+                run_experiment(
+                    dashboard.CONFIG_PATH,
+                    Path(__file__).resolve().parents[1],
+                    output,
+                    limit_queries=1,
+                    selections=selections,
+                )
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            with patch.object(
+                dashboard,
+                "benchmark_reference_sources",
+                return_value=[("modular_run:selected", output / "modular_summary.csv")],
+            ):
+                reference = dashboard.read_benchmark_reference()
+
+        self.assertEqual(manifest["official_matrix_contract_hash"], config_hash(cfg))
+        self.assertNotEqual(manifest["selected_run_config_hash"], manifest["official_matrix_contract_hash"])
+        self.assertEqual(len(reference["summary"]), 1)
+        self.assertEqual(reference["summary"][0]["official_provenance"], "trusted")
 
 
 if __name__ == "__main__":

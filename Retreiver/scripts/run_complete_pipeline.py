@@ -87,6 +87,15 @@ def normalize_reranker(value: str) -> str:
     return raw
 
 
+def choose_rerankers(values: list[str] | None, *, evidence_only: bool) -> list[str]:
+    """Resolve rerankers without silently invoking them in evidence-only mode."""
+    if values and "none" in [normalize_reranker(value) for value in values]:
+        return []
+    if evidence_only and not values:
+        return []
+    return choose(values, LIVE_RERANKERS, normalize=normalize_reranker)
+
+
 def choose(values: list[str] | None, allowed: list[str], normalize=None) -> list[str]:
     raw = [normalize(v) if normalize else v for v in (values or []) if v]
     if not raw or "all" in raw:
@@ -240,12 +249,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     embeddings = choose(args.embeddings, [e for e in options["embeddings"] if e in LIVE_EMBEDDINGS])
     stores = choose(args.stores, options["stores"])
     evidence_only = bool(getattr(args, "evidence_only", False))
-    if evidence_only:
-        rerankers: list[str] = []
-    elif args.rerankers and "none" in [normalize_reranker(r) for r in args.rerankers]:
-        rerankers = []
-    else:
-        rerankers = choose(args.rerankers, LIVE_RERANKERS, normalize=normalize_reranker)
+    rerankers = choose_rerankers(args.rerankers, evidence_only=evidence_only)
     gt = None if evidence_only else find_groundtruth(args.groundtruth)
     missing: list[str] = []
     warnings: list[str] = []
@@ -429,7 +433,7 @@ def main() -> int:
     parser.add_argument("--sheets", nargs="*", default=["all"])
     parser.add_argument("--embeddings", nargs="*", default=["all"])
     parser.add_argument("--stores", nargs="*", default=["all"])
-    parser.add_argument("--rerankers", nargs="*", default=["all"])
+    parser.add_argument("--rerankers", nargs="*", default=None)
     parser.add_argument("--groundtruth", default="")
     parser.add_argument("--workbook", default="")
     parser.add_argument("--benchmark-input", default="")
@@ -492,6 +496,18 @@ def main() -> int:
         if args.query_limit:
             retrieval_cmd += ["--query-limit", str(args.query_limit)]
         run_cmd(retrieval_cmd, "evidence-only retrieval")
+        if rerankers:
+            run_cmd(
+                [
+                    sys.executable,
+                    "scripts/run_reranker_smoke_from_retrieval.py",
+                    "--rerankers", *rerankers,
+                    "--candidate-k", str(args.top_k),
+                    "--top-k", str(args.reranked_output_k),
+                    "--limit-artifacts", "0",
+                ],
+                "evidence-only reranker pass",
+            )
         run_cmd([sys.executable, "scripts/collect_vm_dashboard_artifacts.py"], "dashboard artifact refresh")
         write_run_manifest(ROOT, run_id, info, status="completed")
         log("COMPLETE PIPELINE FINISHED mode=evidence_only metrics=not_applicable")

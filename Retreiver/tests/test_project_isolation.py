@@ -1414,7 +1414,7 @@ def test_upload_endpoint_calls_project_upload_with_expected_arguments(monkeypatc
 
     def create_upload(**kwargs):
         captured.update(kwargs)
-        return {"ok": True}
+        return {"ok": True, "project_id": "dataset_abcd", "extraction_failures": []}
 
     monkeypatch.setattr(dashboard, "create_user_project_upload", create_upload)
     content_type, body = _multipart_body("dataset.txt", b"safe")
@@ -1424,7 +1424,10 @@ def test_upload_endpoint_calls_project_upload_with_expected_arguments(monkeypatc
     )
 
     assert status == 200
-    assert payload == {"ok": True}
+    assert payload["ok"] is True
+    assert payload["source_id"] == "project:dataset_abcd"
+    assert "manifest_path" not in payload
+    assert "saved_path" not in payload
     assert captured == {
         "original_name": "dataset.txt",
         "content": b"safe",

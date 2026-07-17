@@ -99,7 +99,7 @@ def test_valid_typed_request_is_frozen_and_has_exact_cartesian_count():
         validated.request.top_k = 10  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("dimension", ["chunkers", "embeddings", "vector_stores", "rerankers"])
+@pytest.mark.parametrize("dimension", ["chunkers", "embeddings", "vector_stores"])
 def test_selection_arrays_must_be_nonempty_unique_json_arrays(dimension: str):
     empty = _selections(**{dimension: []})
     with pytest.raises(ProjectMatrixValidationError, match="non-empty"):
@@ -114,6 +114,41 @@ def test_selection_arrays_must_be_nonempty_unique_json_arrays(dimension: str):
     not_an_array[dimension] = value  # type: ignore[assignment]
     with pytest.raises(ProjectMatrixValidationError, match="array"):
         validate_project_matrix_request(_typed_payload(selections=not_an_array), catalog_path=CATALOG_PATH)
+
+
+def test_empty_rerankers_selects_one_retrieval_only_baseline_and_is_fingerprinted():
+    selections = _selections(
+        chunkers=_catalog()["matrix"]["chunkers"][:2],
+        rerankers=[],
+    )
+
+    baseline = validate_project_matrix_request(
+        _typed_payload(selections=selections), catalog_path=CATALOG_PATH
+    )
+    reranked = validate_project_matrix_request(
+        _typed_payload(
+            selections={
+                **selections,
+                "rerankers": [_catalog()["matrix"]["rerankers"][0]],
+            }
+        ),
+        catalog_path=CATALOG_PATH,
+    )
+
+    assert baseline.request.rerankers == ()
+    assert baseline.request.selections["rerankers"] == []
+    assert baseline.combination_count == 2
+    assert baseline.request_fingerprint != reranked.request_fingerprint
+
+
+def test_empty_rerankers_must_still_be_an_array():
+    selections = _selections()
+    selections["rerankers"] = "none"  # type: ignore[assignment]
+
+    with pytest.raises(ProjectMatrixValidationError, match="array"):
+        validate_project_matrix_request(
+            _typed_payload(selections=selections), catalog_path=CATALOG_PATH
+        )
 
 
 def test_only_exact_canonical_production_ids_are_accepted():

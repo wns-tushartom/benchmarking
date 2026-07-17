@@ -41,6 +41,7 @@ from source.services.project_workspace import ProjectWorkspace
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_CATALOG = _REPO_ROOT / "configs" / "project_matrix_catalog.json"
+_RETRIEVAL_ONLY_RERANKER_ID = "none"
 _REQUEST_ENVELOPE_KEYS = {
     "schema_version",
     "request",
@@ -627,7 +628,7 @@ class ProjectMatrixRunner:
             request.chunkers,
             request.embeddings,
             request.vector_stores,
-            request.rerankers,
+            request.rerankers or (_RETRIEVAL_ONLY_RERANKER_ID,),
         )
         for chunker_id, embedding_id, vector_store_id, reranker_id in selections:
             combo_id = _combo_identity(
@@ -673,13 +674,18 @@ class ProjectMatrixRunner:
                 "namespace": namespace,
             }
             index_receipt_path = _index_receipt_path(project_index_root, namespace)
-            reranker_config = techniques["rerankers"][reranker_id]
+            reranker_config = None
             combination_config = {
                 "chunker": {"id": chunker_id, **techniques["chunkers"][chunker_id]},
                 "embedding": {"id": embedding_id, **embedding_config},
                 "vector_store": {"id": vector_store_id, **vector_config},
-                "reranker": {"id": reranker_id, **reranker_config},
             }
+            if reranker_id != _RETRIEVAL_ONLY_RERANKER_ID:
+                reranker_config = techniques["rerankers"][reranker_id]
+                combination_config["reranker"] = {
+                    "id": reranker_id,
+                    **reranker_config,
+                }
             config_sha256 = _config_sha256(combination_config)
             physical_namespace = ""
             embedding_adapter: Any | None = None
@@ -961,10 +967,11 @@ class ProjectMatrixRunner:
                 ):
                     embedding_input_tokens = measured_embedding_tokens
 
-                failure_stage = "reranker"
-                reranker = self._new_reranker(
-                    reranker_id, reranker_config, classes
-                )
+                if reranker_config is not None:
+                    failure_stage = "reranker"
+                    reranker = self._new_reranker(
+                        reranker_id, reranker_config, classes
+                    )
                 combo_detail_rows: list[dict[str, Any]] = []
                 combo_evidence_rows: list[dict[str, Any]] = []
                 query_metric_inputs: list[QueryMetricInput] = []
@@ -974,12 +981,16 @@ class ProjectMatrixRunner:
                         (str(hit.chunk.id), hit.chunk.parent_id): float(hit.score)
                         for hit in base_hits
                     }
-                    rerank_start = time.perf_counter()
-                    failure_stage = "reranker"
-                    reranked = reranker.rerank(
-                        question.query, base_hits, request.top_k
-                    )
-                    rerank_latency = time.perf_counter() - rerank_start
+                    if reranker is None:
+                        reranked = base_hits
+                        rerank_latency = 0.0
+                    else:
+                        rerank_start = time.perf_counter()
+                        failure_stage = "reranker"
+                        reranked = reranker.rerank(
+                            question.query, base_hits, request.top_k
+                        )
+                        rerank_latency = time.perf_counter() - rerank_start
                     if reranker_id == "Amazon Rerank v1":
                         rerank_search_units = int(rerank_search_units or 0)
                         if base_hits:
@@ -1015,7 +1026,9 @@ class ProjectMatrixRunner:
                             "base_score": base_scores.get(
                                 (str(hit.chunk.id), hit.chunk.parent_id), 0.0
                             ),
-                            "rerank_score": float(hit.score),
+                            "rerank_score": (
+                                float(hit.score) if reranker is not None else None
+                            ),
                             "rerank_latency_s": rerank_latency,
                             "relevant": relevant,
                         }
@@ -1107,26 +1120,27 @@ class ProjectMatrixRunner:
                         },
                         "embedding": dict(retrieval_receipt["embedding"]),
                         "vector_store": dict(retrieval_receipt["vector_store"]),
-                        "reranker": {
-                            "canonical_id": reranker_id,
-                            "adapter_class": type(reranker).__name__,
-                            "provider_metadata": dict(
-                                getattr(reranker, "last_response_metadata", {}) or {}
-                            ),
-                        },
                     },
                     "artifacts": {
                         "retrieval": retrieval_receipt["retrieval_artifact"],
-                        "reranking": {
-                            "path": reranking_artifact.relative_to(
-                                run_layout["root"]
-                            ).as_posix(),
-                            "sha256": _sha256_bytes(reranking_content),
-                        },
                     },
                     "latency_s": time.perf_counter() - started,
                 }
-                _atomic_write(reranking_artifact, reranking_content)
+                if reranker is not None:
+                    receipt["adapters"]["reranker"] = {
+                        "canonical_id": reranker_id,
+                        "adapter_class": type(reranker).__name__,
+                        "provider_metadata": dict(
+                            getattr(reranker, "last_response_metadata", {}) or {}
+                        ),
+                    }
+                    receipt["artifacts"]["reranking"] = {
+                        "path": reranking_artifact.relative_to(
+                            run_layout["root"]
+                        ).as_posix(),
+                        "sha256": _sha256_bytes(reranking_content),
+                    }
+                    _atomic_write(reranking_artifact, reranking_content)
                 details_rows.extend(combo_detail_rows)
                 evidence_rows.extend(combo_evidence_rows)
             except Exception:
@@ -1187,15 +1201,16 @@ class ProjectMatrixRunner:
                             "physical_namespace": physical_namespace,
                             "provider_metadata": {},
                         },
-                        "reranker": {
-                            "canonical_id": reranker_id,
-                            "adapter_class": classes["rerankers"][reranker_id].__name__,
-                            "provider_metadata": {},
-                        },
                     },
                     "artifacts": {},
                     "latency_s": time.perf_counter() - started,
                 }
+                if reranker_id != _RETRIEVAL_ONLY_RERANKER_ID:
+                    receipt["adapters"]["reranker"] = {
+                        "canonical_id": reranker_id,
+                        "adapter_class": classes["rerankers"][reranker_id].__name__,
+                        "provider_metadata": {},
+                    }
             usage = {
                 "embedding_input_tokens": embedding_input_tokens,
                 "embedding_usage_scope": embedding_usage_scope,

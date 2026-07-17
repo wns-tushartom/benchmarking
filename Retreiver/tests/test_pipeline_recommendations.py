@@ -30,8 +30,9 @@ def test_exports_primitives_completion_rules_and_pricing_constants_are_frozen():
     result = _run_node(
         """
 const official = R.completed([
-  {combo_id:'missing'}, {combo_id:'done',status:'completed'},
-  {combo_id:'failed',status:'failed'}, null,
+  {combo_id:'missing'}, {combo_id:'untrusted',status:'completed'},
+  {combo_id:'trusted',status:'completed',official_provenance:'trusted'},
+  {combo_id:'failed',status:'failed',official_provenance:'trusted'}, null,
 ], 'official');
 const uploaded = R.completed([
   {combo_id:'missing'}, {combo_id:'done',status:'completed'},
@@ -52,7 +53,7 @@ console.log(JSON.stringify({
     assert result["finite"] == [2.5, None, None, None, None, None]
     assert result["positive"] == [2.5, None, None, None]
     assert result["stable"] == "chunk|embed|store|none"
-    assert result["official"] == ["missing", "done"]
+    assert result["official"] == ["trusted"]
     assert result["uploaded"] == ["done"]
     assert result["frozen"] == [True, True, True, True]
     assert result["pricing"] == {
@@ -275,9 +276,9 @@ def test_official_winner_uses_existing_score_and_official_metric_labels():
     result = _run_node(
         """
 const source = {source_type:'official',scoring_mode:'retrieval_labels',rows:[
-  {combo_id:'high-recall',winner_score:0.8,recall_at_5:0.99,avg_latency_seconds:0.1,sheet:'z',embedding:'e',store:'s',reranker:'r'},
-  {combo_id:'winner',winner_score:0.9,recall_at_5:0.1,avg_latency_seconds:0.4,sheet:'a',embedding:'e',store:'s',reranker:'r'},
-  {combo_id:'failed',status:'failed',winner_score:1,recall_at_5:1,avg_latency_seconds:0.01,sheet:'f',embedding:'e',store:'s',reranker:'r'},
+  {combo_id:'high-recall',status:'completed',official_provenance:'trusted',winner_score:0.8,recall_at_5:0.99,avg_latency_seconds:0.1,sheet:'z',embedding:'e',store:'s',reranker:'r'},
+  {combo_id:'winner',status:'completed',official_provenance:'trusted',winner_score:0.9,recall_at_5:0.1,avg_latency_seconds:0.4,sheet:'a',embedding:'e',store:'s',reranker:'r'},
+  {combo_id:'failed',status:'failed',official_provenance:'trusted',winner_score:1,recall_at_5:1,avg_latency_seconds:0.01,sheet:'f',embedding:'e',store:'s',reranker:'r'},
 ]};
 const recommendations = R.recommendationsForSource(source);
 console.log(JSON.stringify({

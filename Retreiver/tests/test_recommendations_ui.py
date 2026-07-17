@@ -43,7 +43,7 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert 'href="/styles.css?v=20260716-meeting-hardening"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/app.js?v=20260716-metrics-integrity'
+        '/app.js?v=20260717-project-matrix'
     )
 
     for endpoint in (
@@ -496,13 +496,23 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
 const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source + `
-  const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',evaluated_queries:500,recall_at_1:0.8,recall_at_3:0.92,recall_at_5:0.964,recall_at_10:0.98,mrr:0.888433,precision_at_5:0.4,ndcg_at_5:0.902323,avg_first_relevant_rank:1.4,no_hit_queries:5,avg_latency_seconds:0.024932915}};
-  const qdrant = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'bge-reranker-base',evaluated_queries:500,recall_at_1:0.7,recall_at_3:0.84,recall_at_5:0.90,recall_at_10:0.95,mrr:0.80,precision_at_5:0.35,ndcg_at_5:0.81,avg_first_relevant_rank:1.8,no_hit_queries:12,avg_latency_seconds:0.01}};
+  const faiss = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'FAISS',reranker:'bge-reranker-base',status:'completed',official_provenance:'trusted',evaluated_queries:500,recall_at_1:0.8,recall_at_3:0.92,recall_at_5:0.964,recall_at_10:0.98,mrr:0.888433,precision_at_5:0.4,ndcg_at_5:0.902323,avg_first_relevant_rank:1.4,no_hit_queries:5,avg_latency_seconds:0.024932915}};
+  const qdrant = {{sheet:'Heading_sections_l2',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'bge-reranker-base',status:'completed',official_provenance:'trusted',evaluated_queries:500,recall_at_1:0.7,recall_at_3:0.84,recall_at_5:0.90,recall_at_10:0.95,mrr:0.80,precision_at_5:0.35,ndcg_at_5:0.81,avg_first_relevant_rank:1.8,no_hit_queries:12,avg_latency_seconds:0.01}};
+  const baseline = {{...qdrant,reranker:'none',winner_score:0.7}};
   state = {{operational:{{
     evaluation:{{
-      summary:[{{sheet:'legacy',embedding:'gte_multilingual_base',store:'Qdrant',reranker:'none',winner_score:1,recall_at_5:1}}],
+      summary:[baseline],
       reranked:{{summary:[]}},
-      benchmark_reference:{{summary:[faiss,qdrant]}},
+      benchmark_reference:{{
+        summary:[faiss,qdrant],
+        report:{{
+          expected_keys:[
+            'Heading_sections_l2|gte_multilingual_base|FAISS|bge-reranker-base',
+            'Heading_sections_l2|gte_multilingual_base|Qdrant|bge-reranker-base',
+          ],
+          baseline_expected_keys:['Heading_sections_l2|gte_multilingual_base|Qdrant|none'],
+        }},
+      }},
     }},
     benchmark_detail_evidence:[faiss,faiss],
   }}}};
@@ -529,4 +539,22 @@ console.log(JSON.stringify(context.__payload));
     assert baseline["result_set"] == "baseline"
     assert len(baseline["rows"]) == 1
     assert baseline["rows"][0]["reranker"] == "none"
-    assert baseline["rows"][0]["sheet"] == "legacy"
+    assert baseline["rows"][0]["sheet"] == "Heading_sections_l2"
+
+
+def test_official_recommendations_reject_missing_unknown_and_untrusted_status_rows() -> None:
+    script = f"""
+const R = require({str(ROOT / 'web' / 'recommendations.js')!r});
+const metric={{recall_at_5:.8,mrr:.7,ndcg_at_5:.75,avg_latency_seconds:.1,evaluated_queries:5}};
+const source={{source_type:'official',scoring_mode:'retrieval_labels',rows:[
+  {{...metric,combo_id:'missing'}},
+  {{...metric,combo_id:'unknown',status:'unknown',official_provenance:'trusted'}},
+  {{...metric,combo_id:'untrusted',status:'completed',official_provenance:'untrusted'}},
+  {{...metric,combo_id:'trusted',status:'completed',official_provenance:'trusted'}},
+]}};
+const result=R.recommendationsForSource(source);
+console.log(JSON.stringify({{completed:result.completed.map(row=>row.combo_id),quality:result.roles.quality?.combo_id}}));
+"""
+    proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(proc.stdout) == {"completed": ["trusted"], "quality": "trusted"}

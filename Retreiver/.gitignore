@@ -27,4 +27,7 @@ data/evaluation/
 data/evaluation_reranked/
 data/reranker_analysis/
 data/dashboard_jobs/
+data/dashboard_state/
+data/user_projects/
 data/pipeline_archives/
+visual_qa/product_completion_*/

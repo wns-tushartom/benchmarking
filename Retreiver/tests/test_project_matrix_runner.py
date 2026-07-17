@@ -37,6 +37,7 @@ from source.services.project_matrix_runner import (
     ProjectMatrixRunnerError,
     production_adapter_classes,
 )
+from source.services.project_run_results import ProjectRunResultService
 from source.services.project_workspace import ProjectWorkspace
 
 
@@ -482,6 +483,60 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
         receipt["adapters"]["vector_store"]["reused"] is True
         for receipt in second_manifest["receipts"]
     )
+
+
+def test_empty_rerankers_runs_real_retrieval_only_baseline_without_reranker_adapter(
+    project_environment,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, workspace = project_environment
+    alpha = _upload_project("alpha.txt", "ALPHA_SENTINEL")
+    alpha_id = str(alpha["project_id"])
+    payload = _request_payload(alpha_id, rerankers=[])
+    payload["selections"]["chunkers"] = ["entity_heuristic_w6"]  # type: ignore[index]
+
+    def reject_reranker_construction(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("retrieval-only baseline must not construct a reranker")
+
+    monkeypatch.setattr(ProjectMatrixRunner, "_new_reranker", reject_reranker_construction)
+    run_id, root = _create_run_request(workspace, payload)
+
+    result = ProjectMatrixRunner(workspace).run(alpha_id, run_id)
+
+    assert result == {
+        "project_id": alpha_id,
+        "run_id": run_id,
+        "state": "completed",
+        "combination_count": 1,
+        "succeeded": 1,
+        "failed": 0,
+    }
+    summary = _summary_rows(root / "summary.csv")
+    assert len(summary) == 1
+    assert summary[0]["reranker_id"] == "none"
+    assert summary[0]["rerank_latency_s"] == "0.0"
+    assert summary[0]["rerank_search_units"] == ""
+    assert summary[0]["rerank_usage_scope"] == ""
+    assert float(summary[0]["avg_query_latency_s"]) == float(
+        summary[0]["retrieval_latency_s"]
+    )
+    details = _json_rows(root / "details.jsonl")
+    assert details
+    assert all(row["reranker_id"] == "none" for row in details)
+    assert all(row["rerank_score"] is None for row in details)
+    assert all(row["rerank_latency_s"] == 0.0 for row in details)
+    evidence = json.loads((root / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["rows"]
+    assert all(row["rerank_score"] is None for row in evidence["rows"])
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    receipt = manifest["receipts"][0]
+    assert "reranker" not in receipt["adapters"]
+    assert set(receipt["artifacts"]) == {"retrieval"}
+    assert receipt["usage"]["rerank_search_units"] is None
+    assert receipt["usage"]["rerank_usage_scope"] is None
+
+    loaded = ProjectRunResultService(workspace).project_run_results(alpha_id, run_id)
+    assert loaded["rows"][0]["reranker_id"] == "none"
 
 
 def test_embeddings_are_cached_by_chunker_and_embedding_across_stores(

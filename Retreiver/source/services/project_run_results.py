@@ -509,18 +509,19 @@ class ProjectRunResultService:
             _fail("run_unavailable", "Run results are unavailable", 409)
 
         request = context["validated"].request
+        effective_rerankers = request.rerankers or ("none",)
         selected = {
             "chunker_id": set(request.chunkers),
             "embedding_id": set(request.embeddings),
             "vector_store_id": set(request.vector_stores),
-            "reranker_id": set(request.rerankers),
+            "reranker_id": set(effective_rerankers),
         }
         expected_matrix = set(
             itertools.product(
                 request.chunkers,
                 request.embeddings,
                 request.vector_stores,
-                request.rerankers,
+                effective_rerankers,
             )
         )
         observed_matrix: set[tuple[str, str, str, str]] = set()
@@ -542,7 +543,10 @@ class ProjectRunResultService:
                     ("vector_store_id", "vector_stores"),
                     ("reranker_id", "rerankers"),
                 ):
-                    if raw[field] not in self._canonical[dimension] or raw[field] not in selected[field]:
+                    canonical = self._canonical[dimension]
+                    if dimension == "rerankers" and not request.rerankers:
+                        canonical = ("none",)
+                    if raw[field] not in canonical or raw[field] not in selected[field]:
                         raise ValueError
                 matrix_identity = (
                     raw["chunker_id"],

@@ -1,0 +1,12 @@
+query,reference_context,answer
+How long after purchase can a customer request a full refund?,Customers may request a full refund within 30 calendar days of the original purchase date.,Within 30 calendar days.
+What must a refund request include?,A refund request must include the order number and the email address used for the purchase.,The order number and purchase email address.
+What must an employee do after noticing a suspected security incident?,Employees must report suspected security incidents to the security hotline immediately and must not investigate alone.,Report it immediately and do not investigate alone.
+When is the incident lessons-learned review due?,The response team completes a lessons-learned review within ten business days after incident closure.,Within ten business days after closure.
+What is the daily meal allowance for employee travel?,The daily meal allowance is 75 US dollars and excludes alcoholic beverages.,"75 US dollars, excluding alcohol."
+When is an itemized travel receipt required?,An itemized receipt is required for every individual expense above 25 US dollars.,For each individual expense above 25 US dollars.
+What is the Priority One acknowledgement target?,Priority One incidents are acknowledged within 15 minutes and receive continuous support until service is restored.,Within 15 minutes.
+When is the Priority One root-cause analysis delivered?,A written root-cause analysis is delivered within five business days after a Priority One incident is resolved.,Within five business days after resolution.
+How long are production application logs retained?,Production application logs are retained for 90 days and then permanently deleted from active systems.,90 days.
+What can delay a verified deletion request beyond 30 days?,A verified deletion request is completed within 30 days unless a legal hold requires continued retention.,A legal hold.
+Compare the refund-request window with the verified deletion-request deadline.,"[""Customers may request a full refund within 30 calendar days of the original purchase date."", ""A verified deletion request is completed within 30 days unless a legal hold requires continued retention.""]","Both are 30 days, measured from purchase and verified request respectively."

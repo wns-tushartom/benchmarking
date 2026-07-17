@@ -185,6 +185,52 @@ def test_build_source_catalog_discovers_allowlisted_sources_and_truthful_counts(
     assert "chunking_methods_output_v2.xlsx" not in public_json
 
 
+def test_fresh_extracted_project_is_selectable_before_index_or_workbook_exists(tmp_path: Path) -> None:
+    root = tmp_path
+    project = root / "data" / "user_projects" / "fresh-upload"
+    raw = project / "raw_uploads" / "policy.pdf"
+    corpus = project / "extracted_text" / "documents.jsonl"
+    raw.parent.mkdir(parents=True)
+    corpus.parent.mkdir(parents=True)
+    raw.write_bytes(b"%PDF fresh uploaded corpus")
+    corpus.write_text('{"schema_version":1,"documents":[]}\n', encoding="utf-8")
+    (project / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "project_id": "fresh-upload",
+                "label": "Fresh upload",
+                "saved_path": "data/user_projects/fresh-upload/raw_uploads/policy.pdf",
+                "canonical_corpus": "data/user_projects/fresh-upload/extracted_text/documents.jsonl",
+                "corpus_sha256": "a" * 64,
+                "document_count": 1,
+                "source_count": 1,
+                "extraction_status": "complete",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = build_source_catalog(root)
+    datasets = {source["id"]: source for source in catalog["datasets"]}
+
+    assert datasets["project:fresh-upload"] == {
+        "id": "project:fresh-upload",
+        "label": "Fresh upload",
+        "kind": "uploaded_project",
+        "document_count": 1,
+        "chunk_count": 0,
+        "chunk_counts_by_strategy": {},
+        "ready": True,
+        "validation": "ready_for_project_matrix",
+        "sheets": [],
+    }
+    resolved = resolve_dataset(root, "project:fresh-upload")
+    assert resolved.manifest_path == (project / "manifest.json").resolve()
+    assert resolved.search_index_path is None
+    assert resolved.workbook_path is None
+
+
 def test_resolvers_return_only_private_paths_for_known_catalog_ids(tmp_path: Path) -> None:
     root = _fixture_root(tmp_path)
 

@@ -32,9 +32,9 @@
     row.reranker_id || row.reranker || 'none',
   ].join('|');
   const completed = (rows, sourceType) => (rows || []).filter(row => {
-    if (!row) return false;
-    if (sourceType === 'official') return !row.status || row.status === 'completed';
-    return row.status === 'completed';
+    if (!row || row.status !== 'completed') return false;
+    if (sourceType === 'official') return row.official_provenance === 'trusted';
+    return true;
   });
 
   function projectQualityCompare(a, b) {

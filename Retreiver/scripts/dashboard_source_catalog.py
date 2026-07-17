@@ -468,15 +468,29 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
             project_id = original_project_dir.name
             project_manifests.append((project_dir, project_id, manifest))
             index_path = _safe_file(project_dir, project_dir / "search_index.json")
-            if index_path is None:
-                continue
-            index = _read_json(index_path)
+            index = _read_json(index_path) if index_path is not None else {}
             document_count = _project_document_count(root, project_dir, manifest, index)
             chunk_count = _project_chunk_count(index)
             workbook_path = _project_workbook(root, project_dir, manifest, index)
+            canonical_corpus = _safe_declared_file(
+                root, project_dir, manifest.get("canonical_corpus")
+            )
             raw_uploads = _safe_directory(project_dir, project_dir / "raw_uploads")
             document_path = raw_uploads or project_dir
-            ready = bool(manifest and index and document_count > 0 and chunk_count > 0 and workbook_path)
+            legacy_ready = bool(index and document_count > 0 and chunk_count > 0 and workbook_path)
+            project_matrix_ready = bool(
+                manifest.get("extraction_status") == "complete"
+                and canonical_corpus is not None
+                and canonical_corpus.suffix.lower() == ".jsonl"
+                and document_count > 0
+            )
+            ready = legacy_ready or project_matrix_ready
+            if legacy_ready:
+                validation = "ready"
+            elif project_matrix_ready:
+                validation = "ready_for_project_matrix"
+            else:
+                validation = "manifest_corpus_or_documents_missing"
             datasets.append(
                 DatasetSource(
                     f"project:{project_id}",
@@ -485,7 +499,7 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
                     document_count,
                     chunk_count,
                     ready,
-                    "ready" if ready else "manifest_index_content_or_workbook_missing",
+                    validation,
                     sheets=_workbook_sheet_names(workbook_path),
                     chunk_counts_by_strategy=_workbook_chunk_counts(workbook_path),
                     document_path=document_path,

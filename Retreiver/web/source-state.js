@@ -51,10 +51,29 @@
   ]);
 
   function officialMetricCompleteness(row) {
-    const missing = OFFICIAL_METRICS.filter(field => finite(row?.[field]) === null);
+    const invalid = OFFICIAL_METRICS.filter(field => finite(row?.[field]) === null);
+    const reject = field => { if (!invalid.includes(field)) invalid.push(field); };
     const queryCount = finite(row?.evaluated_queries);
-    if (queryCount === null || queryCount <= 0) missing.unshift('evaluated_queries');
-    return Object.freeze({complete: missing.length === 0, missing_metrics: Object.freeze(missing)});
+    if (queryCount === null || queryCount <= 0 || !Number.isInteger(queryCount)) reject('evaluated_queries');
+
+    [
+      'recall_at_1', 'recall_at_3', 'recall_at_5', 'recall_at_10',
+      'mrr', 'precision_at_5', 'ndcg_at_5',
+    ].forEach(field => {
+      const value = finite(row?.[field]);
+      if (value !== null && (value < 0 || value > 1)) reject(field);
+    });
+    ['avg_first_relevant_rank', 'avg_latency_seconds'].forEach(field => {
+      const value = finite(row?.[field]);
+      if (value !== null && value < 0) reject(field);
+    });
+    const noHitQueries = finite(row?.no_hit_queries);
+    if (
+      noHitQueries !== null
+      && (noHitQueries < 0 || !Number.isInteger(noHitQueries)
+        || (queryCount !== null && queryCount > 0 && noHitQueries > queryCount))
+    ) reject('no_hit_queries');
+    return Object.freeze({complete: invalid.length === 0, missing_metrics: Object.freeze(invalid)});
   }
 
   function canonicalMetricRow(row, extra) {
@@ -68,8 +87,7 @@
   }
 
   function isCompleted(row) {
-    const status = String(row?.status || 'completed').toLowerCase();
-    return !['failed', 'error', 'blocked', 'pending', 'running', 'cancelled'].includes(status);
+    return String(row?.status || '').trim().toLowerCase() === 'completed';
   }
 
   function isNvidiaLane(row) {
@@ -78,80 +96,144 @@
     );
   }
 
-  function normalizeOfficialRows(rows, reranked) {
-    const byId = new Map();
+  function isProjectLane(row) {
+    return ['source_type', 'result_set', 'result_set_id', 'dataset_id', 'lane'].some(key =>
+      /(^|[^a-z])(project|uploaded_project)([^a-z]|$)/i.test(String(row?.[key] || ''))
+    );
+  }
+
+  function expectedKeySet(values) {
+    if (values instanceof Set) return values;
+    return Array.isArray(values) ? new Set(values.map(String)) : null;
+  }
+
+  function officialRowAdmission(raw, options) {
+    const row = canonicalMetricRow(raw);
+    const comboId = metricRowKey(row);
+    const expectedKeys = expectedKeySet(options?.expectedKeys);
+    const completeness = officialMetricCompleteness(row);
+    const reranked = options?.reranked !== false;
+    const reasons = [];
+    if (isNvidiaLane(row)) reasons.push('nvidia_lane');
+    if (isProjectLane(row)) reasons.push('project_lane');
+    if (reranked ? row.reranker === 'none' : row.reranker !== 'none') reasons.push('wrong_reranker_lane');
+    if (!isCompleted(row)) reasons.push('status_not_completed');
+    if (row.official_provenance !== 'trusted') reasons.push('provenance_untrusted');
+    if (!completeness.complete) reasons.push('metrics_incomplete');
+    if (!expectedKeys || !expectedKeys.has(comboId)) reasons.push('not_in_expected_matrix');
+    return Object.freeze({
+      row: Object.freeze(row),
+      combo_id: comboId,
+      complete: completeness.complete,
+      missing_metrics: completeness.missing_metrics,
+      eligible: reasons.length === 0,
+      reasons: Object.freeze(reasons),
+    });
+  }
+
+  function admittedOfficialRows(rows, options, evidenceCounts, incompleteRows) {
+    const admitted = new Map();
     (Array.isArray(rows) ? rows : []).forEach(raw => {
-      const row = canonicalMetricRow(raw, {status: raw?.status || 'completed'});
-      if (!isCompleted(row) || isNvidiaLane(row)) return;
-      if (reranked ? row.reranker === 'none' : row.reranker !== 'none') return;
-      const comboId = metricRowKey(row);
-      if (!byId.has(comboId)) {
-        const score = metricScore(row);
-        byId.set(comboId, Object.assign({}, row, {
-          combo_id: comboId,
-          winner_score: score,
-        }));
+      const admission = officialRowAdmission(raw, options);
+      const next = Object.freeze(Object.assign({}, admission.row, {
+        complete: admission.complete,
+        missing_metrics: admission.missing_metrics,
+        combo_id: admission.combo_id,
+        winner_score: admission.eligible ? metricScore(admission.row) : null,
+        evidence_count: evidenceCounts?.has(admission.combo_id) ? evidenceCounts.get(admission.combo_id) : null,
+        admission_reasons: admission.reasons,
+      }));
+      if (!admission.eligible) {
+        incompleteRows.push(next);
+        return;
+      }
+      const current = admitted.get(admission.combo_id);
+      if (!current || (metricScore(next) ?? -Infinity) > (metricScore(current) ?? -Infinity)) {
+        admitted.set(admission.combo_id, next);
       }
     });
-    return [...byId.values()].sort((left, right) =>
+    return [...admitted.values()].sort((left, right) =>
       (metricScore(right) ?? -Infinity) - (metricScore(left) ?? -Infinity) || left.combo_id.localeCompare(right.combo_id)
     );
   }
 
   function officialResultPayload(evaluation, descriptor, evidenceRows) {
-    const referenceRows = evaluation?.benchmark_reference?.summary || [];
-    const discoveredRows = normalizeOfficialRows(referenceRows, true);
+    const referenceRows = Array.isArray(evaluation?.benchmark_reference?.summary)
+      ? evaluation.benchmark_reference.summary : [];
+    const diagnosticRows = Array.isArray(evaluation?.benchmark_reference?.diagnostics)
+      ? evaluation.benchmark_reference.diagnostics : [];
+    const expectedValues = descriptor?.expected_keys || evaluation?.benchmark_reference?.report?.expected_keys;
+    const expectedKeys = expectedKeySet(expectedValues);
     const evidenceCounts = new Map();
     (Array.isArray(evidenceRows) ? evidenceRows : []).forEach(raw => {
       const key = metricRowKey(canonicalMetricRow(raw));
       evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
     });
-    const rows = [];
     const incompleteRows = [];
-    discoveredRows.forEach(row => {
+    const rows = admittedOfficialRows(
+      referenceRows,
+      {expectedKeys, reranked: true},
+      evidenceCounts,
+      incompleteRows,
+    );
+    diagnosticRows.forEach(raw => {
+      const row = canonicalMetricRow(raw);
+      const comboId = metricRowKey(row);
       const completeness = officialMetricCompleteness(row);
-      const next = Object.freeze(Object.assign({}, row, completeness, {
-        evidence_count: evidenceCounts.has(row.combo_id) ? evidenceCounts.get(row.combo_id) : null,
-      }));
-      (completeness.complete ? rows : incompleteRows).push(next);
+      incompleteRows.push(Object.freeze(Object.assign({}, row, completeness, {
+        combo_id: comboId,
+        winner_score: null,
+        evidence_count: evidenceCounts.has(comboId) ? evidenceCounts.get(comboId) : null,
+        diagnostic_only: true,
+      })));
     });
+    const actualKeys = new Set(rows.map(row => row.combo_id));
+    const configured = descriptor?.configured ?? expectedKeys?.size ?? 180;
+    const matrixComplete = expectedKeys
+      ? actualKeys.size === expectedKeys.size && [...expectedKeys].every(key => actualKeys.has(key))
+      : false;
     return Object.freeze({
       source_type: 'official',
       result_set: 'official',
       scoring_mode: 'retrieval_labels',
       metric_k: 5,
-      configured: descriptor?.configured ?? 180,
+      configured,
       evaluated: rows.length,
-      reported_evaluated: descriptor?.evaluated ?? discoveredRows.length,
-      discovered: discoveredRows.length,
-      matrix_complete: rows.length >= (descriptor?.configured ?? 180),
-      stability_status: rows.length >= (descriptor?.configured ?? 180) ? 'complete' : 'partial',
+      reported_evaluated: descriptor?.evaluated ?? rows.length,
+      discovered: referenceRows.length,
+      matrix_complete: matrixComplete,
+      stability_status: matrixComplete ? 'complete' : 'partial',
       rows: Object.freeze(rows),
       incomplete_rows: Object.freeze(incompleteRows),
     });
   }
 
   function baselineResultPayload(evaluation, evidenceRows) {
-    const rows = normalizeOfficialRows([
-      ...(evaluation?.summary || []),
-      ...(evaluation?.reranked?.summary || []),
-    ], false);
+    const expectedKeys = expectedKeySet(evaluation?.benchmark_reference?.report?.baseline_expected_keys);
     const evidenceCounts = new Map();
     (Array.isArray(evidenceRows) ? evidenceRows : []).forEach(raw => {
       const key = metricRowKey(canonicalMetricRow(raw));
       evidenceCounts.set(key, (evidenceCounts.get(key) || 0) + 1);
     });
-    const decorated = rows.map(row => Object.assign({}, row, {
-      evidence_count: evidenceCounts.has(row.combo_id) ? evidenceCounts.get(row.combo_id) : null,
-    }));
+    const incompleteRows = [];
+    const rows = admittedOfficialRows(
+      [
+        ...(evaluation?.summary || []),
+        ...(evaluation?.reranked?.summary || []),
+      ],
+      {expectedKeys, reranked: false},
+      evidenceCounts,
+      incompleteRows,
+    );
     return Object.freeze({
       source_type: 'official',
       result_set: 'baseline',
       scoring_mode: 'retrieval_labels',
       metric_k: 5,
-      configured: decorated.length,
-      evaluated: decorated.length,
-      rows: Object.freeze(decorated),
+      configured: expectedKeys?.size ?? 0,
+      evaluated: rows.length,
+      rows: Object.freeze(rows),
+      incomplete_rows: Object.freeze(incompleteRows),
     });
   }
 
@@ -160,7 +242,7 @@
     normalized.source_type = normalized.source_type || 'uploaded_project';
     normalized.scoring_mode = normalized.scoring_mode || 'evidence_only';
     normalized.rows = Object.freeze((Array.isArray(normalized.rows) ? normalized.rows : []).map(row =>
-      Object.freeze(Object.assign({}, row, {status: row?.status || 'completed'}))
+      Object.freeze(Object.assign({}, row))
     ));
     return Object.freeze(normalized);
   }
@@ -205,6 +287,7 @@
     metricRowKey,
     metricScore,
     officialMetricCompleteness,
+    officialRowAdmission,
     officialResultPayload,
     baselineResultPayload,
     normalizeResultPayload,

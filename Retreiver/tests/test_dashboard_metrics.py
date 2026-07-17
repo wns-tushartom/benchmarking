@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import re
 import subprocess
@@ -29,11 +30,13 @@ def test_dashboard_metrics_keep_faiss_stage_winner_and_dedupe_rows():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _write_csv(root / "eval" / "groundtruth_eval_summary.csv", [{"sheet":"Heading_sections_l2", "embedding":"gte_multilingual_base", "store":"Qdrant", "reranker":"qwen3_4b_rerank", "recall_at_5":"0.5", "mrr":"0.4", "ndcg_at_5":"0.3", "avg_latency_seconds":"0.2"}])
-        faiss = {"chunker":"Heading_sections_l2", "embedding":"gte_multilingual_base", "vector_store":"FAISS", "reranker":"bge-reranker-base", "query_count":"500", "recall_at_5":"0.9", "mrr":"0.8", "ndcg_at_10":"0.7", "avg_latency_ms":"100"}
+        faiss = {"chunker":"Heading_sections_l2", "embedding":"gte_multilingual_base", "vector_store":"FAISS", "reranker":"bge-reranker-base", "status":"completed", **_complete_official_metrics()}
         _write_csv(root / "runs" / "latest" / "modular_summary.csv", [faiss])
         _write_csv(root / "runs" / "faiss_noaws_retry" / "modular_summary.csv", [faiss])
         old = dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR
         dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = root / "eval", root / "runs" / "latest", root / "full", root / "gt"
+        _write_official_manifest(root / "runs" / "latest" / "manifest.json", dashboard)
+        _write_official_manifest(root / "runs" / "faiss_noaws_retry" / "manifest.json", dashboard)
         try:
             evaluation = dashboard.read_evaluation()
         finally:
@@ -49,7 +52,8 @@ const context={{console,document:{{getElementById:el,querySelectorAll(){{return 
 vm.createContext(context);
 let code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(code + `
-const evaluation={{summary:[{{sheet:'s',embedding:'e',store:'Qdrant',reranker:'qwen3_4b_rerank',recall_at_5:'0.5',mrr:'0.4',ndcg_at_5:'0.3',avg_latency_seconds:'0.2'}}], benchmark_reference:{{summary:[{{sheet:'s',embedding:'e',store:'Qdrant',reranker:'Qwen3:4B Rerank',recall_at_5:'0.5',mrr:'0.4',ndcg_at_5:'0.3',avg_latency_seconds:'0.2'}},{{sheet:'s',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',recall_at_5:'0.9',mrr:'0.8',ndcg_at_5:'0.7',avg_latency_seconds:'0.1'}}]}}}};
+const metric={{status:'completed',official_provenance:'trusted',evaluated_queries:5,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,no_hit_queries:1,avg_latency_seconds:.03}};
+const evaluation={{summary:[{{...metric,sheet:'s',embedding:'e',store:'Qdrant',reranker:'qwen3_4b_rerank'}}], benchmark_reference:{{summary:[{{...metric,sheet:'s',embedding:'e',store:'Qdrant',reranker:'Qwen3:4B Rerank'}},{{...metric,sheet:'s',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',recall_at_5:.9,mrr:.8,ndcg_at_5:.7,avg_latency_seconds:.1}}]}}}};
 globalThis.__rows=evaluatedRows(evaluation); renderPipelineComparison(evaluation); globalThis.__stage=document.getElementById('stageComparisonChart').innerHTML;
 `, context);
 if (context.__rows.length !== 2 || !context.__stage.includes('Vector DB component: FAISS')) {{ console.error(JSON.stringify(context.__rows), context.__stage); process.exit(1); }}
@@ -77,6 +81,7 @@ def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate()
         "avg_first_relevant_rank": "1.7",
         "no_hit_queries": "10",
         "avg_latency_ms": "30",
+        "status": "completed",
     }
     partial = {**complete, "mrr": "", "ndcg_at_5": "", "avg_latency_ms": ""}
     with tempfile.TemporaryDirectory() as td:
@@ -85,6 +90,8 @@ def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate()
         _write_csv(root / "runs" / "archive" / "complete" / "modular_summary.csv", [complete])
         old = dashboard.MODULAR_DIR, dashboard.FULL_DIR
         dashboard.MODULAR_DIR, dashboard.FULL_DIR = root / "runs" / "latest", root / "full"
+        _write_official_manifest(root / "runs" / "latest" / "manifest.json", dashboard)
+        _write_official_manifest(root / "runs" / "archive" / "complete" / "manifest.json", dashboard)
         try:
             reference = dashboard.read_benchmark_reference()
         finally:
@@ -105,9 +112,9 @@ def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(
 
     rows = generate_matrix(load_benchmark_config(Path("configs/benchmark.local.json")))
     def metric(row: dict, modular: bool = False) -> dict:
-        base = {"recall_at_5": "0.5", "mrr": "0.4", "ndcg_at_5": "0.3", "avg_latency_seconds": "0.2"}
+        base = {"status": "completed", "official_provenance": "trusted", **_complete_official_metrics()}
         if modular:
-            return {"chunker": row["chunker"], "embedding": row["embedding"], "vector_store": row["vector_store"], "reranker": row["reranker"], "query_count": "500", "recall_at_5": "0.5", "mrr": "0.4", "avg_latency_ms": "200"}
+            return {"chunker": row["chunker"], "embedding": row["embedding"], "vector_store": row["vector_store"], "reranker": row["reranker"], **base}
         return {"sheet": row["chunker"], "embedding": row["embedding"], "store": row["vector_store"], "reranker": row["reranker"], **base}
 
     with tempfile.TemporaryDirectory() as td:
@@ -123,6 +130,7 @@ def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(
         _write_csv(root / "runs" / "archive" / "non_official_old_experiment" / "modular_summary.csv", extra_rows)
         old = dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR
         dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = root / "eval", root / "runs" / "latest", root / "full", root / "gt"
+        _write_official_manifest(root / "runs" / "archive" / "faiss_noaws_complete" / "manifest.json", dashboard)
         try:
             evaluation = dashboard.read_evaluation()
             evaluation["reranked"] = dashboard.read_evaluation_dir(root / "reranked")
@@ -163,9 +171,15 @@ def test_benchmark_details_generate_aws_faiss_top5_evidence_rows():
             "top_ids": "14|20565|26365|26028|25992",
             "top_scores": "0.9|0.8|0.7|0.6|0.5",
         }
-        _write_csv(root / "runs" / "aws_combined" / "modular_details.csv", [row])
+        detail_path = root / "runs" / "aws_combined" / "modular_details.csv"
+        _write_csv(detail_path, [row])
+        _write_csv(
+            root / "runs" / "aws_combined" / "modular_summary.csv",
+            [{**row, "status": "completed", **_complete_official_metrics()}],
+        )
         old_modular, old_lookup = dashboard.MODULAR_DIR, dashboard.chunk_lookup_for_sheet
         dashboard.MODULAR_DIR = root / "runs" / "latest"
+        _write_official_manifest(root / "runs" / "aws_combined" / "manifest.json", dashboard)
         dashboard.chunk_lookup_for_sheet = lambda sheet: {
             i: SimpleNamespace(id=i, pdf_name=f"doc{i}.pdf", paragraph=f"paragraph {i}")
             for i in [14, 20565, 26365, 26028, 25992]
@@ -193,17 +207,17 @@ def test_frontend_initial_load_uses_lazy_evidence_limits():
     assert "reranker_limit=60000" not in text
 
 
-def test_operational_render_defines_evaluation_before_reading_groundtruth_status() -> None:
+def test_dataset_status_renderer_defines_evaluation_before_reading_groundtruth_status() -> None:
     app = Path(__file__).resolve().parents[1] / "web" / "app.js"
     text = app.read_text(encoding="utf-8")
-    render_operational = text.split("function renderOperational()", 1)[1].split(
-        "function renderPreflight", 1
+    status_renderer = text.split("function renderDatasetStatusSummary()", 1)[1].split(
+        "function renderOperational", 1
     )[0]
 
     declaration = "const evaluation = op.evaluation || {};"
     status_read = "evaluation?.report?.groundtruth_rows"
-    assert declaration in render_operational
-    assert render_operational.index(declaration) < render_operational.index(status_read)
+    assert declaration in status_renderer
+    assert status_renderer.index(declaration) < status_renderer.index(status_read)
 
 
 def test_completed_coverage_cells_open_the_exact_metrics_combination() -> None:
@@ -441,7 +455,7 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260716-metrics-integrity" in index
+    assert "/app.js?v=20260717-project-matrix" in index
     assert "/styles.css?v=20260716-meeting-hardening" in index
     assert "20260709-query-ui" not in index
 
@@ -522,6 +536,40 @@ def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
     assert "fillSourceSelect('globalGroundtruth'" in app
     assert "$('globalDataset')?.addEventListener('change'" in app
     assert "$('globalGroundtruth')?.addEventListener('change'" in app
+
+
+def test_global_project_selection_updates_document_readiness_kpi() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    js = f"""
+const fs=require('fs'),vm=require('vm');
+const elements={{}};
+function el(id) {{
+  if (!elements[id]) elements[id]={{
+    value:id==='globalDataset'?'project:demo':(id==='globalGroundtruth'?'groundtruth:none':''), textContent:'', innerHTML:'',
+    options:[], selectedOptions:[], classList:{{toggle(){{}}}},
+    addEventListener(){{}}, querySelectorAll(){{return [];}}, setAttribute(){{}},
+  }};
+  return elements[id];
+}}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code + `
+state={{
+  operational:{{document_repository:{{ready_count:0,total:6}},known_pdf_count:6}},
+  sourceCatalog:{{datasets:[{{id:'project:demo',label:'Demo corpus',kind:'uploaded_project',document_count:5,ready:true,validation:'ready_for_project_matrix'}}]}},
+  files:[], options:{{}},
+}};
+renderDatasetStatusSummary();
+globalThis.__result={{status:document.getElementById('pdfStatus').textContent,note:document.getElementById('pdfNote').textContent,groundtruth:document.getElementById('groundTruthStatus').textContent}};
+`, context);
+if (context.__result.status !== '5/5' || !context.__result.note.includes('Demo corpus') || !context.__result.note.includes('project matrix') || context.__result.groundtruth !== 'Evidence-only') {{
+  console.error(JSON.stringify(context.__result)); process.exit(1);
+}}
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_run_pipeline_depth_controls_are_explicit_and_chunk_limit_is_fixed() -> None:
@@ -662,6 +710,60 @@ def test_user_project_upload_is_isolated_and_creates_manifest_and_canonical_corp
         assert "data/uploads" not in json.dumps(manifest)
 
 
+def test_public_project_upload_payload_excludes_internal_paths_and_layout() -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    internal = {
+        "ok": True,
+        "schema_version": 1,
+        "project_id": "demo_1234",
+        "label": "Demo",
+        "created_at": "2026-07-17T00:00:00+00:00",
+        "bytes": 42,
+        "corpus_sha256": "a" * 64,
+        "document_count": 1,
+        "source_count": 1,
+        "page_count": 1,
+        "extracted_count": 1,
+        "extraction_status": "complete",
+        "extraction_failures": ["/private/repo/bad.pdf: provider detail"],
+        "chunk_count": 0,
+        "sources": [{
+            "source_name": "policy.pdf",
+            "raw_sha256": "b" * 64,
+            "raw_size_bytes": 42,
+            "parser_versions": ["pypdf_v1"],
+            "page_count": 1,
+            "status": "complete",
+            "saved_path": "/private/repo/policy.pdf",
+        }],
+        "manifest_path": "/private/repo/manifest.json",
+        "saved_path": "/private/repo/upload.zip",
+        "canonical_corpus": "/private/repo/documents.jsonl",
+        "storage_layout": {"root": "/private/repo"},
+        "next_steps": ["Review /private/repo"],
+        "workbook": "/private/repo/corpus.xlsx",
+        "search_index": "/private/repo/index.json",
+        "question_file": "/private/repo/questions.csv",
+    }
+
+    public = dashboard.public_project_upload_payload(internal)
+
+    assert public["source_id"] == "project:demo_1234"
+    assert public["extraction_failure_count"] == 1
+    assert set(public) == {
+        "ok", "schema_version", "project_id", "source_id", "label", "created_at",
+        "bytes", "corpus_sha256", "document_count", "source_count", "page_count",
+        "extracted_count", "extraction_status", "extraction_failure_count",
+        "chunk_count", "sources",
+    }
+    assert set(public["sources"][0]) == {
+        "source_name", "raw_sha256", "raw_size_bytes", "parser_versions",
+        "page_count", "status",
+    }
+    assert "/private/" not in json.dumps(public)
+
+
 def test_project_query_uses_uploaded_text_without_fake_matrix_rows():
     import scripts.serve_benchmark_dashboard as dashboard
 
@@ -756,7 +858,7 @@ document.getElementById('runDataset').value='project:demo';
 document.getElementById('runRerankerMain').selectedOptions=[{{value:'all'}}];
 globalThis.__projectCount=selectedMatrixComboCount();
 `, context);
-if (context.__defaultCount !== 180 || context.__noneCount !== 60 || context.__projectCount !== 36) {{
+if (context.__defaultCount !== 180 || context.__noneCount !== 60 || context.__projectCount !== 180) {{
   console.error(JSON.stringify({{defaultCount: context.__defaultCount, noneCount: context.__noneCount, projectCount: context.__projectCount}}));
   process.exit(1);
 }}
@@ -863,7 +965,12 @@ def test_official_evaluated_count_excludes_failed_or_unmeasured_rows():
         "error_code": "reranker_failed",
     }
     unmeasured = {**base, "status": "completed"}
-    measured = {**base, "status": "completed", "query_count": "1"}
+    measured = {
+        **base,
+        "status": "completed",
+        "official_provenance": "trusted",
+        **_complete_official_metrics(),
+    }
 
     assert dashboard.official_evaluated_count({
         "summary": [failed],
@@ -904,10 +1011,11 @@ def test_benchmark_reference_skips_failed_rows_and_uses_measured_archive(
     latest = tmp_path / "latest.csv"
     archive = tmp_path / "archive.csv"
     failed = tmp_path / "failed.csv"
-    _write_csv(latest, [{**base, "status": "completed", "query_count": ""}])
-    _write_csv(archive, [{**base, "status": "completed", "query_count": "1"}])
-    _write_csv(failed, [{**base, "status": "failed", "query_count": "1"}])
+    _write_csv(latest, [{**base, "status": "completed", **_complete_official_metrics(), "query_count": ""}])
+    _write_csv(archive, [{**base, "status": "completed", **_complete_official_metrics()}])
+    _write_csv(failed, [{**base, "status": "failed", **_complete_official_metrics()}])
     monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {official_key})
+    _write_official_manifest(tmp_path / "manifest.json", dashboard)
     monkeypatch.setattr(
         dashboard,
         "benchmark_reference_sources",
@@ -928,3 +1036,175 @@ def test_benchmark_reference_skips_failed_rows_and_uses_measured_archive(
         "reranked": {"summary": []},
         "benchmark_reference": reference,
     }) == 1
+
+
+def _complete_official_metrics() -> dict:
+    return {
+        "query_count": "5", "recall_at_1": "0.5", "recall_at_3": "0.6",
+        "recall_at_5": "0.7", "recall_at_10": "0.8", "mrr": "0.65",
+        "precision_at_5": "0.4", "ndcg_at_5": "0.68",
+        "avg_first_relevant_rank": "1.5", "no_hit_queries": "1",
+        "avg_latency_seconds": "0.03",
+    }
+
+
+def _write_official_manifest(path: Path, dashboard, *, status: str = "completed") -> None:
+    from benchmarking.core.config import config_hash, load_benchmark_config
+
+    artifacts = {
+        artifact.name: hashlib.sha256(artifact.read_bytes()).hexdigest()
+        for artifact in path.parent.iterdir()
+        if artifact.is_file() and artifact.suffix == ".csv"
+    }
+    artifact_root = path.parent.resolve().as_posix()
+    path.write_text(json.dumps({
+        "status": status,
+        "run_id": path.parent.name,
+        "config_hash": config_hash(load_benchmark_config(dashboard.CONFIG_PATH)),
+        "dataset_id": dashboard.DEFAULT_DATASET_ID,
+        "groundtruth_id": "groundtruth:repository:qa_text_test.csv",
+        "query_count": 5,
+        "artifact_root": artifact_root,
+        "artifact_sha256": artifacts,
+    }), encoding="utf-8")
+
+
+def test_official_reference_keeps_untrusted_rows_diagnostic_and_accepts_only_manifested_completed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    official_key = next(iter(dashboard.official_matrix_keys()))
+    chunker, embedding, store, reranker = official_key
+    base = {
+        "chunker": chunker, "embedding": embedding, "vector_store": store,
+        "reranker": reranker, "status": "completed", **_complete_official_metrics(),
+    }
+    copied = tmp_path / "runs" / "copied" / "modular_summary.csv"
+    trusted = tmp_path / "runs" / "trusted" / "modular_summary.csv"
+    _write_csv(copied, [{**base, "recall_at_5": "0.99"}])
+    _write_csv(trusted, [{**base, "recall_at_5": "0.70"}])
+    _write_official_manifest(trusted.parent / "manifest.json", dashboard)
+    monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {official_key})
+    monkeypatch.setattr(dashboard, "benchmark_reference_sources", lambda: [
+        ("modular_run:copied", copied), ("modular_run:trusted", trusted),
+    ])
+
+    reference = dashboard.read_benchmark_reference()
+
+    assert [row["source"] for row in reference["summary"]] == ["modular_run:trusted"]
+    assert reference["summary"][0]["official_provenance"] == "trusted"
+    assert reference["report"]["diagnostic_rows"] == 1
+    assert reference["diagnostics"][0]["admission_reason"] == "manifest_missing"
+
+
+def test_selected_manifest_cannot_admit_rows_outside_its_concrete_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+    from benchmarking.core.config import config_hash, generate_matrix, load_benchmark_config, selected_config
+
+    cfg = load_benchmark_config(dashboard.CONFIG_PATH)
+    matrix = generate_matrix(cfg)
+    selected_row = matrix[0]
+    other_row = next(row for row in matrix if row["reranker"] != selected_row["reranker"])
+    selected_key = (
+        selected_row["chunker"], selected_row["embedding"], selected_row["vector_store"],
+        dashboard.canonical_reranker_name(selected_row["reranker"]),
+    )
+    other_key = (
+        other_row["chunker"], other_row["embedding"], other_row["vector_store"],
+        dashboard.canonical_reranker_name(other_row["reranker"]),
+    )
+    selection = {
+        "chunker": selected_row["chunker"], "embedding": selected_row["embedding"],
+        "vector_store": selected_row["vector_store"], "index_type": selected_row["index_type"],
+        "retrieval_method": selected_row["retrieval_method"], "reranker": selected_row["reranker"],
+        "evaluator": selected_row["evaluator"],
+    }
+    concrete = selected_config(cfg, selection)
+    concrete.setdefault("experiment", {})["selection"] = selection
+    run_dir = tmp_path / "selected"
+    summary = run_dir / "modular_summary.csv"
+    _write_csv(summary, [{
+        "chunker": other_key[0], "embedding": other_key[1], "vector_store": other_key[2],
+        "reranker": other_key[3], "status": "completed", **_complete_official_metrics(),
+    }])
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "status": "completed", "run_id": run_dir.name,
+        "config_hash": config_hash(concrete),
+        "official_matrix_contract_hash": config_hash(cfg),
+        "selected_run_config_hash": config_hash(concrete),
+        "selection": selection,
+        "dataset_id": dashboard.DEFAULT_DATASET_ID,
+        "groundtruth_id": dashboard.OFFICIAL_GROUNDTRUTH_ID,
+        "query_count": 5,
+        "artifact_root": run_dir.resolve().as_posix(),
+        "artifact_sha256": {"modular_summary.csv": hashlib.sha256(summary.read_bytes()).hexdigest()},
+    }), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {selected_key, other_key})
+    monkeypatch.setattr(dashboard, "benchmark_reference_sources", lambda: [("modular_run:selected", summary)])
+
+    reference = dashboard.read_benchmark_reference()
+
+    assert reference["summary"] == []
+    assert reference["diagnostics"][0]["admission_reason"] == "not_in_manifest_selection"
+
+
+def test_official_evaluated_count_requires_explicit_completed_full_metrics_and_trusted_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.serve_benchmark_dashboard as dashboard
+
+    official_key = next(iter(dashboard.official_matrix_keys()))
+    chunker, embedding, store, reranker = official_key
+    base = {
+        "sheet": chunker, "embedding": embedding, "store": store,
+        "reranker": reranker, **_complete_official_metrics(),
+    }
+    rows = [
+        {**base, "status": "", "official_provenance": "trusted"},
+        {**base, "status": "unknown", "official_provenance": "trusted"},
+        {**base, "status": "completed", "official_provenance": "untrusted"},
+        {**base, "status": "completed", "official_provenance": "trusted", "mrr": ""},
+    ]
+    monkeypatch.setattr(dashboard, "official_matrix_keys", lambda: {official_key})
+    evaluation = {"summary": rows, "reranked": {"summary": []}, "benchmark_reference": {"summary": []}}
+    assert dashboard.official_evaluated_count(evaluation) == 0
+
+    rows.append({**base, "status": "completed", "official_provenance": "trusted"})
+    assert dashboard.official_evaluated_count(evaluation) == 1
+
+
+def test_frontend_coverage_does_not_promote_failed_rows_and_prefers_trusted_duplicate() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    source_state = root / "web" / "source-state.js"
+    js = f"""
+const fs=require('fs'),vm=require('vm');
+const elements={{}};
+function el(id){{return elements[id] ||= {{id,value:'all',textContent:'',innerHTML:'',classList:{{toggle(){{}},add(){{}},remove(){{}}}},addEventListener(){{}},querySelectorAll(){{return[];}},setAttribute(){{}}}};}}
+const context={{console,DashboardSourceState:require({str(source_state)!r}),document:{{getElementById:el,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code+`
+const metric={{evaluated_queries:5,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,no_hit_queries:1,avg_latency_seconds:.03,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',official_provenance:'trusted'}};
+benchmarkOptions={{chunkers:['c'],embeddings:['e'],vector_stores:['FAISS'],rerankers:['bge-reranker-base']}};
+const expected='c|e|FAISS|bge-reranker-base';
+state={{operational:{{evaluation:{{summary:[
+  {{...metric,status:'failed'}},
+  {{...metric,status:'completed',source_type:'nvidia',recall_at_5:.99}},
+  {{...metric,status:'completed',source_type:'uploaded_project',recall_at_5:.98}},
+  {{...metric,status:'completed',sheet:'wrong',recall_at_5:.97}},
+  {{...metric,status:'completed'}},
+],benchmark_reference:{{report:{{expected_keys:[expected]}}}}}}}}}};
+renderCoverage([]); globalThis.__valid=document.getElementById('coverageTable').innerHTML;
+state.operational.evaluation.summary=[{{...metric,status:'failed'}},{{...metric,status:'completed',source_type:'nvidia'}}];
+renderCoverage([]); globalThis.__failed=document.getElementById('coverageTable').innerHTML;
+`,context);
+if(!context.__valid.includes('Done · open Metrics') || context.__failed.includes('Done · open Metrics')){{console.error(context.__valid,context.__failed);process.exit(1);}}
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr

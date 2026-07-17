@@ -275,7 +275,7 @@ def _validate_selections(
         selected = value[dimension]
         if not isinstance(selected, list):
             raise ProjectMatrixValidationError(f"{dimension} selection must be an array")
-        if not selected:
+        if not selected and dimension != "rerankers":
             raise ProjectMatrixValidationError(
                 f"{dimension} selection must be a non-empty array"
             )
@@ -343,7 +343,7 @@ def _combination_count(request: ProjectMatrixRequest) -> int:
         len(request.chunkers)
         * len(request.embeddings)
         * len(request.vector_stores)
-        * len(request.rerankers)
+        * max(1, len(request.rerankers))
     )
 
 

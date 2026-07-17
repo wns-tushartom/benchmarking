@@ -9,7 +9,7 @@ import pytest
 import scripts.run_complete_pipeline as pipeline
 
 
-def _ready_info(*, groundtruth: str = "") -> dict:
+def _ready_info(*, groundtruth: str = "", rerankers: list[str] | None = None) -> dict:
     return {
         "ok": True,
         "missing": [],
@@ -19,7 +19,7 @@ def _ready_info(*, groundtruth: str = "") -> dict:
         "sheets": ["uploaded_chunks"],
         "embeddings": ["gte_multilingual_base"],
         "stores": ["FAISS"],
-        "rerankers": ["bge-reranker-base"],
+        "rerankers": ["bge-reranker-base"] if rerankers is None else rerankers,
         "combo_count": 1,
         "query_limit": 0,
         "chunk_limit": 0,
@@ -60,6 +60,15 @@ def _run_main_with_captured_stages(
     return calls
 
 
+def test_evidence_only_reranker_selection_requires_explicit_choice() -> None:
+    assert pipeline.choose_rerankers(None, evidence_only=True) == []
+    assert pipeline.choose_rerankers(["none"], evidence_only=True) == []
+    assert pipeline.choose_rerankers(["bge-reranker-base"], evidence_only=True) == [
+        "bge-reranker-base"
+    ]
+    assert pipeline.choose_rerankers(None, evidence_only=False) == pipeline.LIVE_RERANKERS
+
+
 def test_evidence_only_uses_selected_workbook_and_never_runs_scored_stages(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -88,7 +97,7 @@ def test_evidence_only_uses_selected_workbook_and_never_runs_scored_stages(
             "--top-k",
             "5",
         ],
-        _ready_info(),
+        _ready_info(rerankers=[]),
     )
 
     stages = [stage for _cmd, stage in calls]
@@ -102,6 +111,41 @@ def test_evidence_only_uses_selected_workbook_and_never_runs_scored_stages(
     assert "--queries-file" not in retrieval_cmd
     assert not any("evaluation" in stage for stage in stages)
     assert not any("reranker" in stage for stage in stages)
+    assert not any("lift" in stage.lower() or "analysis" in stage.lower() for stage in stages)
+
+
+def test_evidence_only_with_explicit_reranker_runs_reranking_without_scored_stages(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "project" / "chunks" / "chunking_methods_output_v2.xlsx"
+    workbook.parent.mkdir(parents=True)
+    workbook.touch()
+
+    calls = _run_main_with_captured_stages(
+        monkeypatch,
+        tmp_path,
+        [
+            "--workbook", str(workbook),
+            "--evidence-only",
+            "--query", "How are involuntary changes handled?",
+            "--sheets", "uploaded_chunks",
+            "--embeddings", "gte_multilingual_base",
+            "--stores", "FAISS",
+            "--rerankers", "bge-reranker-base",
+            "--top-k", "5",
+            "--reranked-output-k", "3",
+        ],
+        _ready_info(),
+    )
+
+    stages = [stage for _cmd, stage in calls]
+    reranker_cmd = next(cmd for cmd, stage in calls if stage == "evidence-only reranker pass")
+    assert reranker_cmd[reranker_cmd.index("--rerankers") + 1] == "bge-reranker-base"
+    assert reranker_cmd[reranker_cmd.index("--candidate-k") + 1] == "5"
+    assert reranker_cmd[reranker_cmd.index("--top-k") + 1] == "3"
+    assert reranker_cmd[reranker_cmd.index("--limit-artifacts") + 1] == "0"
+    assert not any("evaluation" in stage for stage in stages)
     assert not any("lift" in stage.lower() or "analysis" in stage.lower() for stage in stages)
 
 

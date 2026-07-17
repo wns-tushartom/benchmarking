@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import platform
@@ -29,10 +30,13 @@ def run_experiment(
     selections: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
     load_env_file(root)
-    cfg = load_benchmark_config(config_path)
+    official_cfg = load_benchmark_config(config_path)
+    cfg = official_cfg
+    run_selection: Dict[str, str] = {}
     if selections:
         cfg = selected_config(cfg, selections)
-        cfg.setdefault("experiment", {})["selection"] = {k: v for k, v in selections.items() if v and v != "all"}
+        run_selection = {k: v for k, v in selections.items() if v and v != "all"}
+        cfg.setdefault("experiment", {})["selection"] = run_selection
     registry = default_registry()
     matrix = generate_matrix(cfg)
     if max_runs:
@@ -43,8 +47,22 @@ def run_experiment(
         queries = queries[:limit_queries]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = build_manifest(cfg, config_path, root, len(queries), len(matrix))
-    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest = build_manifest(
+        cfg,
+        config_path,
+        root,
+        len(queries),
+        len(matrix),
+        official_config=official_cfg,
+        selection=run_selection,
+    )
+    manifest.update({
+        "status": "running",
+        "run_id": output_dir.name,
+        "dataset_id": "dataset:wns-default",
+        "groundtruth_id": "groundtruth:repository:qa_text_test.csv",
+    })
+    write_json_atomic(output_dir / "manifest.json", manifest)
 
     detail_rows: List[Dict[str, Any]] = []
     summary_rows: List[Dict[str, Any]] = []
@@ -96,7 +114,9 @@ def run_experiment(
         evaluator_cls = registry.get("evaluator", row["evaluator"])
         evaluator = evaluator_cls(overlap_threshold=eval_cfg.get("overlap_threshold", 0.22))
 
-        metric_lists = {"recall_at_1": [], "recall_at_3": [], "recall_at_5": [], "recall_at_10": [], "mrr": [], "ndcg_at_10": [], "precision_at_5": []}
+        metric_lists = {"recall_at_1": [], "recall_at_3": [], "recall_at_5": [], "recall_at_10": [], "mrr": [], "ndcg_at_5": [], "ndcg_at_10": [], "precision_at_5": []}
+        first_relevant_ranks: List[int] = []
+        no_hit_queries = 0
         latencies = []
         category_stats: Dict[str, List[float]] = {}
         examples_missed = []
@@ -111,12 +131,18 @@ def run_experiment(
             reranked = reranker.rerank(q.query, base_hits, top_k=top_k)
             latency = time.perf_counter() - search_start
             flags = evaluator.flags(q, reranked)
+            first_relevant = next((rank for rank, relevant in enumerate(flags, 1) if relevant), None)
+            if first_relevant is None:
+                no_hit_queries += 1
+            else:
+                first_relevant_ranks.append(first_relevant)
             values = {
                 "recall_at_1": recall_at_k(flags, 1),
                 "recall_at_3": recall_at_k(flags, 3),
                 "recall_at_5": recall_at_k(flags, 5),
                 "recall_at_10": recall_at_k(flags, 10),
                 "mrr": mrr(flags),
+                "ndcg_at_5": ndcg_at_k(flags, 5),
                 "ndcg_at_10": ndcg_at_k(flags, 10),
                 "precision_at_5": precision_at_k(flags, 5),
             }
@@ -149,6 +175,10 @@ def run_experiment(
             "embedding_latency_s": round(embedding_latency_s, 6),
             "upsert_latency_s": round(float(upsert_metrics.get("upsert_latency_s", 0)), 6),
             "avg_latency_ms": round(mean(latencies) * 1000, 6),
+            "avg_latency_seconds": round(mean(latencies), 6),
+            "avg_first_relevant_rank": round(mean(first_relevant_ranks), 6) if first_relevant_ranks else 0.0,
+            "no_hit_queries": no_hit_queries,
+            "status": "completed",
             **{k: round(mean(v), 6) for k, v in metric_lists.items()},
             "recall_at_5_ci_low": round(lo, 6),
             "recall_at_5_ci_high": round(hi, 6),
@@ -161,23 +191,67 @@ def run_experiment(
         write_csv(output_dir / "modular_details.csv", detail_rows)
         (output_dir / "status.json").write_text(json.dumps({"completed_runs": idx, "total_runs": len(matrix), "elapsed_s": round(time.perf_counter() - started, 3)}, indent=2), encoding="utf-8")
 
+    manifest["status"] = "completed"
     analysis = analyze(summary_rows, detail_rows, manifest)
     (output_dir / "analysis.json").write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
     (output_dir / "MODULAR_REPORT.md").write_text(render_markdown_report(analysis), encoding="utf-8")
+    try:
+        artifact_root = output_dir.resolve().relative_to((root / "data" / "modular_runs").resolve()).as_posix()
+    except ValueError:
+        artifact_root = output_dir.resolve().as_posix()
+    manifest["artifact_root"] = artifact_root
+    manifest["artifact_sha256"] = {
+        name: sha256_file(output_dir / name)
+        for name in (
+            "modular_summary.csv",
+            "modular_details.csv",
+            "analysis.json",
+            "MODULAR_REPORT.md",
+        )
+    }
+    write_json_atomic(output_dir / "manifest.json", manifest)
     return analysis
 
 
-def build_manifest(cfg: Dict[str, Any], config_path: Path, root: Path, query_count: int, matrix_count: int) -> Dict[str, Any]:
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def build_manifest(
+    cfg: Dict[str, Any],
+    config_path: Path,
+    root: Path,
+    query_count: int,
+    matrix_count: int,
+    *,
+    official_config: Dict[str, Any] | None = None,
+    selection: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
     dataset = root / cfg["experiment"]["dataset"]
     corpus = root / cfg["experiment"].get("corpus_workbook", "")
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         git_sha = "unknown"
+    selected_hash = config_hash(cfg)
+    contract_hash = config_hash(official_config if official_config is not None else cfg)
     return {
         "experiment": cfg["experiment"],
         "config_path": str(config_path),
-        "config_hash": config_hash(cfg),
+        "config_hash": selected_hash,
+        "official_matrix_contract_hash": contract_hash,
+        "selected_run_config_hash": selected_hash,
+        "selection": dict(selection or {}),
         "dataset_hash": dataset_hash([dataset, corpus]),
         "query_count": query_count,
         "matrix_count": matrix_count,

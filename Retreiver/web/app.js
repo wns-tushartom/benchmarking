@@ -165,10 +165,7 @@ function expandedSelection(id, values) {
 }
 
 function activeDatasetSheets() {
-  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
-  const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
-  if (dataset?.kind === 'default') return benchmarkOptions.chunkers || [];
-  return dataset?.sheets?.length ? dataset.sheets : (benchmarkOptions.chunkers || []);
+  return benchmarkOptions.chunkers || [];
 }
 
 function selectedMatrixComboCount() {
@@ -237,19 +234,28 @@ function setRunSelection(sheet, embedding, store, reranker = 'all') {
 function metricCoverageRows() {
   const evaluation = state.operational?.evaluation || {};
   const sourceState = sourceStateModule();
-  return dedupeMetricRows([
+  const expectedKeys = evaluation.benchmark_reference?.report?.expected_keys;
+  const byKey = new Map();
+  [
     ...(evaluation.summary || []),
     ...(evaluation.reranked?.summary || []),
     ...(evaluation.benchmark_reference?.summary || []),
-  ].filter(r => r.sheet && r.embedding && r.store)
-    .map(r => {
-      const normalized = canonicalMetricRow(r);
-      const completeness = sourceState?.officialMetricCompleteness(normalized) || {complete: true, missing_metrics: []};
-      return canonicalMetricRow(normalized, {
-        status: completeness.complete ? 'metrics' : 'metrics_incomplete',
-        missing_metrics: completeness.missing_metrics,
-      });
-    }));
+  ].filter(r => r.sheet && r.embedding && r.store).forEach(raw => {
+    const normalized = canonicalMetricRow(raw);
+    const admission = sourceState?.officialRowAdmission(normalized, {expectedKeys, reranked: true})
+      || {eligible: false, missing_metrics: []};
+    const eligible = admission.eligible;
+    const next = canonicalMetricRow(normalized, {
+      status: eligible ? 'metrics' : (normalized.status === 'completed' ? 'metrics_incomplete' : (normalized.status || 'unknown')),
+      missing_metrics: admission.missing_metrics,
+      admission_reasons: admission.reasons || [],
+    });
+    const key = metricRowKey(next);
+    const current = byKey.get(key);
+    const priority = row => row?.status === 'metrics' ? 3 : row?.status === 'metrics_incomplete' ? 2 : 1;
+    if (!current || priority(next) > priority(current)) byKey.set(key, next);
+  });
+  return [...byKey.values()];
 }
 
 function coverageEvidenceRows(rows) {
@@ -1223,7 +1229,11 @@ function officialRecommendationPayload(resultSet = 'official') {
   }
   return sourceState.officialResultPayload(
     evaluation,
-    {configured: descriptor.configured ?? 180, evaluated: descriptor.evaluated},
+    {
+      configured: descriptor.configured ?? 180,
+      evaluated: descriptor.evaluated,
+      expected_keys: evaluation?.benchmark_reference?.report?.expected_keys,
+    },
     state.operational?.benchmark_detail_evidence || [],
   );
 }
@@ -1600,9 +1610,35 @@ function operationalRerankRows() {
   return [...(op.reranker_smokes || []), ...(op.benchmark_detail_evidence || [])];
 }
 
+function renderDatasetStatusSummary() {
+  const op = state.operational || {};
+  const datasetId = $('globalDataset')?.value || 'dataset:wns-default';
+  const groundtruthId = $('globalGroundtruth')?.value || 'groundtruth:none';
+  const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
+
+  if (datasetId !== 'dataset:wns-default' && dataset) {
+    const documentCount = Number(dataset.document_count || 0);
+    const readyCount = dataset.ready ? documentCount : 0;
+    const validation = String(dataset.validation || (dataset.ready ? 'ready' : 'not ready')).replaceAll('_', ' ');
+    setText('pdfStatus', `${fmtInt(readyCount)}/${fmtInt(documentCount)}`);
+    setText('pdfNote', `${dataset.label || 'Selected project'} · ${validation}`);
+    setText('groundTruthStatus', groundtruthId === 'groundtruth:none' ? 'Evidence-only' : 'Selected, not evaluated');
+  } else {
+    const repo = op.document_repository || {};
+    const evaluation = op.evaluation || {};
+    setText('pdfStatus', `${repo.ready_count || 0}/${repo.total || op.known_pdf_count || 0}`);
+    setText('pdfNote', documentReadinessSummary(repo));
+    setText('groundTruthStatus', groundtruthId === 'groundtruth:none'
+      ? 'Evidence-only'
+      : (evaluation?.report?.groundtruth_rows
+        ? `${evaluation.report.groundtruth_rows} rows evaluated`
+        : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending')));
+  }
+  syncStatusDialog();
+}
+
 function renderOperational() {
   const op = state.operational || {};
-  const evaluation = op.evaluation || {};
   const ingestion = op.ingestion || {};
   const rows = ingestion.rows || [];
   const latest = latestRows(rows);
@@ -1614,7 +1650,6 @@ function renderOperational() {
   const optsForStatus = matrixOptions();
   const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
   const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
-  const repo = op.document_repository || {};
   const officialPayload = recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations
     ? officialRecommendationPayload('official')
     : null;
@@ -1622,9 +1657,7 @@ function renderOperational() {
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
-  $('groundTruthStatus').textContent = evaluation?.report?.groundtruth_rows ? `${evaluation.report.groundtruth_rows} rows evaluated` : ((evaluation?.groundtruth_files || []).length ? 'Loaded, not evaluated' : 'Pending');
-  $('pdfStatus').textContent = `${repo.ready_count || 0}/${repo.total || op.known_pdf_count || 0}`;
-  $('pdfNote').textContent = documentReadinessSummary(repo);
+  renderDatasetStatusSummary();
   $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
   $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
   const evidenceRowsLoaded = retrieval.length + rerank.length;
@@ -1733,7 +1766,9 @@ function syncRunMode() {
   if ($('runQueryField')) $('runQueryField').hidden = !evidenceOnly;
   if ($('runModeHint')) {
     $('runModeHint').textContent = !defaultDataset
-      ? 'Project dataset mode — use the main pipeline. Legacy stage controls are disabled because they target the default repository artifacts.'
+      ? evidenceOnly
+        ? 'Project evidence-only mode — the isolated project matrix returns retrieval evidence without recall, MRR, nDCG, accuracy, or winner scores. Optional reranking does not create quality metrics.'
+        : 'Project evaluated mode — the isolated project matrix uses the selected immutable ground truth. Legacy stage controls remain disabled because they target default repository artifacts.'
       : evidenceOnly
         ? 'Evidence-only mode — retrieval evidence will be returned without recall, MRR, nDCG, accuracy, or winner scores. Fresh-run archival and scored controls are disabled.'
         : 'Evaluated mode — retrieval metrics will use the selected ground truth.';
@@ -1806,6 +1841,7 @@ async function applyGlobalSourceContext({syncResults = true} = {}) {
   const datasetLabel = $('globalDataset')?.selectedOptions?.[0]?.textContent || datasetId;
   const groundtruthLabel = $('globalGroundtruth')?.selectedOptions?.[0]?.textContent || groundtruthId;
   setText('globalSourceContext', `${datasetLabel} · ${groundtruthLabel}`);
+  renderDatasetStatusSummary();
   if (!syncResults) return;
 
   if (datasetId === 'dataset:wns-default') {
@@ -1873,6 +1909,56 @@ async function loadOptions() {
   const rerankers = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
   fillRunMultiSelect('runRerankerMain', [...rerankers, 'none'], 'All rerankers');
   updateSelectedMatrixCount();
+}
+
+function isProjectDatasetSelected() {
+  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
+  return datasetId.startsWith('project:');
+}
+
+function typedRunQueries() {
+  return ($('runQueries')?.value || '')
+    .split('\n')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+function projectSelectedValues(id, available) {
+  return expandedSelection(id, available || []);
+}
+
+function projectSelectedRerankers() {
+  const available = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
+  return projectSelectedValues('runRerankerMain', available)
+    .filter(value => value !== 'none');
+}
+
+function projectMatrixPayload(confirmationToken = null) {
+  const datasetId = $('runDataset')?.value || 'dataset:wns-default';
+  const groundtruthId = $('runGroundtruth')?.value || 'groundtruth:none';
+  const evidenceOnly = groundtruthId === 'groundtruth:none';
+  return {
+    schema_version: 1,
+    dataset_id: datasetId,
+    groundtruth_id: groundtruthId,
+    typed_queries: evidenceOnly ? typedRunQueries() : [],
+    top_k: Number($('runRetrievalTopK')?.value || 10),
+    selections: {
+      chunkers: projectSelectedValues('runSheet', benchmarkOptions.chunkers || []),
+      embeddings: projectSelectedValues('runEmbedding', benchmarkOptions.embeddings || []),
+      vector_stores: projectSelectedValues('runStore', benchmarkOptions.vector_stores || []),
+      rerankers: projectSelectedRerankers(),
+    },
+    large_matrix_confirmation: confirmationToken,
+  };
+}
+
+async function postProjectMatrix(path, payload) {
+  return api(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
 }
 
 function selectedParams() {
@@ -1963,7 +2049,21 @@ function renderPreflight(payload) {
   $('runOutput').textContent = JSON.stringify(payload, null, 2);
 }
 
+async function runProjectMatrixPreflight() {
+  const payload = await postProjectMatrix(
+    '/api/run/preflight-project-matrix',
+    projectMatrixPayload(),
+  );
+  renderPreflight({
+    ...payload,
+    combo_count: payload.combination_count || 0,
+    warnings: payload.warning ? [payload.warning] : [],
+  });
+  return payload;
+}
+
 async function runPreflight() {
+  if (isProjectDatasetSelected()) return runProjectMatrixPreflight();
   const p = selectedParams();
   $('runStatus').textContent = 'Checking';
   const payload = await api(`/api/run/preflight-complete-pipeline?${p.toString()}`, {method:'POST'});
@@ -2000,12 +2100,23 @@ async function pollRunJob(jobId) {
 async function runCompletePipeline() {
   const preflight = await runPreflight();
   if (!preflight.ok) return;
-  if ((preflight.combo_count || 0) > 12) {
-    const ok = window.confirm(`This will run ${preflight.combo_count} pipeline combinations through ingestion, retrieval, reranking and evaluation. Continue?`);
+  const comboCount = preflight.combination_count || preflight.combo_count || 0;
+  if (comboCount > 12) {
+    const ok = window.confirm(`This will run ${comboCount} pipeline combinations through ingestion, retrieval, reranking and evaluation. Continue?`);
     if (!ok) {
       $('runStatus').textContent = 'Cancelled';
       return;
     }
+  }
+  if (isProjectDatasetSelected()) {
+    $('runStatus').textContent = 'Starting';
+    const payload = projectMatrixPayload(preflight.confirmation_token || null);
+    const launched = await postProjectMatrix('/api/run/project-matrix', payload);
+    const jobId = launched.job?.job_id;
+    if (!jobId) throw new Error('Project matrix launch did not return a job ID.');
+    $('runOutput').textContent = `Started isolated project run ${launched.run_id}\njob ${jobId}`;
+    await pollRunJob(jobId);
+    return;
   }
   const p = selectedParams();
   $('runStatus').textContent = 'Starting';

@@ -1,0 +1,61 @@
+{
+  "document_count": 5,
+  "labelled_query_count": 11,
+  "unanswerable_query_count": 1,
+  "evidence_only_query_count": 6,
+  "expected_top_documents": {
+    "How long after purchase can a customer request a full refund?": "refund_cancellation_policy.pdf",
+    "What must a refund request include?": "refund_cancellation_policy.pdf",
+    "What must an employee do after noticing a suspected security incident?": "security_incident_response.pdf",
+    "When is the incident lessons-learned review due?": "security_incident_response.pdf",
+    "What is the daily meal allowance for employee travel?": "travel_expense_policy.pdf",
+    "When is an itemized travel receipt required?": "travel_expense_policy.pdf",
+    "What is the Priority One acknowledgement target?": "customer_support_sla.pdf",
+    "When is the Priority One root-cause analysis delivered?": "customer_support_sla.pdf",
+    "How long are production application logs retained?": "data_retention_deletion.pdf",
+    "What can delay a verified deletion request beyond 30 days?": "data_retention_deletion.pdf",
+    "Compare the refund-request window with the verified deletion-request deadline.": "refund_cancellation_policy.pdf"
+  },
+  "expected_support_documents": {
+    "How long after purchase can a customer request a full refund?": [
+      "refund_cancellation_policy.pdf"
+    ],
+    "What must a refund request include?": [
+      "refund_cancellation_policy.pdf"
+    ],
+    "What must an employee do after noticing a suspected security incident?": [
+      "security_incident_response.pdf"
+    ],
+    "When is the incident lessons-learned review due?": [
+      "security_incident_response.pdf"
+    ],
+    "What is the daily meal allowance for employee travel?": [
+      "travel_expense_policy.pdf"
+    ],
+    "When is an itemized travel receipt required?": [
+      "travel_expense_policy.pdf"
+    ],
+    "What is the Priority One acknowledgement target?": [
+      "customer_support_sla.pdf"
+    ],
+    "When is the Priority One root-cause analysis delivered?": [
+      "customer_support_sla.pdf"
+    ],
+    "How long are production application logs retained?": [
+      "data_retention_deletion.pdf"
+    ],
+    "What can delay a verified deletion request beyond 30 days?": [
+      "data_retention_deletion.pdf"
+    ],
+    "Compare the refund-request window with the verified deletion-request deadline.": [
+      "refund_cancellation_policy.pdf",
+      "data_retention_deletion.pdf"
+    ],
+    "What holiday bonus does Northstar Services guarantee to every employee?": []
+  },
+  "integrity_notes": [
+    "Scored runs compute quality metrics only from rows with relevance labels.",
+    "The holiday-bonus query is deliberately unanswerable and has no relevance labels.",
+    "Evidence-only runs expose passages and latency without quality metrics or winners."
+  ]
+}

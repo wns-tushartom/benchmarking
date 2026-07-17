@@ -16,6 +16,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -24,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from benchmarking.core.config import generate_matrix, load_benchmark_config
+from benchmarking.core.config import config_hash, generate_matrix, load_benchmark_config, selected_config
 from source.benchmark_pipeline import load_chunks_from_workbook
 from scripts.dashboard_source_catalog import (
     DEFAULT_DATASET_ID,
@@ -38,7 +39,21 @@ from source.services.project_documents import (
     ProjectDocumentStorageError,
     ProjectDocumentValidationError,
     extract_project_documents,
+    load_project_documents,
     write_project_documents,
+)
+from source.services.project_matrix_contract import (
+    ConfirmationTokenError,
+    ProjectMatrixValidationError,
+    issue_large_matrix_confirmation,
+    validate_project_matrix_request,
+)
+from source.services.project_questions import (
+    ProjectQuestionStorageError,
+    ProjectQuestionValidationError,
+    _read_regular_bytes,
+    create_question_set,
+    parse_question_bytes,
 )
 from source.services.project_run_results import (
     ProjectRunResultService,
@@ -436,29 +451,7 @@ def read_evaluation() -> dict:
 def benchmark_row_is_evaluated(row: dict[str, Any]) -> bool:
     status = str(row.get("status") or "").strip().lower()
     error_code = str(row.get("error_code") or row.get("error") or "").strip()
-    if (
-        status in {"failed", "error", "skipped", "cancelled", "interrupted"}
-        or error_code
-    ):
-        return False
-    raw_query_count = row.get("evaluated_queries", row.get("query_count"))
-    try:
-        query_count = float(raw_query_count or 0)
-    except (TypeError, ValueError):
-        query_count = 0.0
-    metric_recorded = any(
-        row.get(field) is not None and row.get(field) != ""
-        for field in (
-            "recall_at_1",
-            "recall_at_3",
-            "recall_at_5",
-            "recall_at_10",
-            "mrr",
-            "precision_at_5",
-            "ndcg_at_5",
-        )
-    )
-    return query_count > 0 or metric_recorded
+    return status == "completed" and not error_code and not benchmark_missing_metrics(row)
 
 
 BENCHMARK_COMPLETE_METRICS = (
@@ -476,24 +469,60 @@ BENCHMARK_COMPLETE_METRICS = (
 
 
 def benchmark_missing_metrics(row: dict[str, Any]) -> list[str]:
-    missing: list[str] = []
+    invalid: list[str] = []
+
+    def reject(field: str) -> None:
+        if field not in invalid:
+            invalid.append(field)
+
     raw_query_count = row.get("evaluated_queries", row.get("query_count"))
     try:
         query_count = float(str(raw_query_count))
     except (TypeError, ValueError):
         query_count = 0.0
-    if not math.isfinite(query_count) or query_count <= 0:
-        missing.append("evaluated_queries")
+    if not math.isfinite(query_count) or query_count <= 0 or not query_count.is_integer():
+        reject("evaluated_queries")
+
+    values: dict[str, float] = {}
     for field in BENCHMARK_COMPLETE_METRICS:
         raw = row.get(field)
         try:
             value = float(str(raw))
         except (TypeError, ValueError):
-            missing.append(field)
+            reject(field)
             continue
         if not math.isfinite(value):
-            missing.append(field)
-    return missing
+            reject(field)
+            continue
+        values[field] = value
+
+    bounded_quality = (
+        "recall_at_1",
+        "recall_at_3",
+        "recall_at_5",
+        "recall_at_10",
+        "mrr",
+        "precision_at_5",
+        "ndcg_at_5",
+    )
+    for field in bounded_quality:
+        value = values.get(field)
+        if value is not None and not 0.0 <= value <= 1.0:
+            reject(field)
+
+    for field in ("avg_first_relevant_rank", "avg_latency_seconds"):
+        value = values.get(field)
+        if value is not None and value < 0:
+            reject(field)
+
+    no_hit_queries = values.get("no_hit_queries")
+    if no_hit_queries is not None and (
+        no_hit_queries < 0
+        or not no_hit_queries.is_integer()
+        or (math.isfinite(query_count) and query_count > 0 and no_hit_queries > query_count)
+    ):
+        reject("no_hit_queries")
+    return invalid
 
 
 def official_evaluated_count(evaluation: dict[str, Any]) -> int:
@@ -511,7 +540,8 @@ def official_evaluated_count(evaluation: dict[str, Any]) -> int:
             if not isinstance(row, dict):
                 continue
             normalized = normalized_benchmark_row(row, source)
-            if not benchmark_row_is_evaluated(normalized):
+            normalized["official_provenance"] = row.get("official_provenance", "")
+            if normalized["official_provenance"] != "trusted" or not benchmark_row_is_evaluated(normalized):
                 continue
             key = (
                 normalized["sheet"],
@@ -591,6 +621,7 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
         "no_hit_queries": value_or_empty("no_hit_queries"),
         "avg_latency_seconds": latency_s,
         "cost": "commercial" if re.search(r"openai|amazon", f"{embedding} {reranker}", re.I) else "oss",
+        "official_provenance": value_or_empty("official_provenance"),
     }
 
 
@@ -627,18 +658,167 @@ def official_matrix_keys() -> set[tuple[str, str, str, str]]:
     }
 
 
+OFFICIAL_GROUNDTRUTH_ID = "groundtruth:repository:qa_text_test.csv"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_selected_matrix_keys(manifest: dict[str, Any]) -> set[tuple[str, str, str, str]] | None:
+    if "official_matrix_contract_hash" not in manifest and "selected_run_config_hash" not in manifest:
+        return None
+    selection = manifest.get("selection")
+    if not isinstance(selection, dict):
+        return set()
+    selected = selected_config(load_benchmark_config(CONFIG_PATH), selection)
+    return {
+        (row["chunker"], row["embedding"], row["vector_store"], canonical_reranker_name(row["reranker"]))
+        for row in generate_matrix(selected)
+    }
+
+
+def official_artifact_provenance(path: Path) -> tuple[bool, str, dict[str, Any]]:
+    manifest_path = path.parent / "manifest.json"
+    try:
+        if (
+            path.is_symlink()
+            or manifest_path.is_symlink()
+            or path.parent.absolute() != path.parent.resolve()
+        ):
+            return False, "artifact_symlink", {}
+    except OSError:
+        return False, "artifact_unreadable", {}
+    if not manifest_path.is_file():
+        return False, "manifest_missing", {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "manifest_invalid", {}
+    if not isinstance(manifest, dict):
+        return False, "manifest_invalid", {}
+    artifact_root = manifest.get("artifact_root")
+    artifact_hashes = manifest.get("artifact_sha256")
+    if not isinstance(artifact_root, str) or not artifact_root or not isinstance(artifact_hashes, dict):
+        return False, "manifest_artifact_binding_missing", manifest
+    artifact_root_path = Path(artifact_root)
+    try:
+        if artifact_root_path.is_absolute():
+            actual_root = path.parent.resolve().as_posix()
+        else:
+            if ".." in artifact_root_path.parts:
+                return False, "manifest_artifact_root_invalid", manifest
+            actual_root = path.parent.resolve().relative_to(MODULAR_DIR.parent.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False, "artifact_outside_root", manifest
+    if actual_root != artifact_root:
+        return False, "artifact_root_mismatch", manifest
+    expected_digest = artifact_hashes.get(path.name)
+    if not isinstance(expected_digest, str) or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        return False, "artifact_digest_missing", manifest
+    try:
+        actual_digest = sha256_file(path)
+    except OSError:
+        return False, "artifact_unreadable", manifest
+    if actual_digest != expected_digest:
+        return False, "artifact_digest_mismatch", manifest
+    official_config = load_benchmark_config(CONFIG_PATH)
+    expected_hash = config_hash(official_config)
+    contract_hash = manifest.get("official_matrix_contract_hash")
+    selected_hash = manifest.get("selected_run_config_hash")
+    if contract_hash is None and selected_hash is None:
+        if manifest.get("config_hash") != expected_hash:
+            return False, "manifest_config_mismatch", manifest
+    elif not isinstance(contract_hash, str) or not isinstance(selected_hash, str):
+        return False, "manifest_provenance_hashes_incomplete", manifest
+    else:
+        if contract_hash != expected_hash:
+            return False, "manifest_contract_mismatch", manifest
+        selection = manifest.get("selection")
+        if not isinstance(selection, dict):
+            return False, "manifest_selection_invalid", manifest
+        selection_keys = {
+            "chunker", "embedding", "vector_store", "index_type",
+            "retrieval_method", "reranker", "evaluator",
+        }
+        if any(key not in selection_keys or not isinstance(value, str) for key, value in selection.items()):
+            return False, "manifest_selection_invalid", manifest
+        selected = selected_config(official_config, selection)
+        normalized_selection = {key: value for key, value in selection.items() if value and value != "all"}
+        if normalized_selection:
+            selected.setdefault("experiment", {})["selection"] = normalized_selection
+        selected_keys = {
+            (row["chunker"], row["embedding"], row["vector_store"], canonical_reranker_name(row["reranker"]))
+            for row in generate_matrix(selected)
+        }
+        if not selected_keys or not selected_keys.issubset(official_matrix_keys()):
+            return False, "manifest_selection_not_official", manifest
+        if config_hash(selected) != selected_hash or manifest.get("config_hash") != selected_hash:
+            return False, "manifest_selected_config_mismatch", manifest
+    checks = (
+        (manifest.get("status") == "completed", "manifest_status_not_completed"),
+        (manifest.get("run_id") == path.parent.name, "manifest_run_id_mismatch"),
+        (manifest.get("dataset_id") == DEFAULT_DATASET_ID, "manifest_dataset_mismatch"),
+        (manifest.get("groundtruth_id") == OFFICIAL_GROUNDTRUTH_ID, "manifest_groundtruth_mismatch"),
+    )
+    for valid, reason in checks:
+        if not valid:
+            return False, reason, manifest
+    try:
+        query_count = float(manifest.get("query_count", 0))
+    except (TypeError, ValueError):
+        query_count = 0.0
+    if not math.isfinite(query_count) or query_count <= 0:
+        return False, "manifest_query_count_invalid", manifest
+    return True, "trusted", manifest
+
+
 def read_benchmark_reference() -> dict[str, Any]:
     selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
     official_keys = official_matrix_keys()
     skipped_non_official = 0
-    for source, path in benchmark_reference_sources():
+    sources = benchmark_reference_sources()
+    provenance_by_path = {
+        path: official_artifact_provenance(path)
+        for _source, path in sources
+    }
+    trusted_run_roots: dict[str, set[Path]] = {}
+    for path, (trusted, _reason, manifest) in provenance_by_path.items():
+        run_id = manifest.get("run_id") if trusted else None
+        if isinstance(run_id, str) and run_id:
+            trusted_run_roots.setdefault(run_id, set()).add(path.parent.resolve())
+    duplicate_run_ids = {
+        run_id for run_id, roots in trusted_run_roots.items() if len(roots) > 1
+    }
+    for source, path in sources:
+        trusted, provenance_reason, manifest = provenance_by_path[path]
         for row in sort_summary(read_csv(path)):
             normalized = normalized_benchmark_row(row, source)
+            normalized["official_provenance"] = "trusted" if trusted else "untrusted"
+            normalized["run_id"] = manifest.get("run_id", "")
             key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
+            if normalized["run_id"] in duplicate_run_ids:
+                diagnostics.append({**normalized, "admission_reason": "duplicate_run_id"})
+                continue
             if key not in official_keys:
                 skipped_non_official += 1
+                diagnostics.append({**normalized, "admission_reason": "not_in_official_matrix"})
+                continue
+            if not trusted:
+                diagnostics.append({**normalized, "admission_reason": provenance_reason})
+                continue
+            selected_keys = manifest_selected_matrix_keys(manifest)
+            if selected_keys is not None and key not in selected_keys:
+                diagnostics.append({**normalized, "admission_reason": "not_in_manifest_selection"})
                 continue
             if not benchmark_row_is_evaluated(normalized):
+                reason = "status_not_completed" if normalized["status"] != "completed" else "metrics_incomplete"
+                diagnostics.append({**normalized, "admission_reason": reason})
                 continue
             current = selected.get(key)
             if current is None or len(benchmark_missing_metrics(normalized)) < len(benchmark_missing_metrics(current)):
@@ -647,12 +827,20 @@ def read_benchmark_reference() -> dict[str, Any]:
     complete_rows = sum(1 for row in rows if not benchmark_missing_metrics(row))
     return {
         "summary": sort_summary(rows),
+        "diagnostics": diagnostics,
         "report": {
-            "source": "modular/full benchmark artifacts",
+            "source": "manifest-verified official benchmark artifacts",
             "config_rows": len(rows),
             "complete_metric_rows": complete_rows,
             "incomplete_metric_rows": len(rows) - complete_rows,
             "official_matrix_rows": len(official_keys),
+            "expected_keys": ["|".join(key) for key in sorted(official_keys)],
+            "baseline_expected_keys": [
+                "|".join(key)
+                for key in sorted({(chunker, embedding, store, "none") for chunker, embedding, store, _ in official_keys})
+            ],
+            "matrix_complete": set(selected) == official_keys,
+            "diagnostic_rows": len(diagnostics),
             "skipped_non_official_rows": skipped_non_official,
             "openai_rows": sum(1 for r in rows if "openai" in str(r.get("embedding", "")).lower()),
             "faiss_rows": sum(1 for r in rows if str(r.get("store", "")).lower() == "faiss"),
@@ -698,10 +886,40 @@ def benchmark_detail_evidence(limit_per_combo: int = 3, max_rows: int = 2000) ->
     per_combo: dict[tuple[str, str, str, str], int] = {}
     official_keys = official_matrix_keys()
     for source, path in benchmark_detail_sources():
+        trusted, _, manifest = official_artifact_provenance(path)
+        if not trusted:
+            continue
+        summary_path = path.with_name("modular_summary.csv")
+        summary_trusted, _, summary_manifest = official_artifact_provenance(summary_path)
+        if not summary_trusted or summary_manifest.get("run_id") != manifest.get("run_id"):
+            continue
+        selected_keys = manifest_selected_matrix_keys(manifest)
+        admitted_summary_keys: set[tuple[str, str, str, str]] = set()
+        for summary_row in read_csv(summary_path):
+            normalized_summary = normalized_benchmark_row(summary_row, source)
+            summary_key = (
+                normalized_summary["sheet"],
+                normalized_summary["embedding"],
+                normalized_summary["store"],
+                normalized_summary["reranker"],
+            )
+            if (
+                summary_key in official_keys
+                and (selected_keys is None or summary_key in selected_keys)
+                and benchmark_row_is_evaluated(normalized_summary)
+            ):
+                admitted_summary_keys.add(summary_key)
+        if not admitted_summary_keys:
+            continue
         for row in read_csv(path):
             normalized = normalized_benchmark_row(row, source)
             key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
-            if key not in official_keys or per_combo.get(key, 0) >= limit_per_combo:
+            if (
+                key not in official_keys
+                or key not in admitted_summary_keys
+                or (selected_keys is not None and key not in selected_keys)
+                or per_combo.get(key, 0) >= limit_per_combo
+            ):
                 continue
             top_ids = [v for v in str(row.get("top_ids") or "").split("|") if v]
             if not top_ids:
@@ -728,17 +946,13 @@ def benchmark_detail_evidence(limit_per_combo: int = 3, max_rows: int = 2000) ->
             if not hits:
                 continue
             per_combo[key] = per_combo.get(key, 0) + 1
-            try:
-                artifact = str(path.relative_to(ROOT))
-            except ValueError:
-                artifact = str(path)
             rows.append({
                 **normalized,
                 "query": row.get("query") or "",
                 "query_id": row.get("query_id") or "",
                 "category": row.get("category") or "",
                 "created_at": row.get("created_at") or "",
-                "artifact": artifact,
+                "artifact": source,
                 "hits": hits,
                 "retrieved_count": len(hits),
                 "evidence_type": "benchmark final top5 evidence",
@@ -1148,14 +1362,30 @@ def public_command(cmd: list[str]) -> list[str]:
     private_value_flags = {"--workbook", "--groundtruth", "--pdf-audit", "--benchmark-input", "--path"}
     public: list[str] = []
     redact_next = False
-    for value in cmd:
+    for index, value in enumerate(cmd):
         if redact_next:
             public.append("<server-resolved>")
             redact_next = False
             continue
-        public.append(value)
+        if index == 0 and Path(value).is_absolute():
+            executable = Path(value).name
+            public.append("python" if executable.startswith("python") else executable)
+        else:
+            public.append(value)
         redact_next = value in private_value_flags
     return public
+
+
+def _public_job_output(output: str) -> str:
+    redacted = output
+    private_roots = sorted(
+        {str(ROOT.resolve()), str(Path.home().resolve())},
+        key=len,
+        reverse=True,
+    )
+    for private_root in private_roots:
+        redacted = redacted.replace(private_root, "<server-path>")
+    return redacted
 
 
 def launch_job(cmd: list[str]) -> dict[str, Any]:
@@ -1184,8 +1414,7 @@ def job_status(job_id: str) -> dict[str, Any]:
         "exit_code": exit_code,
         "cmd": public_command(job["cmd"]),
         "started_at": job["started_at"],
-        "output": output[-20000:],
-        "log_path": str(log_path.relative_to(ROOT)),
+        "output": _public_job_output(output[-20000:]),
     }
 
 
@@ -1520,6 +1749,42 @@ def create_user_project_upload(
     }
 
 
+def public_project_upload_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the path-free public contract for a completed dataset upload."""
+    source_keys = (
+        "source_name",
+        "raw_sha256",
+        "raw_size_bytes",
+        "parser_versions",
+        "page_count",
+        "status",
+    )
+    sources = payload.get("sources")
+    public_sources = [
+        {key: source.get(key) for key in source_keys}
+        for source in sources
+        if isinstance(source, dict)
+    ] if isinstance(sources, list) else []
+    project_id = str(payload.get("project_id", ""))
+    return {
+        "ok": payload.get("ok") is True,
+        "schema_version": payload.get("schema_version"),
+        "project_id": project_id,
+        "source_id": f"project:{project_id}",
+        "label": payload.get("label"),
+        "created_at": payload.get("created_at"),
+        "bytes": payload.get("bytes"),
+        "corpus_sha256": payload.get("corpus_sha256"),
+        "document_count": payload.get("document_count", 0),
+        "source_count": payload.get("source_count", 0),
+        "page_count": payload.get("page_count", 0),
+        "extracted_count": payload.get("extracted_count", 0),
+        "extraction_status": payload.get("extraction_status"),
+        "extraction_failure_count": len(payload.get("extraction_failures") or []),
+        "chunk_count": payload.get("chunk_count", 0),
+        "sources": public_sources,
+    }
+
 
 def list_user_projects() -> list[dict[str, Any]]:
     if not USER_PROJECTS_DIR.exists():
@@ -1549,6 +1814,467 @@ def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str])
     if saved_path.suffix.lower() == ".zip":
         steps.insert(1, f"ZIP extracted {len(extracted)} supported files under {rel_dir}/extracted")
     return steps
+
+
+_PROJECT_MATRIX_ADVANCED_KEYS = {
+    "schema_version",
+    "dataset_id",
+    "top_k",
+    "questions_source",
+    "selections",
+    "large_matrix_confirmation",
+}
+_PROJECT_MATRIX_BROWSER_KEYS = {
+    "schema_version",
+    "dataset_id",
+    "groundtruth_id",
+    "typed_queries",
+    "top_k",
+    "selections",
+    "large_matrix_confirmation",
+}
+
+
+class ProjectMatrixBridgeError(Exception):
+    """Safe public failure raised by the uploaded-project launch bridge."""
+
+    def __init__(self, code: str, public_message: str, status: int) -> None:
+        super().__init__(public_message)
+        self.code = code
+        self.public_message = public_message
+        self.status = status
+
+
+@dataclass(frozen=True)
+class _PreparedProjectQuestions:
+    groundtruth_id: str
+    filename: str
+    content: bytes
+    question_set_id: str
+    content_sha256: str
+    question_count: int
+    question_mode: str
+
+    @property
+    def questions_source(self) -> dict[str, str]:
+        return {
+            "type": "question_set",
+            "question_set_id": self.question_set_id,
+            "content_sha256": self.content_sha256,
+        }
+
+
+def _prepared_question_set_id(project_id: str, source_id: str, content: bytes) -> str:
+    identity = hashlib.sha256(
+        project_id.encode("utf-8")
+        + b"\0"
+        + source_id.encode("utf-8")
+        + b"\0"
+        + content
+    ).digest()
+    return f"questions_{uuid.UUID(bytes=identity[:16], version=4).hex}"
+
+
+def _prepare_browser_project_questions(
+    payload: dict[str, Any],
+    *,
+    root: Path,
+    project_id: str,
+) -> _PreparedProjectQuestions:
+    groundtruth_id = payload.get("groundtruth_id")
+    typed_queries = payload.get("typed_queries")
+    if not isinstance(groundtruth_id, str) or not isinstance(typed_queries, list):
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "Invalid project matrix request", 400
+        )
+
+    if groundtruth_id == NONE_GROUNDTRUTH_ID:
+        if (
+            not typed_queries
+            or any(not isinstance(query, str) for query in typed_queries)
+            or any(not query.strip() for query in typed_queries if isinstance(query, str))
+            or any(
+                "\n" in query or "\r" in query
+                for query in typed_queries
+                if isinstance(query, str)
+            )
+        ):
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            )
+        stripped_queries = [query.strip() for query in typed_queries]
+        content = ("\n".join(stripped_queries) + "\n").encode("utf-8")
+        filename = "typed_queries.txt"
+        source_id = NONE_GROUNDTRUTH_ID
+    else:
+        if typed_queries:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            )
+        try:
+            source = resolve_groundtruth(root, groundtruth_id)
+            if source is None or source.path is None:
+                raise ValueError("ground truth is unavailable")
+            if source.kind == "project" and source.project_id != project_id:
+                raise ValueError("ground truth belongs to another project")
+            filename = source.path.name
+            content = _read_regular_bytes(source.path, "ground-truth source")
+        except (ValueError, ProjectQuestionStorageError):
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            ) from None
+        source_id = groundtruth_id
+
+    try:
+        questions = parse_question_bytes(filename, content)
+    except ProjectQuestionValidationError:
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "Invalid project matrix request", 400
+        ) from None
+    question_mode = (
+        "retrieval_labels"
+        if any(not question.labels.is_empty() for question in questions)
+        else "evidence_only"
+    )
+    return _PreparedProjectQuestions(
+        groundtruth_id=groundtruth_id,
+        filename=filename,
+        content=content,
+        question_set_id=_prepared_question_set_id(project_id, source_id, content),
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        question_count=len(questions),
+        question_mode=question_mode,
+    )
+
+
+def _project_matrix_internal_request(
+    payload: Any,
+    *,
+    root: Path,
+    workspace: ProjectWorkspace,
+) -> tuple[str, str, dict[str, Any], _PreparedProjectQuestions | None]:
+    if not isinstance(payload, dict) or set(payload) not in {
+        frozenset(_PROJECT_MATRIX_ADVANCED_KEYS),
+        frozenset(_PROJECT_MATRIX_BROWSER_KEYS),
+    }:
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "Invalid project matrix request", 400
+        )
+    dataset_id = payload.get("dataset_id")
+    if not isinstance(dataset_id, str) or not dataset_id.startswith("project:"):
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "A project dataset is required", 400
+        )
+    project_id = dataset_id.removeprefix("project:")
+    if not project_id or f"project:{project_id}" != dataset_id:
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "A project dataset is required", 400
+        )
+
+    # Resolve through the dashboard catalog when available. Canonical new uploads do not
+    # require the legacy workbook/search-index compatibility files, so securely fall back
+    # to the same project workspace only when the canonical project itself exists.
+    try:
+        source = resolve_dataset(root, dataset_id)
+        if source.kind != "uploaded_project":
+            raise ValueError("not an uploaded project")
+    except ValueError:
+        try:
+            project_root_path = workspace.project_root(project_id)
+        except ValueError:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project dataset", 400
+            ) from None
+        if not project_root_path.is_dir() or project_root_path.is_symlink():
+            raise ProjectMatrixBridgeError(
+                "project_not_found", "Project was not found", 404
+            ) from None
+
+    internal = dict(payload)
+    internal.pop("dataset_id")
+    internal["project_id"] = project_id
+    prepared = None
+    if set(payload) == _PROJECT_MATRIX_BROWSER_KEYS:
+        prepared = _prepare_browser_project_questions(
+            payload, root=root, project_id=project_id
+        )
+        internal.pop("groundtruth_id")
+        internal.pop("typed_queries")
+        internal["questions_source"] = prepared.questions_source
+    return dataset_id, project_id, internal, prepared
+
+
+def _persist_prepared_project_questions(
+    prepared: _PreparedProjectQuestions,
+    *,
+    project_id: str,
+    workspace: ProjectWorkspace,
+) -> None:
+    questions_root = workspace.layout(project_id)["questions"]
+    target = questions_root / prepared.question_set_id
+    if not target.exists() and not target.is_symlink():
+        try:
+            create_question_set(
+                questions_root,
+                prepared.question_set_id,
+                prepared.filename,
+                prepared.content,
+                upload_limits=workspace.limits,
+            )
+        except ProjectQuestionValidationError:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            ) from None
+        except ProjectQuestionStorageError:
+            if not target.exists() or target.is_symlink():
+                raise ProjectMatrixBridgeError(
+                    "project_question_storage_failed",
+                    "Project questions could not be prepared",
+                    500,
+                ) from None
+    try:
+        workspace.load_question_set(
+            project_id,
+            prepared.question_set_id,
+            expected_content_sha256=prepared.content_sha256,
+        )
+    except (FileNotFoundError, ValueError, ProjectQuestionStorageError, ProjectQuestionValidationError):
+        raise ProjectMatrixBridgeError(
+            "project_question_storage_failed",
+            "Project questions could not be prepared",
+            500,
+        ) from None
+
+
+def _validate_project_matrix_bridge_request(
+    payload: Any,
+    *,
+    root: Path,
+    workspace: ProjectWorkspace,
+    allow_confirmation_issue: bool,
+    persist_prepared_questions: bool,
+):
+    dataset_id, project_id, internal, prepared = _project_matrix_internal_request(
+        payload, root=root, workspace=workspace
+    )
+    try:
+        layout = workspace.layout(project_id)
+        manifest_path = layout["root"] / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        corpus_sha256 = manifest.get("corpus_sha256") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("project_id") != project_id
+            or manifest.get("extraction_status") != "complete"
+            or not isinstance(corpus_sha256, str)
+        ):
+            raise ValueError("project is not ready")
+        load_project_documents(layout["documents"], expected_sha256=corpus_sha256)
+    except FileNotFoundError:
+        raise ProjectMatrixBridgeError(
+            "project_not_found", "Project was not found", 404
+        ) from None
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, ProjectDocumentValidationError):
+        raise ProjectMatrixBridgeError(
+            "project_not_ready", "Project dataset is not ready", 422
+        ) from None
+
+    try:
+        validated = validate_project_matrix_request(internal)
+        confirmation_token = None
+    except ConfirmationTokenError as exc:
+        if not allow_confirmation_issue or internal.get("large_matrix_confirmation") is not None:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            ) from exc
+        try:
+            confirmation_token = issue_large_matrix_confirmation(internal)
+            confirmed_request = dict(internal)
+            confirmed_request["large_matrix_confirmation"] = confirmation_token
+            validated_with_token = validate_project_matrix_request(confirmed_request)
+            validated = type(validated_with_token)(
+                request=validated_with_token.request,
+                combination_count=validated_with_token.combination_count,
+                request_fingerprint=validated_with_token.request_fingerprint,
+                warning=validated_with_token.warning,
+                confirmation_required=True,
+                confirmation_verified=False,
+            )
+        except ProjectMatrixValidationError as token_exc:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            ) from token_exc
+    except ProjectMatrixValidationError as exc:
+        raise ProjectMatrixBridgeError(
+            "invalid_project_matrix_request", "Invalid project matrix request", 400
+        ) from exc
+
+    request = validated.request
+    if prepared is not None and persist_prepared_questions:
+        _persist_prepared_project_questions(
+            prepared, project_id=project_id, workspace=workspace
+        )
+    elif prepared is None and request.questions_source_type == "question_set":
+        try:
+            workspace.load_question_set(
+                project_id,
+                str(request.question_set_id),
+                expected_content_sha256=str(request.question_set_content_sha256),
+            )
+        except Exception as exc:
+            raise ProjectMatrixBridgeError(
+                "invalid_project_matrix_request", "Invalid project matrix request", 400
+            ) from exc
+    return dataset_id, project_id, validated, confirmation_token, prepared
+
+
+def _project_matrix_stages(
+    project_id: str,
+    workspace: ProjectWorkspace,
+    *,
+    includes_reranking: bool,
+) -> dict[str, list[str]]:
+    indexes = workspace.layout(project_id)["indexes"]
+    stale = ["indexes"] if indexes.is_dir() and any(indexes.iterdir()) else []
+    required = [
+        "chunking",
+        "embedding",
+        "vector_store",
+        "retrieval",
+    ]
+    if includes_reranking:
+        required.append("reranking")
+    required.append("publication")
+    return {
+        "reusable": ["extraction"],
+        "stale": stale,
+        "required": required,
+    }
+
+
+def preflight_project_matrix(
+    payload: Any,
+    *,
+    root: Path = ROOT,
+    workspace: ProjectWorkspace | None = None,
+) -> dict[str, Any]:
+    """Validate an uploaded-project matrix without creating a run."""
+    workspace = workspace or ProjectWorkspace(USER_PROJECTS_DIR)
+    dataset_id, project_id, validated, confirmation_token, prepared = (
+        _validate_project_matrix_bridge_request(
+            payload,
+            root=Path(root).resolve(),
+            workspace=workspace,
+            allow_confirmation_issue=True,
+            persist_prepared_questions=False,
+        )
+    )
+    response = {
+        "ok": True,
+        "dataset_id": dataset_id,
+        "project_id": project_id,
+        "combination_count": validated.combination_count,
+        "request_fingerprint": validated.request_fingerprint,
+        "warning": validated.warning,
+        "confirmation_required": validated.confirmation_required,
+        "confirmation_verified": validated.confirmation_verified,
+        "confirmation_token": confirmation_token,
+        "stages": _project_matrix_stages(
+            project_id,
+            workspace,
+            includes_reranking=bool(validated.request.rerankers),
+        ),
+    }
+    if prepared is not None:
+        response.update(
+            groundtruth_id=prepared.groundtruth_id,
+            question_mode=prepared.question_mode,
+            question_count=prepared.question_count,
+        )
+    return response
+
+
+def _publish_project_matrix_request(path: Path, envelope: dict[str, Any]) -> None:
+    encoded = (json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o400)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def launch_project_matrix(
+    payload: Any,
+    *,
+    root: Path = ROOT,
+    workspace: ProjectWorkspace | None = None,
+) -> dict[str, Any]:
+    """Revalidate, publish, and launch one isolated uploaded-project matrix."""
+    workspace = workspace or ProjectWorkspace(USER_PROJECTS_DIR)
+    dataset_id, project_id, validated, _confirmation_token, prepared = (
+        _validate_project_matrix_bridge_request(
+            payload,
+            root=Path(root).resolve(),
+            workspace=workspace,
+            allow_confirmation_issue=False,
+            persist_prepared_questions=True,
+        )
+    )
+    run_id = workspace.new_run_id()
+    run_root: Path | None = None
+    try:
+        layout = workspace.create_run_layout(project_id, run_id)
+        run_root = layout["root"]
+        envelope = {
+            "schema_version": 1,
+            "request": validated.request.to_dict(),
+            "request_fingerprint": validated.request_fingerprint,
+            "combination_count": validated.combination_count,
+        }
+        _publish_project_matrix_request(run_root / "request.json", envelope)
+        command = [
+            sys.executable,
+            "scripts/run_project_matrix.py",
+            "--project-id",
+            project_id,
+            "--run-id",
+            run_id,
+        ]
+        launched = launch_job(command)
+    except Exception as exc:
+        if run_root is not None and run_root.is_dir() and not run_root.is_symlink():
+            shutil.rmtree(run_root, ignore_errors=True)
+        if isinstance(exc, ProjectMatrixBridgeError):
+            raise
+        raise ProjectMatrixBridgeError(
+            "project_matrix_launch_failed", "Project matrix could not be launched", 500
+        ) from exc
+
+    safe_job = {
+        key: launched[key]
+        for key in ("job_id", "running", "exit_code", "started_at")
+        if key in launched
+    }
+    return {
+        "ok": True,
+        "dataset_id": dataset_id,
+        "project_id": project_id,
+        "run_id": run_id,
+        "combination_count": validated.combination_count,
+        "request_fingerprint": validated.request_fingerprint,
+        "job": safe_job,
+    }
 
 
 def project_result_service() -> ProjectRunResultService:
@@ -1823,6 +2549,78 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {
+            "/api/run/preflight-project-matrix",
+            "/api/run/project-matrix",
+        }:
+            request_id = uuid.uuid4().hex
+            content_length = _parse_content_length(self.headers)
+            if content_length is None:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project matrix request", request_id),
+                    400,
+                )
+                return
+            media_type = str(self.headers.get("Content-Type", "")).partition(";")[0].strip().lower()
+            if media_type != "application/json":
+                self.send_json(
+                    api_error("unsupported_media_type", "Project matrix request must be JSON", request_id),
+                    415,
+                )
+                return
+            try:
+                max_json_bytes = dashboard_upload_limits().max_json_bytes
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            if content_length > max_json_bytes:
+                self.close_connection = True
+                self.send_json(
+                    api_error("request_too_large", "Project matrix request is too large", request_id),
+                    413,
+                )
+                return
+            reader = _BoundedRequestReader(self.rfile, content_length)
+            body = reader.read(content_length)
+            if reader.remaining != 0:
+                self.close_connection = True
+                self.send_json(
+                    api_error("malformed_request", "Malformed project matrix request", request_id),
+                    400,
+                )
+                return
+
+            def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                result: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate JSON key")
+                    result[key] = value
+                return result
+
+            try:
+                payload = json.loads(
+                    body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+                )
+                if parsed.path == "/api/run/preflight-project-matrix":
+                    response = preflight_project_matrix(payload)
+                else:
+                    response = launch_project_matrix(payload)
+            except (UnicodeError, json.JSONDecodeError, ValueError):
+                self.send_json(
+                    api_error("invalid_project_matrix_request", "Invalid project matrix request", request_id),
+                    400,
+                )
+                return
+            except ProjectMatrixBridgeError as exc:
+                self.send_json(api_error(exc.code, exc.public_message, request_id), exc.status)
+                return
+            except Exception:
+                self.send_json(api_error("internal_error", "Internal server error", request_id), 500)
+                return
+            self.send_json(response)
+            return
         if parsed.path == "/api/upload-dataset":
             request_id = uuid.uuid4().hex
             content_length = _parse_content_length(self.headers)
@@ -1942,14 +2740,12 @@ class Handler(SimpleHTTPRequestHandler):
                         ROOT, original, content, str(label_field)
                     )
                 else:
-                    payload = create_user_project_upload(
+                    internal_payload = create_user_project_upload(
                         original_name=original,
                         content=content,
                         label=str(label_field),
                     )
-                    project_id = payload.get("project_id")
-                    if project_id:
-                        payload["source_id"] = f"project:{project_id}"
+                    payload = public_project_upload_payload(internal_payload)
             except ValueError:
                 self.send_json(
                     api_error("upload_validation_failed", "Upload validation failed", request_id),
