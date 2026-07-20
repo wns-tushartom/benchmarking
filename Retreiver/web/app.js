@@ -1274,11 +1274,15 @@ function renderCanonicalResultPayload(payload) {
   setText('bestLatencyNote', fastest
     ? `${pipelineLabel(fastest)} · avg/query`
     : (officialMatrix && !stable ? 'Final latency winner pending full matrix' : 'average query latency'));
-  const recommendationPayload = stable ? payload : {...payload, rows: []};
-  renderRecommendationSource(recommendationPayload);
+  renderRecommendationSource(payload);
   if (!stable) {
-    setText('recommendationStatus', 'Partial matrix · recommendations locked');
-    setText('recommendationModeNote', 'Completed rows remain visible in Metrics. Final winners unlock only after every configured combination has a complete metric set.');
+    const evaluated = fmtInt(payload.evaluated ?? rows.length);
+    const configured = fmtInt(payload.configured ?? 180);
+    setText('recommendationStatus', `Provisional recommendations · ${evaluated}/${configured} complete`);
+    setText(
+      'recommendationModeNote',
+      `Rankings update as validated 500-query results arrive. Final winners require ${configured}/${configured}.`,
+    );
   }
   recommendationState.active = payload;
   renderMetricsSource(payload);

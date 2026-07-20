@@ -182,7 +182,7 @@ def test_baseline_admission_requires_trusted_complete_exact_official_rows() -> N
     result = _run_node(
         """
 const metrics = {
-  evaluated_queries:5,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,
+  evaluated_queries:500,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,
   mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,
   no_hit_queries:1,avg_latency_seconds:.03,
 };
@@ -238,18 +238,22 @@ def test_official_status_and_exact_key_admission_fail_closed() -> None:
     result = _run_node(
         """
 const metrics = {
-  evaluated_queries:5,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,
+  evaluated_queries:500,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,
   mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,
   no_hit_queries:1,avg_latency_seconds:.03,official_provenance:'trusted',
 };
-const expected = ['c|e|FAISS|bge-reranker-base'];
+const expected = [
+  'c|e|FAISS|bge-reranker-base',
+  'short|e|FAISS|bge-reranker-base',
+];
 const payload = SourceState.officialResultPayload({benchmark_reference:{summary:[
   {...metrics,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:''},
   {...metrics,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:'unknown'},
   {...metrics,sheet:'wrong',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:'completed'},
   {...metrics,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:'completed'},
   {...metrics,sheet:'extra',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:'completed'},
-]}}, {configured:1,evaluated:99,expected_keys:expected});
+  {...metrics,sheet:'short',evaluated_queries:5,embedding:'e',store:'FAISS',reranker:'bge-reranker-base',status:'completed'},
+]}}, {configured:2,evaluated:99,expected_keys:expected});
 const normalized = SourceState.normalizeResultPayload({rows:[{combo_id:'blank'},{combo_id:'unknown',status:'unknown'}]});
 console.log(JSON.stringify({
   rows: payload.rows.map(row => row.combo_id),
@@ -268,8 +272,9 @@ console.log(JSON.stringify({
             "c|e|FAISS|bge-reranker-base",
             "wrong|e|FAISS|bge-reranker-base",
             "extra|e|FAISS|bge-reranker-base",
+            "short|e|FAISS|bge-reranker-base",
         ],
-        "matrix_complete": True,
+        "matrix_complete": False,
         "evaluated": 1,
         "statuses": [None, "unknown"],
     }

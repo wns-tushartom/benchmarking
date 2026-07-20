@@ -54,7 +54,7 @@
     const invalid = OFFICIAL_METRICS.filter(field => finite(row?.[field]) === null);
     const reject = field => { if (!invalid.includes(field)) invalid.push(field); };
     const queryCount = finite(row?.evaluated_queries);
-    if (queryCount === null || queryCount <= 0 || !Number.isInteger(queryCount)) reject('evaluated_queries');
+    if (queryCount !== 500 || !Number.isInteger(queryCount)) reject('evaluated_queries');
 
     [
       'recall_at_1', 'recall_at_3', 'recall_at_5', 'recall_at_10',

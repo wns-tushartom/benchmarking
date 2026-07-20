@@ -455,7 +455,7 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260717-project-matrix" in index
+    assert "/app.js?v=20260720-provisional-recommendations" in index
     assert "/styles.css?v=20260716-meeting-hardening" in index
     assert "20260709-query-ui" not in index
 
@@ -1190,7 +1190,7 @@ const context={{console,DashboardSourceState:require({str(source_state)!r}),docu
 vm.createContext(context);
 const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(code+`
-const metric={{evaluated_queries:5,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,no_hit_queries:1,avg_latency_seconds:.03,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',official_provenance:'trusted'}};
+const metric={{evaluated_queries:500,recall_at_1:.5,recall_at_3:.6,recall_at_5:.7,recall_at_10:.8,mrr:.65,precision_at_5:.4,ndcg_at_5:.68,avg_first_relevant_rank:1.5,no_hit_queries:1,avg_latency_seconds:.03,sheet:'c',embedding:'e',store:'FAISS',reranker:'bge-reranker-base',official_provenance:'trusted'}};
 benchmarkOptions={{chunkers:['c'],embeddings:['e'],vector_stores:['FAISS'],rerankers:['bge-reranker-base']}};
 const expected='c|e|FAISS|bge-reranker-base';
 state={{operational:{{evaluation:{{summary:[

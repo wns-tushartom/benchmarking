@@ -43,7 +43,7 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert 'href="/styles.css?v=20260716-meeting-hardening"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/app.js?v=20260717-project-matrix'
+        '/app.js?v=20260720-provisional-recommendations'
     )
 
     for endpoint in (
@@ -558,3 +558,75 @@ console.log(JSON.stringify({{completed:result.completed.map(row=>row.combo_id),q
     proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(proc.stdout) == {"completed": ["trusted"], "quality": "trusted"}
+
+
+def test_partial_official_matrix_renders_provisional_recommendations_but_locks_overview() -> None:
+    script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const elements = {{}};
+function element(id) {{
+  return elements[id] ||= {{
+    id, value:'', textContent:'', innerHTML:'', hidden:false,
+    options:[], selectedOptions:[],
+    classList:{{toggle(){{}},add(){{}},remove(){{}}}},
+    addEventListener(){{}}, querySelectorAll(){{return[];}}, setAttribute(){{}},
+  }};
+}}
+const context = {{
+  console, AbortController, URLSearchParams,
+  PipelineRecommendations: {{}},
+  document: {{
+    getElementById:element,
+    querySelectorAll(){{return[];}},
+    addEventListener(){{}},
+    body:{{insertAdjacentHTML(){{}}}},
+  }},
+  window: {{}}, location:{{hash:'#compare'}}, history:{{replaceState(){{}}}},
+  setTimeout, clearTimeout,
+  fetch(){{throw new Error('unexpected fetch');}},
+}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync({str(SOURCE_STATE)!r}, 'utf8'), context);
+const source = fs.readFileSync({str(APP)!r}, 'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(source + `
+  renderRecommendationSource = payload => {{ globalThis.__recommendationPayload = payload; return {{}}; }};
+  renderMetricsSource = () => {{}};
+  syncSourceSelectorControls = () => {{}};
+  renderPipelineComparison = () => {{}};
+  state.operational = {{evaluation:{{}}}};
+  renderCanonicalResultPayload({{
+    source_type:'official',
+    result_set:'official',
+    scoring_mode:'retrieval_labels',
+    matrix_complete:false,
+    stability_status:'partial',
+    configured:180,
+    evaluated:120,
+    rows:[{{
+      combo_id:'c|e|Qdrant|bge-reranker-base',
+      status:'completed',
+      chunker_id:'c',embedding_id:'e',vector_store_id:'Qdrant',
+      reranker_id:'bge-reranker-base',recall_at_5:.8,avg_latency_seconds:.2,
+    }}],
+  }});
+  globalThis.__result = {{
+    recommendationRows:globalThis.__recommendationPayload.rows.length,
+    recommendationStatus:document.getElementById('recommendationStatus').textContent,
+    recommendationModeNote:document.getElementById('recommendationModeNote').textContent,
+    bestR5Status:document.getElementById('bestR5Status').textContent,
+    bestLatencyStatus:document.getElementById('bestLatencyStatus').textContent,
+    bestConfigNote:document.getElementById('bestConfigNote').textContent,
+  }};
+`, context);
+console.log(JSON.stringify(context.__result));
+"""
+    proc = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["recommendationRows"] == 1
+    assert result["recommendationStatus"] == "Provisional recommendations · 120/180 complete"
+    assert "validated 500-query results arrive" in result["recommendationModeNote"]
+    assert result["bestR5Status"] == "—"
+    assert result["bestLatencyStatus"] == "—"
+    assert "Final winner pending" in result["bestConfigNote"]
