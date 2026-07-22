@@ -17,6 +17,11 @@
           <button id="refreshBtn" type="button">Refresh live data</button>
           <span id="statusPill" class="status-pill muted-pill">Loading</span>
         </div>
+        <div class="global-source-bar" aria-label="Global data context">
+          <label>Dataset<select id="globalDataset"></select></label>
+          <label>Linked ground truth<select id="globalGroundtruth" disabled></select></label>
+          <small id="globalSourceContext">Loading linked dataset context…</small>
+        </div>
       </div>
       <div class="hero-panel">
         <div class="signal-line"><span>Mode</span><strong id="modeLabel">Live artifacts</strong></div>

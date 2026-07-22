@@ -787,7 +787,7 @@ function renderEvaluation(evaluation, pipelineState) {
   const referenceNote = referenceCount ? ` · ${referenceCount} benchmark artifact configs` : '';
   $('qualityHint').textContent = filteredRows.length ? `${filteredRows.length}/${displayRows.length} configs · ${evidenceRows} rows${referenceNote}` : 'No matching configs';
   $('qualityInsight').innerHTML = bestRow ? `<strong>Current winner:</strong> ${esc(pipelineLabel(bestRow))} <span>Score ${displayScore(bestRow)} · R@5 ${(num(bestRow.recall_at_5)*100).toFixed(1)}% · MRR ${fmt(bestRow.mrr,3)} · ${fmt(bestRow.avg_latency_seconds,3)}s avg/query across ${esc(bestRow.evaluated_queries || '—')} queries</span>` : '<span>No evaluated combination matches these filters.</span>';
-  table($('qualityTable'), filteredRows.slice(0, 60), [
+  table($('qualityTable'), filteredRows, [
     {key:'serial', label:'S/No.', render:(r,i)=>String(i + 1)},
     {key:'winner_score', label:'Score', render:displayScore},
     {key:'sheet', label:'Chunker'},
@@ -1015,6 +1015,45 @@ async function uploadDataset(ev) {
   }
 }
 
+function linkedGroundtruthLabel(project) {
+  const groundtruth = project?.groundtruth || {};
+  if (groundtruth.valid !== true) return 'No valid linked ground truth';
+  const path = String(groundtruth.path || groundtruth.name || 'validated ground truth');
+  const name = path.split(/[\\/]/).filter(Boolean).pop() || 'validated ground truth';
+  return `Linked ground truth · ${name}`;
+}
+
+function syncGlobalSourceControls(projects = state.operational?.user_projects || []) {
+  const dataset = $('globalDataset');
+  const groundtruth = $('globalGroundtruth');
+  const context = $('globalSourceContext');
+  if (!dataset || !groundtruth || !context) return;
+  const selectedId = $('projectSelect')?.value || '';
+  dataset.innerHTML = '<option value="">Official WNS dataset</option>' + (projects || []).map(project => {
+    const mode = project.groundtruth?.valid === true ? 'ground truth linked' : 'evidence only';
+    return `<option value="${esc(project.project_id)}">${esc(project.label || project.project_id)} · ${mode}</option>`;
+  }).join('');
+  dataset.value = (projects || []).some(project => project.project_id === selectedId) ? selectedId : '';
+  const project = (projects || []).find(item => item.project_id === dataset.value) || null;
+  if (!project) {
+    groundtruth.innerHTML = '<option value="official">Official WNS ground truth</option>';
+    groundtruth.value = 'official';
+    groundtruth.disabled = true;
+    context.textContent = 'Official WNS dataset · linked official ground truth';
+    context.setAttribute?.('data-mode', 'official');
+    return;
+  }
+  const valid = project.groundtruth?.valid === true;
+  groundtruth.innerHTML = `<option value="${valid ? 'linked' : 'none'}">${esc(linkedGroundtruthLabel(project))}</option>`;
+  groundtruth.value = valid ? 'linked' : 'none';
+  groundtruth.disabled = true;
+  const setupState = project.setup?.state || 'not_started';
+  context.textContent = valid
+    ? `${project.label || project.project_id} · ${linkedGroundtruthLabel(project)} · setup ${setupState}`
+    : `${project.label || project.project_id} · evidence-only mode · no valid linked ground truth`;
+  context.setAttribute?.('data-mode', valid ? 'evaluated' : 'evidence_only');
+}
+
 function renderUserProjects(projects) {
   const el = $('projectSelect');
   if (!el) return;
@@ -1048,6 +1087,7 @@ function renderDatasetSetup(project) {
 
 function syncDatasetBinding() {
   const project = selectedProject();
+  syncGlobalSourceControls();
   const groundtruth = project?.groundtruth || {};
   const setup = project?.setup || {};
   const valid = groundtruth.valid === true;
@@ -1542,6 +1582,11 @@ document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListe
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
 $('projectSelect')?.addEventListener('change', syncDatasetBinding);
+$('globalDataset')?.addEventListener('change', () => {
+  const projectSelect = $('projectSelect');
+  if (projectSelect) projectSelect.value = $('globalDataset')?.value || '';
+  syncDatasetBinding();
+});
 $('projectSetupBtn')?.addEventListener('click', () => startProjectSetup().catch(err => { const status = $('datasetSetupStatus'); if (status) status.textContent = `Dataset setup error: ${err}`; }));
 $('projectQueryBtn')?.addEventListener('click', () => runProjectQuery().catch(err => { $('projectQueryStatus').textContent='Error'; table($('projectQueryTable'), [{error:String(err)}], [{key:'error', label:'Error'}]); }));
 loadOptions().then(refresh).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });

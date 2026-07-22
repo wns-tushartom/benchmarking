@@ -56,45 +56,58 @@ def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(
 
     rows = generate_matrix(load_benchmark_config(Path("configs/benchmark.local.json")))
     def metric(row: dict, modular: bool = False) -> dict:
-        base = {"recall_at_5": "0.5", "mrr": "0.4", "ndcg_at_5": "0.3", "avg_latency_seconds": "0.2"}
+        base = {"evaluated_queries": "500", "recall_at_5": "0.5", "mrr": "0.4", "ndcg_at_5": "0.3", "avg_latency_seconds": "0.2"}
         if modular:
             return {"chunker": row["chunker"], "embedding": row["embedding"], "vector_store": row["vector_store"], "reranker": row["reranker"], "query_count": "500", "recall_at_5": "0.5", "mrr": "0.4", "ndcg_at_5": "0.3", "avg_latency_ms": "200"}
         return {"sheet": row["chunker"], "embedding": row["embedding"], "store": row["vector_store"], "reranker": row["reranker"], **base}
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        _write_csv(root / "eval" / "groundtruth_eval_summary.csv", [metric(r) for r in rows[:135]])
-        _write_csv(root / "reranked" / "groundtruth_eval_summary.csv", [metric(r) for r in rows[135:165]])
-        _write_csv(root / "runs" / "archive" / "faiss_noaws_complete" / "modular_summary.csv", [metric(r, modular=True) for r in rows[165:]])
+        _write_csv(root / "evaluation" / "groundtruth_eval_summary.csv", [metric(r) for r in rows[:90]])
+        _write_csv(root / "evaluation_reranked" / "groundtruth_eval_summary.csv", [metric(r) for r in rows[90:120]])
+        recovery_rows = [metric(r, modular=True) for r in rows[120:]]
+        _write_csv(root / "runs" / "official_recovery_missing60_20260720_074219" / "modular_summary.csv", recovery_rows + recovery_rows[:1])
         extra_rows = []
         for embedding in ["jina_v3", "gte_multilingual_base", "openai_text-embedding-3-large"]:
             for store in ["Qdrant", "PGVector", "Weaviate"]:
                 for reranker in ["Amazon Rerank v1", "Qwen3:4B Rerank", "bge-reranker-base"]:
-                    extra_rows.append({"chunker": "semantic_split", "embedding": embedding, "vector_store": store, "reranker": reranker, "query_count": "500", "recall_at_5": "0.99", "mrr": "0.99", "avg_latency_ms": "200"})
+                    extra_rows.append({"chunker": "semantic_split", "embedding": embedding, "vector_store": store, "reranker": reranker, "query_count": "500", "recall_at_5": "0.99", "mrr": "0.99", "ndcg_at_5": "0.99", "avg_latency_ms": "200"})
         _write_csv(root / "runs" / "archive" / "non_official_old_experiment" / "modular_summary.csv", extra_rows)
         old = dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR
-        dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = root / "eval", root / "runs" / "latest", root / "full", root / "gt"
+        dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = root / "evaluation", root / "runs" / "latest", root / "full", root / "gt"
         try:
             evaluation = dashboard.read_evaluation()
-            evaluation["reranked"] = dashboard.read_evaluation_dir(root / "reranked")
+            evaluation["reranked"] = dashboard.read_evaluation_dir(root / "evaluation_reranked")
+            pipeline_state = dashboard.pipeline_state_rows()
         finally:
             dashboard.EVAL_DIR, dashboard.MODULAR_DIR, dashboard.FULL_DIR, dashboard.GROUNDTRUTH_DIR = old
 
-    assert len(evaluation["benchmark_reference"]["summary"]) == 15
+    assert len(pipeline_state) == 180
     app = Path(__file__).resolve().parents[1] / "web" / "app.js"
     payload = json.dumps(evaluation)
+    state_payload = json.dumps(pipeline_state)
     js = f"""
 const fs=require('fs'), vm=require('vm');
 const context={{console,document:{{getElementById(){{return {{value:'all',textContent:'',innerHTML:'',classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>{{}},text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
-vm.runInContext(code + `globalThis.__rows=evaluatedRows({payload});`, context);
+vm.runInContext(code + `globalThis.__rows=evaluatedRows({payload}, {state_payload});`, context);
 const keys=new Set(context.__rows.map(r=>`${{r.sheet}}|${{r.embedding}}|${{r.store}}|${{r.reranker||'none'}}`));
 const byStore=context.__rows.reduce((a,r)=>(a[r.store]=(a[r.store]||0)+1,a),{{}});
-if (keys.size !== 180 || context.__rows.length !== 180 || byStore.FAISS !== 45) {{ console.error(JSON.stringify({{rows:context.__rows.length, keys:keys.size, byStore}})); process.exit(1); }}
+const openai=context.__rows.filter(r=>String(r.embedding).includes('openai')).length;
+const amazon=context.__rows.filter(r=>String(r.reranker).includes('Amazon')).length;
+if (keys.size !== 180 || context.__rows.length !== 180 || byStore.FAISS !== 45 || openai !== 60 || amazon !== 60) {{ console.error(JSON.stringify({{rows:context.__rows.length, keys:keys.size, byStore, openai, amazon}})); process.exit(1); }}
 """
-    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    with tempfile.TemporaryDirectory() as js_td:
+        script_path = Path(js_td) / "verify_metrics.js"
+        script_path.write_text(js, encoding="utf-8")
+        proc = subprocess.run(["node", str(script_path)], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_metrics_table_does_not_silently_cap_complete_configs_at_60():
+    app = Path(__file__).resolve().parents[1] / "web" / "app.js"
+    assert "filteredRows.slice(0, 60)" not in app.read_text(encoding="utf-8")
 
 
 def test_benchmark_details_generate_aws_faiss_top5_evidence_rows():

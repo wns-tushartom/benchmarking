@@ -389,6 +389,23 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
     return sources
 
 
+def official_metric_sources() -> list[tuple[str, Path]]:
+    sources = [
+        ("groundtruth_evaluation", EVAL_DIR / "groundtruth_eval_summary.csv"),
+        ("groundtruth_evaluation_reranked", EVAL_DIR.parent / "evaluation_reranked" / "groundtruth_eval_summary.csv"),
+        *benchmark_reference_sources(),
+    ]
+    unique: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for source, path in sources:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append((source, path))
+    return unique
+
+
 def official_matrix_keys() -> set[tuple[str, str, str, str]]:
     cfg = load_benchmark_config(CONFIG_PATH)
     return {
@@ -447,7 +464,7 @@ def pipeline_state_snapshot() -> tuple[list[dict[str, Any]], int]:
     official_keys = official_matrix_keys()
     skipped_non_official = 0
     candidates: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-    for source, path in benchmark_reference_sources():
+    for source, path in official_metric_sources():
         for row in read_csv(path):
             normalized = normalized_benchmark_row(row, source)
             key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
