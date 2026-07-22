@@ -23,6 +23,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -271,27 +272,67 @@ def get_vectors(
     return vectors
 
 
-def make_store(store_name: str, sheet: str, embedding: str):
-    prefix = f"wns_{safe_name(sheet)[:24]}_{safe_name(embedding)[:16]}"
+def store_prefix(collection_prefix: str, sheet: str, embedding: str) -> str:
+    return f"{safe_name(collection_prefix)}_{safe_name(sheet)[:24]}_{safe_name(embedding)[:16]}"
+
+
+def weaviate_class_prefix(prefix: str) -> str:
+    words = [word for word in re.split(r"[^A-Za-z0-9]+", prefix) if word]
+    return "Wns" + "".join(word[:1].upper() + word[1:] for word in words)
+
+
+def resolve_rooted_override_path(value: str, default: Path) -> Path:
+    if not value:
+        return default
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("Override paths must be relative and rooted under repository ROOT")
+    resolved = (ROOT / path).resolve()
+    try:
+        resolved.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("Override paths must be rooted under repository ROOT") from exc
+    return resolved
+
+
+def resolve_runtime_paths(output_dir: str, cache_dir: str, faiss_index_root: str) -> dict[str, Path]:
+    return {
+        "output_dir": resolve_rooted_override_path(output_dir, ROOT / "data" / "db_ingestion_runs"),
+        "cache_dir": resolve_rooted_override_path(cache_dir, ROOT / "data" / "embedding_cache"),
+        "faiss_index_root": resolve_rooted_override_path(faiss_index_root, ROOT / "data" / "faiss_indexes"),
+    }
+
+
+def make_store(store_name: str, sheet: str, embedding: str, collection_prefix: str = "wns", faiss_index_root: Path | None = None):
+    prefix = store_prefix(collection_prefix, sheet, embedding)
     if store_name == "Qdrant":
         return QdrantVectorStoreAdapter(name="Qdrant", collection_prefix=prefix)
     if store_name == "PGVector":
         return PGVectorStoreAdapter(name="PGVector", table_prefix=prefix)
     if store_name == "Weaviate":
-        return WeaviateVectorStoreAdapter(name="Weaviate", class_prefix="Wns" + safe_name(sheet)[:20] + safe_name(embedding)[:10])
+        return WeaviateVectorStoreAdapter(name="Weaviate", class_prefix=weaviate_class_prefix(prefix))
     if store_name == "FAISS":
-        index_dir = ROOT / "data" / "faiss_indexes" / f"{safe_name(sheet)}_{safe_name(embedding)}"
+        index_root = faiss_index_root or ROOT / "data" / "faiss_indexes"
+        index_dir = index_root / f"{safe_name(sheet)}_{safe_name(embedding)}"
         return FaissVectorStoreAdapter(name="FAISS", index_dir=str(index_dir), index_type="HNSW")
     raise ValueError(f"unknown store: {store_name}")
 
 
-def upsert_and_check(store_name: str, sheet: str, embedding: str, chunks: list[Chunk], vectors: list[list[float]]) -> dict[str, Any]:
+def upsert_and_check(
+    store_name: str,
+    sheet: str,
+    embedding: str,
+    chunks: list[Chunk],
+    vectors: list[list[float]],
+    collection_prefix: str = "wns",
+    faiss_index_root: Path | None = None,
+) -> dict[str, Any]:
     if not chunks:
         raise RuntimeError(f"{sheet} has zero chunks; refusing to write an ok ingestion row")
     if not vectors:
         raise RuntimeError(f"{embedding} produced zero vectors; refusing to write an ok ingestion row")
     validate_vectors_for_chunks(chunks, vectors, int(EMBEDDING_CONFIGS[embedding]["dimensions"]), embedding)
-    store = make_store(store_name, sheet, embedding)
+    store = make_store(store_name, sheet, embedding, collection_prefix, faiss_index_root)
     start = time.perf_counter()
     metrics = store.upsert(chunks, vectors)
     hits = store.search(vectors[0], top_k=5)
@@ -322,6 +363,10 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=0, help="Embedding batch size. 0 = model default")
     parser.add_argument("--limit", type=int, default=0, help="Limit chunks per sheet for smoke runs")
     parser.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
+    parser.add_argument("--output-dir", default="")
+    parser.add_argument("--cache-dir", default="")
+    parser.add_argument("--collection-prefix", default="wns")
+    parser.add_argument("--faiss-index-root", default="")
     parser.add_argument("--force-embed", action="store_true")
     parser.add_argument("--skip-existing-store-success", action="store_true")
     args = parser.parse_args()
@@ -333,13 +378,15 @@ def main() -> int:
     if not workbook.exists():
         raise FileNotFoundError(workbook)
 
-    run_dir = ROOT / "data" / "db_ingestion_runs" / args.run_id
-    cache_dir = ROOT / "data" / "embedding_cache"
+    runtime_paths = resolve_runtime_paths(args.output_dir, args.cache_dir, args.faiss_index_root)
+    run_dir = runtime_paths["output_dir"] if args.output_dir else runtime_paths["output_dir"] / args.run_id
+    cache_dir = runtime_paths["cache_dir"]
+    faiss_index_root = runtime_paths["faiss_index_root"]
     summary_csv = run_dir / "summary.csv"
     status_json = run_dir / "status.json"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    log(f"run_id={args.run_id} workbook={workbook}")
+    log(f"run_id={args.run_id} workbook={workbook} output_dir={run_dir} cache_dir={cache_dir} collection_prefix={safe_name(args.collection_prefix)} faiss_index_root={faiss_index_root}")
     write_json(run_dir / "config.json", vars(args))
 
     completed_keys: set[tuple[str, str, str]] = set()
@@ -382,7 +429,7 @@ def main() -> int:
                 write_json(status_json, {"current": {"sheet": sheet, "embedding": embedding, "store": store_name}, "done_tasks": done_tasks, "total_tasks": total_tasks, "failures": len(failures), "updated_at": datetime.now().isoformat()})
                 try:
                     log(f"UPSERT sheet={sheet} embedding={embedding} store={store_name}")
-                    result = upsert_and_check(store_name, sheet, embedding, chunks, vectors)
+                    result = upsert_and_check(store_name, sheet, embedding, chunks, vectors, args.collection_prefix, faiss_index_root)
                     result.update({"status": "ok", "error": "", "created_at": datetime.now().isoformat()})
                     append_csv(summary_csv, result)
                     log(f"OK sheet={sheet} embedding={embedding} store={store_name} hits={result['search_hits']} seconds={result['total_store_seconds']}")

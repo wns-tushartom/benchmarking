@@ -4,7 +4,7 @@
 Expected columns are flexible. At minimum provide a query column:
 - query/question
 Optional relevance columns:
-- pdf_name/expected_pdf/relevant_pdf/document
+- pdf_name/expected_pdf/relevant_pdf/source_document/document
 - paragraph/expected_text/context/ground_truth/answer
 
 A hit is relevant when expected PDF matches a retrieved PDF, or expected text overlaps
@@ -26,7 +26,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 QUERY_COLS = ["query", "question", "user_query", "prompt"]
-PDF_COLS = ["pdf_name", "expected_pdf", "relevant_pdf", "document", "file", "filename"]
+PDF_COLS = ["pdf_name", "expected_pdf", "relevant_pdf", "source_document", "document", "file", "filename"]
 TEXT_COLS = ["paragraph", "expected_text", "context", "ground_truth", "ground truth", "answer", "relevant_text"]
 ID_COLS = ["id", "query_id", "qid"]
 
@@ -73,8 +73,7 @@ def load_xlsx(path: Path) -> list[dict[str, Any]]:
     return [dict(zip(headers, r)) for r in rows[1:] if any(v is not None and str(v).strip() for v in r)]
 
 
-def load_groundtruth(path: Path) -> list[dict[str, str]]:
-    raw = load_xlsx(path) if path.suffix.lower() in {".xlsx", ".xlsm"} else load_csv(path)
+def load_groundtruth_rows(raw: list[dict[str, Any]]) -> list[dict[str, str]]:
     out = []
     for i, row in enumerate(raw, 1):
         query = first(row, QUERY_COLS)
@@ -89,6 +88,11 @@ def load_groundtruth(path: Path) -> list[dict[str, str]]:
     return out
 
 
+def load_groundtruth(path: Path) -> list[dict[str, str]]:
+    raw = load_xlsx(path) if path.suffix.lower() in {".xlsx", ".xlsm"} else load_csv(path)
+    return load_groundtruth_rows(raw)
+
+
 def load_smokes(path: Path) -> list[dict[str, Any]]:
     rows = []
     for p in sorted(path.glob("*.json")):
@@ -96,7 +100,11 @@ def load_smokes(path: Path) -> list[dict[str, Any]]:
             continue
         try:
             obj = json.loads(p.read_text(encoding="utf-8"))
-            obj["artifact"] = str(p.relative_to(ROOT))
+            try:
+                artifact_path = p.resolve(strict=True).relative_to(ROOT)
+            except (OSError, ValueError):
+                artifact_path = p
+            obj["artifact"] = str(artifact_path)
             rows.append(obj)
         except Exception:
             pass

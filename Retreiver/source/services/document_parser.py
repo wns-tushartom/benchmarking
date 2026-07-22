@@ -67,13 +67,23 @@ try:
 except Exception:
     pdf_parse_main = None  # type: ignore
 
-_cli_candidates = [
-    shutil.which("magic-pdf"),
-    shutil.which("mineru"),
-    str(Path(sys.executable).resolve().parent / "magic-pdf"),
-    str(Path(sys.executable).resolve().parent / "mineru"),
-]
-MAGIC_PDF_CLI = next((c for c in _cli_candidates if c and Path(c).exists()), None)
+def find_mineru_cli() -> str | None:
+    """Locate a MinerU CLI, including one installed in the active virtualenv."""
+    executable_dir = Path(sys.executable).parent
+    candidates = [
+        str(executable_dir / "mineru"),
+        shutil.which("mineru"),
+        str(executable_dir / "magic-pdf"),
+        shutil.which("magic-pdf"),
+    ]
+    return next((
+        candidate
+        for candidate in candidates
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK)
+    ), None)
+
+
+MAGIC_PDF_CLI = find_mineru_cli()
 MINERU_AVAILABLE = bool(pdf_parse_main is not None or MAGIC_PDF_CLI)
 
 # ---------------- PyPDF2 fallback ----------------
@@ -421,7 +431,8 @@ class DocumentParserService:
         if not MINERU_AVAILABLE:
             raise RuntimeError("magic-pdf (MinerU) is not available")
         try:
-            if pdf_parse_main is not None:
+            modern_cli_available = bool(MAGIC_PDF_CLI and Path(MAGIC_PDF_CLI).name == "mineru")
+            if pdf_parse_main is not None and not modern_cli_available:
                 # Older MinerU API path.
                 pdf_parse_main(
                     pdf_path=file_path,
@@ -441,6 +452,19 @@ class DocumentParserService:
                 "-o", output_path,
                 "-m", str(MINERU_PARSE_METHOD or "auto"),
             ]
+            if Path(MAGIC_PDF_CLI).name == "mineru":
+                # MinerU 3.x is the supported layout-aware local runtime.
+                # Pipeline avoids the heavyweight VLM engine while preserving
+                # structured text, figures, image crops, and table bodies.
+                cmd = [
+                    MAGIC_PDF_CLI,
+                    "-p", file_path,
+                    "-o", output_path,
+                    "-b", str(resource_param.get("mineru_backend", "pipeline")),
+                    "-m", str(MINERU_PARSE_METHOD or "auto"),
+                    "-f", "false",
+                    "-t", "true",
+                ]
             timeout_seconds = int(resource_param.get("mineru_timeout_seconds", 3600))
             env = os.environ.copy()
             env.setdefault("PYTHONUNBUFFERED", "1")
