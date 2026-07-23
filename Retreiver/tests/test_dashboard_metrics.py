@@ -527,8 +527,8 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260722-complete-ui-metrics-v3" in index
-    assert "/styles.css?v=20260722-complete-ui-metrics-v3" in index
+    assert "/app.js?v=20260723-canonical-dashboard-v4" in index
+    assert "/styles.css?v=20260723-canonical-dashboard-v4" in index
     assert "/app.js?v=20260722-complete-ui-metrics\"" not in index
     assert "/styles.css?v=20260716-meeting-hardening" not in index
     assert "20260709-query-ui" not in index
@@ -586,14 +586,6 @@ def test_evidence_browser_wording_is_clear_about_display_rows_vs_raw_artifacts()
     assert "Benchmark final top 5 evidence" in app
 
 
-def test_results_api_publishes_source_catalog_for_global_selectors() -> None:
-    root = Path(__file__).resolve().parents[1]
-    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
-
-    assert "build_source_catalog" in server
-    assert '"source_catalog": build_source_catalog(ROOT)' in server
-
-
 def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
@@ -617,7 +609,8 @@ def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
     assert "fillSourceSelect('globalDataset'" in app
     assert "fillSourceSelect('globalGroundtruth'" in app
     assert "$('globalDataset')?.addEventListener('change'" in app
-    assert "$('globalGroundtruth')?.addEventListener('change'" in app
+    assert "function syncLinkedGroundtruth" in app
+    assert "$('globalGroundtruth')?.addEventListener('change'" not in app
 
 
 def test_run_pipeline_visibly_restates_the_global_source_context() -> None:
@@ -1315,6 +1308,33 @@ state.operational.evaluation.summary=[{{...metric,status:'failed'}},{{...metric,
 renderCoverage([]); globalThis.__failed=document.getElementById('coverageTable').innerHTML;
 `,context);
 if(!context.__valid.includes('Done · open Metrics') || context.__failed.includes('Done · open Metrics')){{console.error(context.__valid,context.__failed);process.exit(1);}}
+"""
+    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_amazon_permission_block_is_reranker_specific_and_faiss_stays_runnable() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app = root / "web" / "app.js"
+    js = f"""
+const fs=require('fs'),vm=require('vm');
+const elements={{}};
+function el(id){{return elements[id] ||= {{id,value:'all',textContent:'',innerHTML:'',classList:{{toggle(){{}},add(){{}},remove(){{}}}},addEventListener(){{}},querySelectorAll(){{return[];}},setAttribute(){{}}}};}}
+const context={{console,document:{{getElementById:el,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+vm.createContext(context);
+const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
+vm.runInContext(code+`
+benchmarkOptions={{chunkers:['c'],embeddings:['e'],vector_stores:['FAISS'],rerankers:['Amazon Rerank v1','Qwen3:4B Rerank','bge-reranker-base','none']}};
+state={{operational:{{amazon_status:'blocked: AWS Bedrock credentials missing',evaluation:{{summary:[]}}}}}};
+renderCoverage([]);
+globalThis.__html=document.getElementById('coverageTable').innerHTML;
+globalThis.__qdrantBlocked=missingCoverageBlocked('Amazon Rerank v1','Qdrant');
+`,context);
+const html=context.__html;
+const runnableFaiss=(html.match(/data-store="FAISS"/g)||[]).length;
+if(!context.__qdrantBlocked || !html.includes('Amazon Rerank unavailable') || html.includes('FAISS unavailable') || runnableFaiss !== 3){{
+  console.error({{qdrantBlocked:context.__qdrantBlocked,runnableFaiss,html}}); process.exit(1);
+}}
 """
     proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr

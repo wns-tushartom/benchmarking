@@ -14,6 +14,7 @@ from benchmarking.adapters.local import load_query_cases
 from benchmarking.core.config import config_hash, dataset_hash, generate_matrix, load_benchmark_config, selected_config, technique
 from benchmarking.core.metrics import bootstrap_ci, mean, mrr, ndcg_at_k, precision_at_k, recall_at_k
 from benchmarking.core.registry import default_registry
+from scripts.dashboard_source_catalog import DEFAULT_DATASET_ID, OFFICIAL_GROUNDTRUTH_ID
 from scripts.wns_env import load_env_files
 
 
@@ -59,8 +60,8 @@ def run_experiment(
     manifest.update({
         "status": "running",
         "run_id": output_dir.name,
-        "dataset_id": "dataset:wns-default",
-        "groundtruth_id": "groundtruth:repository:qa_text_test.csv",
+        "dataset_id": DEFAULT_DATASET_ID,
+        "groundtruth_id": OFFICIAL_GROUNDTRUTH_ID,
     })
     write_json_atomic(output_dir / "manifest.json", manifest)
 

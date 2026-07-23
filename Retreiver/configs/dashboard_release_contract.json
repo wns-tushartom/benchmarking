@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "pages": [
+    "overview",
+    "quality",
+    "compare",
+    "run",
+    "evidence",
+    "hallucination",
+    "nvidia",
+    "repository",
+    "upload",
+    "ops"
+  ],
+  "dom_ids": [
+    "globalDataset",
+    "globalGroundtruth",
+    "globalSourceContext",
+    "metricsSourceContext",
+    "recommendationContext",
+    "recommendationStrip",
+    "recommendationTable",
+    "metricXAxis",
+    "metricYAxis",
+    "metricColorBy",
+    "metricBubbleBy",
+    "tradeoffChart",
+    "heatmapMetric",
+    "heatmapEmbedding",
+    "heatmapReranker",
+    "metricHeatmap",
+    "runSourceContext",
+    "runCompletePipelineBtn"
+  ],
+  "api_routes": [
+    "/api/results",
+    "/api/result-sources",
+    "/api/upload-dataset",
+    "/api/run/status",
+    "/api/run/preflight-complete-pipeline",
+    "/api/run/complete-pipeline"
+  ],
+  "matrix": {
+    "chunkers": 5,
+    "embeddings": 3,
+    "stores": 4,
+    "rerankers": 3,
+    "total": 180
+  },
+  "required_files": [
+    "web/recommendations.js",
+    "web/source-state.js",
+    "benchmarking/core/runner.py",
+    "scripts/dashboard_source_catalog.py",
+    "source/services/project_run_results.py",
+    "source/services/document_parser.py",
+    "source/services/project_documents.py"
+  ],
+  "file_tokens": {
+    "web/index.html": [
+      "20260723-canonical-dashboard-v4",
+      "id=\"tradeoffChart\"",
+      "id=\"metricHeatmap\""
+    ],
+    "web/app.js": [
+      "renderRecommendationAnalytics",
+      "renderRecommendationHeatmap",
+      "syncLinkedGroundtruth",
+      "cache: 'no-store'",
+      "/api/result-sources"
+    ],
+    "scripts/serve_benchmark_dashboard.py": [
+      "\"source_catalog\": build_source_catalog(ROOT)",
+      "/api/result-sources",
+      "resolve_source_pair"
+    ],
+    "scripts/dashboard_source_catalog.py": [
+      "linked_groundtruth_id",
+      "groundtruth_500.csv",
+      "resolve_source_pair",
+      "evidence_only"
+    ],
+    "benchmarking/core/runner.py": [
+      "DEFAULT_DATASET_ID",
+      "OFFICIAL_GROUNDTRUTH_ID"
+    ],
+    "source/services/document_parser.py": [
+      "mineru",
+      "magic-pdf"
+    ],
+    "source/services/project_documents.py": [
+      "allow_fallback=False"
+    ]
+  },
+  "forbidden_tokens": {
+    "web/index.html": [
+      "id=\"tradeoffDetails\""
+    ]
+  }
+}

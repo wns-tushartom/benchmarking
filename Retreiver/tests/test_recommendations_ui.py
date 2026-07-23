@@ -26,10 +26,13 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
         "recommendationStrip",
         "recommendationTable",
         "pricingLedger",
-        "tradeoffDetails",
+        "tradeoffChart",
+        "metricHeatmap",
+        "metricHeatmapLegend",
         "projectEvidenceDialog",
     ):
         assert f'id="{element_id}"' in index
+    assert 'id="tradeoffDetails"' not in index
 
     assert "Dataset" in index
     assert "Ground truth" in index
@@ -40,10 +43,10 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert "No-reranker baseline — measured results" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260722-complete-ui-metrics-v3"' in index
+    assert 'href="/styles.css?v=20260723-canonical-dashboard-v4"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/app.js?v=20260722-complete-ui-metrics-v3'
+        '/app.js?v=20260723-canonical-dashboard-v4'
     )
 
     for endpoint in (

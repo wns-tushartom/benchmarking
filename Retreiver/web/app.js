@@ -56,8 +56,8 @@ function amazonStatusBlocksRun() {
   return /pending|block|denied|credential|permission|expired|not configured/.test(status);
 }
 
-function missingCoverageBlocked(reranker, store) {
-  return canonicalRerankerName(reranker) === 'Amazon Rerank v1' && String(store || '').toLowerCase() === 'faiss' && amazonStatusBlocksRun();
+function missingCoverageBlocked(reranker) {
+  return canonicalRerankerName(reranker) === 'Amazon Rerank v1' && amazonStatusBlocksRun();
 }
 
 function positivePageNumber(value) {
@@ -311,8 +311,9 @@ function renderCoverage(rows) {
         const timing = v.operational_seconds ? ` <code title="Vector-store ingestion time">ingest ${fmt(v.operational_seconds, 2)}s</code>` : '';
         return `<span class="coverage-ok">ingested</span>${timing}`;
       }
-      if (missingCoverageBlocked(r.reranker, st)) {
-        return `<span class="badge warn" title="${esc(state.operational?.amazon_status || 'AWS Bedrock rerank blocked')}">blocked</span>`;
+      if (missingCoverageBlocked(r.reranker)) {
+        const reason = state.operational?.amazon_status || 'AWS Bedrock rerank permissions are unavailable';
+        return `<span class="badge warn" title="${esc(`Amazon Rerank unavailable: ${reason}`)}">Amazon Rerank unavailable</span>`;
       }
       return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}" data-reranker="${esc(r.reranker)}">Run</button>`;
     }})),
@@ -660,13 +661,13 @@ function displayScore(r) {
   return fmt(metricScore(r), 3);
 }
 
-function renderEvaluation(evaluation, syncRecommendations = true) {
+function renderEvaluation(evaluation, syncRecommendations = true, pipelineState = state.operational?.pipeline_state) {
   const rows = evaluation?.summary || [];
   const section = $('qualitySection');
   if (!section) return;
   const report = evaluation?.report || {};
   const reference = evaluation?.benchmark_reference || {};
-  const displayRows = evaluatedRows(evaluation);
+  const displayRows = evaluatedRows(evaluation, pipelineState);
   fillSelect('qualityComboFilter', [...new Set(displayRows.map(pipelineLabel))].sort(), 'All pipeline combinations');
   fillSelect('qualityChunkerFilter', uniq(displayRows, 'sheet'), 'All chunkers');
   fillSelect('qualityEmbeddingFilter', uniq(displayRows, 'embedding'), 'All embeddings');
@@ -751,7 +752,7 @@ function renderMetricsSource(payload) {
   renderEvaluation({
     summary: Array.isArray(payload?.rows) ? payload.rows : [],
     report: {groundtruth_rows: payload?.evaluated_queries || payload?.query_count || '—'},
-  }, false);
+  }, false, null);
   if (payload?.source_type === 'official' && payload?.result_set === 'official') {
     setText(
       'qualityHint',
@@ -800,12 +801,43 @@ function renderBestMethods(rows) {
   $('bestMethodGrid').innerHTML = cards.map(c => `<article class="best-method-card ${c.accent}"><span>${esc(c.step)}</span><strong>${esc(c.value)}</strong><small>${esc(c.note)}</small></article>`).join('');
 }
 
-function evaluatedRows(evaluation) {
-  return dedupeMetricRows([
+function officialPipelineResultPayload(evaluation, pipelineState) {
+  const sourceState = sourceStateModule();
+  if (!sourceState) throw new Error('Dashboard source-state module is unavailable');
+  const descriptor = recommendationState.official || {};
+  const benchmarkReference = evaluation?.benchmark_reference || {};
+  const publicRows = pipelineState.map(row => Object.fromEntries(
+    Object.entries(row || {}).filter(([key]) => !key.startsWith('_')),
+  ));
+  return sourceState.officialResultPayload(
+    {
+      ...evaluation,
+      benchmark_reference: {
+        ...benchmarkReference,
+        summary: publicRows,
+        diagnostics: [],
+      },
+    },
+    {
+      configured: descriptor.configured ?? pipelineState.length,
+      evaluated: descriptor.evaluated,
+      expected_keys: benchmarkReference?.report?.expected_keys
+        || publicRows.map(row => sourceState.metricRowKey(row)),
+    },
+    state.operational?.benchmark_detail_evidence || [],
+  );
+}
+
+function evaluatedRows(evaluation, pipelineState = state.operational?.pipeline_state) {
+  if (Array.isArray(pipelineState)) {
+    return officialPipelineResultPayload(evaluation, pipelineState).rows;
+  }
+  const rows = [
     ...(evaluation?.summary || []),
     ...(evaluation?.reranked?.summary || []),
     ...(evaluation?.benchmark_reference?.summary || []),
-  ])
+  ];
+  return dedupeMetricRows(rows)
     .map(r => canonicalMetricRow(r, {source: r.source || 'groundtruth_eval'}))
     .sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
 }
@@ -963,6 +995,7 @@ function closeRecommendationEvidence() {
 }
 
 function clearRecommendationView(message) {
+  recommendationState.analyticsResult = null;
   setText('recommendationStatus', message || 'No result source selected');
   setText('recommendationContext', message || 'Choose a result source');
   if ($('recommendationStrip')) $('recommendationStrip').innerHTML = '<div class="empty-state">No recommendations loaded.</div>';
@@ -973,6 +1006,12 @@ function clearRecommendationView(message) {
   ['top10ScoreChart','qualityLatencyChart','comparisonGrid','rerankerLiftChart','stageComparisonChart'].forEach(id => {
     if ($(id)) $(id).innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
   });
+  if ($('tradeoffChart')) $('tradeoffChart').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
+  if ($('metricHeatmap')) $('metricHeatmap').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
+  if ($('metricExplorerKpis')) $('metricExplorerKpis').innerHTML = '';
+  setText('metricExplorerHint', 'Waiting for evaluation');
+  setText('metricHeatmapLegend', 'No active result source');
+  setText('metricInterpretation', '');
   closeRecommendationEvidence();
 }
 
@@ -1198,9 +1237,235 @@ function clearUploadedTradeoffs() {
   });
 }
 
+const recommendationMetricKeys = ['recall_at_5', 'mrr', 'ndcg_at_5', 'avg_latency_seconds'];
+const recommendationComponentKeys = ['sheet', 'embedding', 'store', 'reranker'];
+
+function recommendationMetricLabel(key) {
+  return {
+    recall_at_5: 'Recall@5',
+    mrr: 'MRR',
+    ndcg_at_5: 'nDCG@5',
+    avg_latency_seconds: 'Average latency/query',
+  }[key] || key;
+}
+
+function recommendationComponentLabel(key) {
+  return {sheet: 'Chunker', embedding: 'Embedding', store: 'Vector DB', reranker: 'Reranker'}[key] || key;
+}
+
+function recommendationMetricValue(row, key) {
+  const aliases = {
+    recall_at_5: ['recall_at_5', 'recall_at_k'],
+    mrr: ['mrr', 'mrr_at_k'],
+    ndcg_at_5: ['ndcg_at_5', 'ndcg_at_k'],
+    avg_latency_seconds: ['avg_latency_seconds', 'avg_query_latency_s'],
+  }[key] || [key];
+  for (const alias of aliases) {
+    const raw = row?.[alias];
+    if (raw === null || raw === undefined || raw === '') continue;
+    const value = Number(raw);
+    if (Number.isFinite(value)) return value;
+  }
+  return NaN;
+}
+
+function fillRecommendationMetricControl(id, values, labels = {}, fallback = '') {
+  const control = $(id);
+  if (!control) return fallback || values[0] || '';
+  const current = control.value;
+  control.innerHTML = values.map(value => `<option value="${esc(value)}">${esc(labels[value] || value)}</option>`).join('');
+  control.value = values.includes(current) ? current : (values.includes(fallback) ? fallback : (values[0] || ''));
+  return control.value;
+}
+
+function recommendationRowState(row) {
+  const stateName = String(row?.state || row?.status || 'not_run').toLowerCase();
+  if (['complete', 'completed'].includes(stateName)) return 'complete';
+  if (['running', 'failed', 'incomplete', 'not_run'].includes(stateName)) return stateName;
+  return 'incomplete';
+}
+
+function recommendationEvaluatedQueries(row) {
+  return Number(row?.evaluated_queries ?? row?.query_count ?? row?.labelled_queries ?? 0) || 0;
+}
+
+function completeRecommendationRows(payload = {}) {
+  if (payload.scoring_mode !== 'retrieval_labels' && payload.mode !== 'labelled') return [];
+  return (Array.isArray(payload.rows) ? payload.rows : [])
+    .filter(row => recommendationRowState(row) === 'complete' && recommendationEvaluatedQueries(row) > 0)
+    .map(row => canonicalMetricRow(row, {state: 'complete'}));
+}
+
+function recommendationStateRows(payload = {}) {
+  if (
+    payload.source_type === 'official'
+    && payload.result_set !== 'baseline'
+    && Array.isArray(state.operational?.pipeline_state)
+  ) {
+    return state.operational.pipeline_state.map(row => canonicalMetricRow(row));
+  }
+  return (Array.isArray(payload.rows) ? payload.rows : []).map(row => canonicalMetricRow(row));
+}
+
+function recommendationAnalyticsOptions(payload, rows) {
+  if (payload?.source_type === 'official' && payload?.result_set !== 'baseline') {
+    const configured = Object.keys(benchmarkOptions || {}).length ? benchmarkOptions : (state.options || {});
+    return {
+      chunkers: configured.chunkers || uniq(rows, 'sheet'),
+      embeddings: configured.embeddings || uniq(rows, 'embedding'),
+      vector_stores: configured.vector_stores || configured.stores || uniq(rows, 'store'),
+      rerankers: (configured.rerankers || uniq(rows, 'reranker')).map(canonicalRerankerName),
+    };
+  }
+  return {
+    chunkers: uniq(rows, 'sheet'),
+    embeddings: uniq(rows, 'embedding'),
+    vector_stores: uniq(rows, 'store'),
+    rerankers: uniq(rows, 'reranker').map(canonicalRerankerName),
+  };
+}
+
+function recommendationWinnerLabels(payload, result) {
+  const roles = result?.roles || payload?.recommendations?.roles || payload?.roles || {};
+  const labels = new Map();
+  [
+    ['Quality', roles.quality],
+    ['Speed', roles.speed || roles.fastest],
+    ['Value', roles.value],
+  ].forEach(([label, role]) => {
+    const row = roleRow(role);
+    const comboId = String(row?.combo_id || role?.combo_id || '');
+    if (!comboId) return;
+    labels.set(comboId, [...(labels.get(comboId) || []), label]);
+  });
+  return labels;
+}
+
+function renderRecommendationExplorer(payload, complete, result) {
+  const chart = $('tradeoffChart');
+  const kpis = $('metricExplorerKpis');
+  const hint = $('metricExplorerHint');
+  const interpretation = $('metricInterpretation');
+  if (!chart || !kpis || !hint || !interpretation) return;
+  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
+  const xKey = fillRecommendationMetricControl('metricXAxis', recommendationMetricKeys, labels, 'avg_latency_seconds');
+  const yKey = fillRecommendationMetricControl('metricYAxis', recommendationMetricKeys, labels, 'recall_at_5');
+  const colorKey = fillRecommendationMetricControl(
+    'metricColorBy',
+    recommendationComponentKeys,
+    Object.fromEntries(recommendationComponentKeys.map(key => [key, recommendationComponentLabel(key)])),
+    'store',
+  );
+  const bubbleKey = fillRecommendationMetricControl(
+    'metricBubbleBy',
+    ['none', 'evaluated_queries'],
+    {none: 'Fixed size', evaluated_queries: 'Evaluated queries'},
+    'none',
+  );
+  const plotted = complete.filter(row => Number.isFinite(recommendationMetricValue(row, xKey)) && Number.isFinite(recommendationMetricValue(row, yKey)));
+  if (!plotted.length) {
+    const unavailable = 'Metrics unavailable until ground truth evaluation completes';
+    hint.textContent = '0 complete evaluations';
+    kpis.innerHTML = `<div class="metric-unavailable">${unavailable}</div>`;
+    chart.innerHTML = `<div class="empty-state">${unavailable}</div>`;
+    interpretation.textContent = unavailable;
+    return;
+  }
+  hint.textContent = `${plotted.length} complete evaluation${plotted.length === 1 ? '' : 's'}`;
+  const best = [...plotted].sort((a, b) => recommendationMetricValue(b, yKey) - recommendationMetricValue(a, yKey) || metricScore(b) - metricScore(a))[0];
+  const fastest = [...plotted].sort((a, b) => recommendationMetricValue(a, 'avg_latency_seconds') - recommendationMetricValue(b, 'avg_latency_seconds'))[0];
+  const mean = plotted.reduce((sum, row) => sum + recommendationMetricValue(row, yKey), 0) / plotted.length;
+  kpis.innerHTML = [
+    ['Complete runs', String(plotted.length), 'Selected source only'],
+    [`Best ${recommendationMetricLabel(yKey)}`, fmt(recommendationMetricValue(best, yKey), 3), pipelineLabel(best)],
+    ['Fastest avg/query', `${fmt(recommendationMetricValue(fastest, 'avg_latency_seconds'), 3)}s`, pipelineLabel(fastest)],
+    [`Mean ${recommendationMetricLabel(yKey)}`, fmt(mean, 3), 'Across complete runs'],
+  ].map(([label, value, note]) => `<article class="metric-explorer-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></article>`).join('');
+
+  const box = {left: 76, top: 58, width: 610, height: 230};
+  const xValues = plotted.map(row => recommendationMetricValue(row, xKey));
+  const yValues = plotted.map(row => recommendationMetricValue(row, yKey));
+  const minX = Math.min(...xValues), maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues), maxY = Math.max(...yValues);
+  const xRange = maxX - minX || 1, yRange = maxY - minY || 1;
+  const colorValues = [...new Set(plotted.map(row => String(row[colorKey] || 'none')))];
+  const queries = plotted.map(recommendationEvaluatedQueries);
+  const minQueries = Math.min(...queries), maxQueries = Math.max(...queries), queryRange = maxQueries - minQueries || 1;
+  const winnerLabels = recommendationWinnerLabels(payload, result);
+  const sourceLabel = payload.source_type === 'uploaded_project'
+    ? (payload.project_label || payload.project_id || 'Uploaded project')
+    : 'Official WNS benchmark';
+  const points = plotted.map((row, index) => {
+    const x = box.left + ((recommendationMetricValue(row, xKey) - minX) / xRange) * box.width;
+    const y = box.top + box.height - ((recommendationMetricValue(row, yKey) - minY) / yRange) * box.height;
+    const colorIndex = Math.max(0, colorValues.indexOf(String(row[colorKey] || 'none'))) % 4;
+    const radius = bubbleKey === 'evaluated_queries'
+      ? 7 + ((recommendationEvaluatedQueries(row) - minQueries) / queryRange) * 10
+      : 9;
+    const comboId = String(row.combo_id || metricRowKey(row));
+    const roleText = (winnerLabels.get(comboId) || []).join(' / ');
+    const title = `${pipelineLabel(row)} · ${recommendationMetricLabel(xKey)} ${fmt(recommendationMetricValue(row, xKey), 3)} · ${recommendationMetricLabel(yKey)} ${fmt(recommendationMetricValue(row, yKey), 3)} · ${sourceLabel} · complete`;
+    return `<g class="metric-point" data-color-index="${colorIndex}" tabindex="0"><title>${esc(title)}</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" class="metric-tradeoff-dot dot-${colorIndex}" />${roleText ? `<text x="${(x + radius + 4).toFixed(1)}" y="${(y + 4).toFixed(1)}" class="svg-winner-label">${esc(roleText)}</text>` : ''}</g>`;
+  }).join('');
+  const legend = colorValues.map((value, index) => `<li><span class="metric-legend-dot dot-${index % 4}"></span><strong>${esc(value)}</strong></li>`).join('');
+  chart.innerHTML = `<svg viewBox="0 0 760 350" role="img" aria-label="${esc(recommendationMetricLabel(yKey))} versus ${esc(recommendationMetricLabel(xKey))} complete evaluation trade-off chart"><text x="14" y="24" class="svg-title">Complete-run trade-off</text><line x1="${box.left}" y1="${box.top + box.height}" x2="${box.left + box.width}" y2="${box.top + box.height}" class="svg-axis" /><line x1="${box.left}" y1="${box.top}" x2="${box.left}" y2="${box.top + box.height}" class="svg-axis" /><text x="${box.left}" y="${box.top + box.height + 24}" class="svg-value">${fmt(minX, 3)}</text><text x="${box.left + box.width - 34}" y="${box.top + box.height + 24}" class="svg-value">${fmt(maxX, 3)}</text><text x="${box.left - 54}" y="${box.top + box.height}" class="svg-value">${fmt(minY, 3)}</text><text x="${box.left - 54}" y="${box.top + 5}" class="svg-value">${fmt(maxY, 3)}</text><text x="${box.left + box.width - 120}" y="${box.top + box.height + 48}" class="svg-guidance">${xKey === 'avg_latency_seconds' ? 'Faster ←' : 'Lower ←'}</text><text x="14" y="${box.top - 16}" class="svg-guidance">Better ↑</text>${points}</svg><ul class="metric-tradeoff-legend" aria-label="Color grouping legend">${legend}</ul>`;
+  interpretation.textContent = `${recommendationMetricLabel(xKey)} is horizontal${xKey === 'avg_latency_seconds' ? '; lower is faster' : ''}. ${recommendationMetricLabel(yKey)} is vertical; color groups by ${recommendationComponentLabel(colorKey).toLowerCase()}. Labels remain pinned only to recommendation winners.`;
+}
+
+function renderRecommendationHeatmap(payload, stateRows) {
+  const target = $('metricHeatmap');
+  const legend = $('metricHeatmapLegend');
+  if (!target || !legend) return;
+  const options = recommendationAnalyticsOptions(payload, stateRows);
+  const chunkers = options.chunkers || [];
+  const stores = options.vector_stores || [];
+  const embeddings = options.embeddings || [];
+  const rerankers = (options.rerankers || []).map(canonicalRerankerName);
+  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
+  const metric = fillRecommendationMetricControl('heatmapMetric', recommendationMetricKeys, labels, 'recall_at_5');
+  const embedding = fillRecommendationMetricControl('heatmapEmbedding', embeddings, {}, embeddings[0] || '');
+  const reranker = fillRecommendationMetricControl('heatmapReranker', rerankers.length ? rerankers : ['none'], {}, rerankers[0] || 'none');
+  if (!chunkers.length || !stores.length) {
+    legend.textContent = 'No configured matrix';
+    target.innerHTML = '<div class="empty-state">No configured chunker × vector DB combinations are available.</div>';
+    return;
+  }
+  const rowsByKey = new Map(stateRows.map(row => [metricRowKey(row), row]));
+  const measuredValues = stateRows
+    .filter(row => recommendationRowState(row) === 'complete' && recommendationEvaluatedQueries(row) > 0)
+    .map(row => recommendationMetricValue(row, metric))
+    .filter(Number.isFinite);
+  const minValue = measuredValues.length ? Math.min(...measuredValues) : 0;
+  const maxValue = measuredValues.length ? Math.max(...measuredValues) : 0;
+  const range = maxValue - minValue || 1;
+  legend.textContent = measuredValues.length
+    ? `Low ${fmt(minValue, 3)} → High ${fmt(maxValue, 3)}`
+    : 'No complete measured values';
+  const cells = chunkers.flatMap(sheet => stores.map(store => {
+    const row = rowsByKey.get(`${sheet}|${embedding}|${store}|${canonicalRerankerName(reranker)}`);
+    const rowState = recommendationRowState(row);
+    const metricValue = recommendationMetricValue(row, metric);
+    const measured = rowState === 'complete' && recommendationEvaluatedQueries(row) > 0 && Number.isFinite(metricValue);
+    const bucket = measured ? Math.max(0, Math.min(4, Math.round(((metricValue - minValue) / range) * 4))) : 0;
+    const stateLabel = rowState.replace('_', ' ');
+    const display = measured ? fmt(metricValue, 3) : stateLabel;
+    return `<div class="metric-heatmap-cell ${measured ? `metric-quality-${bucket}` : ''}" data-state="${esc(rowState)}" role="gridcell" aria-label="${esc(`${sheet}, ${store}: ${measured ? `${recommendationMetricLabel(metric)} ${display}` : stateLabel}`)}"><strong>${esc(display)}</strong><small>${measured ? esc(recommendationMetricLabel(metric)) : 'No complete metric'}</small></div>`;
+  }));
+  target.innerHTML = `<div class="metric-heatmap-scroll-note">Scroll horizontally to view all configured vector DB columns.</div><div class="metric-heatmap-grid" role="grid" aria-label="${esc(recommendationMetricLabel(metric))} by chunker and vector DB" style="grid-template-columns:minmax(180px,1.2fr) repeat(${stores.length},minmax(132px,1fr))"><div class="metric-heatmap-head">Chunker / vector DB</div>${stores.map(store => `<div class="metric-heatmap-head">${esc(store)}</div>`).join('')}${chunkers.map((sheet, index) => `<div class="metric-heatmap-row-label">${esc(sheet)}</div>${cells.slice(index * stores.length, (index + 1) * stores.length).join('')}`).join('')}</div>`;
+}
+
+function renderRecommendationAnalytics(payload = recommendationState.active || {}) {
+  const complete = completeRecommendationRows(payload);
+  const stateRows = recommendationStateRows(payload);
+  const result = recommendationState.analyticsResult;
+  renderRecommendationExplorer(payload, complete, result);
+  renderRecommendationHeatmap(payload, stateRows);
+}
+
 function renderRecommendationSource(payload) {
   const result = recommendationModule().recommendationsForSource(payload);
   recommendationState.active = payload;
+  recommendationState.analyticsResult = result;
   const uploaded = payload.source_type === 'uploaded_project';
   const baseline = !uploaded && payload.result_set === 'baseline';
   recommendationState.sourceType = uploaded ? 'uploaded_project' : 'official';
@@ -1214,6 +1479,7 @@ function renderRecommendationSource(payload) {
   setText('recommendationModeNote', result.mode === 'labelled' ? 'Quality, speed, and honest cost posture for the active source.' : 'Operational speed, run health, and evidence coverage. Quality is not claimed without labels.');
   renderRecommendationStrip(result);
   renderRecommendationTable(payload, result);
+  renderRecommendationAnalytics(payload);
   renderPricingLedger(payload);
   if (uploaded) clearUploadedTradeoffs();
   return result;
@@ -1226,6 +1492,10 @@ function officialRecommendationPayload(resultSet = 'official') {
   if (!sourceState) throw new Error('Dashboard source-state module is unavailable');
   if (resultSet === 'baseline') {
     return sourceState.baselineResultPayload(evaluation, state.operational?.benchmark_detail_evidence || []);
+  }
+  const pipelineState = state.operational?.pipeline_state;
+  if (Array.isArray(pipelineState)) {
+    return officialPipelineResultPayload(evaluation, pipelineState);
   }
   return sourceState.officialResultPayload(
     evaluation,
@@ -1367,6 +1637,7 @@ function syncSourceSelectorControls() {
 }
 
 async function loadResultSources() {
+  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   try {
     const payload = await api('/api/result-sources', {signal});
@@ -1386,6 +1657,7 @@ async function loadResultSources() {
 }
 
 async function loadProjectRuns(projectId) {
+  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   try {
     const payload = await api(`/api/project-runs?project_id=${encodeURIComponent(projectId)}`, {signal});
@@ -1405,6 +1677,7 @@ async function loadProjectRuns(projectId) {
 }
 
 async function loadProjectRun(projectId, runId) {
+  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   const path = `/api/project-run-results?project_id=${encodeURIComponent(projectId)}&run_id=${encodeURIComponent(runId)}`;
   try {
@@ -1751,6 +2024,29 @@ function fillSourceSelect(id, rows, type, preferredId='') {
   else el.value = [...validIds][0] || '';
 }
 
+function selectedDatasetRecord() {
+  const id = $('globalDataset')?.value || 'dataset:wns-default';
+  return (state.sourceCatalog?.datasets || []).find(row => row.id === id) || null;
+}
+
+function linkedGroundtruthId(dataset = selectedDatasetRecord()) {
+  return dataset?.linked_groundtruth_id || 'groundtruth:none';
+}
+
+function syncLinkedGroundtruth() {
+  const linkedId = linkedGroundtruthId();
+  ['globalGroundtruth', 'runGroundtruth', 'nvidiaGroundtruth'].forEach(id => {
+    const select = $(id);
+    if (!select) return;
+    Array.from(select.options || []).forEach(option => {
+      option.disabled = option.value !== linkedId;
+    });
+    select.value = linkedId;
+    select.disabled = true;
+  });
+  return linkedId;
+}
+
 function syncDatasetChunkers() {
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
@@ -1843,15 +2139,16 @@ function renderRunSourceContext(datasetLabel, groundtruthLabel) {
 }
 
 async function applyGlobalSourceContext({syncResults = true} = {}) {
-  const datasetId = $('globalDataset')?.value || 'dataset:wns-default';
-  const groundtruthId = $('globalGroundtruth')?.value || 'groundtruth:none';
+  const dataset = selectedDatasetRecord();
+  const datasetId = dataset?.id || 'dataset:wns-default';
+  const groundtruthId = syncLinkedGroundtruth();
   ['runDataset', 'nvidiaDataset'].forEach(id => setSourceMirrorValue(id, datasetId));
-  ['runGroundtruth', 'nvidiaGroundtruth'].forEach(id => setSourceMirrorValue(id, groundtruthId));
   syncDatasetChunkers();
   syncRunMode();
 
-  const datasetLabel = $('globalDataset')?.selectedOptions?.[0]?.textContent || datasetId;
-  const groundtruthLabel = $('globalGroundtruth')?.selectedOptions?.[0]?.textContent || groundtruthId;
+  const groundtruth = (state.sourceCatalog?.groundtruth || []).find(row => row.id === groundtruthId);
+  const datasetLabel = dataset?.label || datasetId;
+  const groundtruthLabel = groundtruth?.label || (groundtruthId === 'groundtruth:none' ? 'Evidence-only' : groundtruthId);
   setText('globalSourceContext', `${datasetLabel} · ${groundtruthLabel}`);
   renderRunSourceContext(datasetLabel, groundtruthLabel);
   renderDatasetStatusSummary();
@@ -1880,9 +2177,8 @@ async function applyGlobalSourceContext({syncResults = true} = {}) {
 function renderSourceSelectors(catalog) {
   const datasets = catalog?.datasets || [];
   const groundtruth = catalog?.groundtruth || [];
-  const preferredGroundtruth = groundtruth.find(row => row.valid && /groundtruth_500/i.test(row.id))?.id
-    || groundtruth.find(row => row.valid && row.id !== 'groundtruth:none')?.id
-    || 'groundtruth:none';
+  const defaultDataset = datasets.find(row => row.id === 'dataset:wns-default');
+  const preferredGroundtruth = linkedGroundtruthId(defaultDataset);
   globalSourceContextState.officialGroundtruthId = preferredGroundtruth;
   fillSourceSelect('globalDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('globalGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
@@ -1890,6 +2186,10 @@ function renderSourceSelectors(catalog) {
   fillSourceSelect('nvidiaDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('runGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
   fillSourceSelect('nvidiaGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
+  ['runDataset', 'nvidiaDataset'].forEach(id => {
+    if ($(id)) $(id).disabled = true;
+  });
+  syncLinkedGroundtruth();
   applyGlobalSourceContext({syncResults: false}).catch(console.error);
 }
 
@@ -1947,6 +2247,7 @@ function projectSelectedRerankers() {
 }
 
 function projectMatrixPayload(confirmationToken = null) {
+  syncLinkedGroundtruth();
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const groundtruthId = $('runGroundtruth')?.value || 'groundtruth:none';
   const evidenceOnly = groundtruthId === 'groundtruth:none';
@@ -1975,6 +2276,7 @@ async function postProjectMatrix(path, payload) {
 }
 
 function selectedParams() {
+  syncLinkedGroundtruth();
   const p = new URLSearchParams();
   expandedSelection('runSheet', activeDatasetSheets()).forEach(v => p.append('sheet', v));
   selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
@@ -1995,6 +2297,7 @@ function selectedParams() {
 }
 
 async function runNvidiaAction(kind) {
+  syncLinkedGroundtruth();
   const endpoints = {
     health: '/api/run/nvidia-health',
     smoke: '/api/run/nvidia-smoke',
@@ -2190,15 +2493,11 @@ async function runAction(kind) {
   const payload = recommendationState.active || officialRecommendationPayload('official');
   renderMetricsSource(payload);
 }));
+['metricXAxis','metricYAxis','metricColorBy','metricBubbleBy','heatmapMetric','heatmapEmbedding','heatmapReranker'].forEach(id => {
+  $(id)?.addEventListener('input', () => renderRecommendationAnalytics(recommendationState.active || {}));
+});
 ['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));
 $('globalDataset')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
-$('globalGroundtruth')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
-$('runDataset')?.addEventListener('input', () => {
-  syncDatasetChunkers();
-  syncRunMode();
-});
-$('runGroundtruth')?.addEventListener('input', syncRunMode);
-$('nvidiaGroundtruth')?.addEventListener('input', syncRunMode);
 $('uploadType')?.addEventListener('input', () => {
   const groundtruth = $('uploadType').value === 'groundtruth';
   if ($('datasetFile')) $('datasetFile').accept = groundtruth ? '.csv,.xlsx' : '.pdf,.zip,.csv,.txt,.md';

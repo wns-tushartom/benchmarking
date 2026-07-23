@@ -281,6 +281,8 @@ def test_fresh_extracted_project_is_selectable_before_index_or_workbook_exists(t
         "ready": True,
         "validation": "ready_for_project_matrix",
         "sheets": [],
+        "linked_groundtruth_id": "groundtruth:none",
+        "mode": "evidence_only",
     }
     resolved = resolve_dataset(root, "project:fresh-upload")
     assert resolved.manifest_path == (project / "manifest.json").resolve()
