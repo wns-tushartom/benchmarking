@@ -2,11 +2,44 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import os
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Iterable, List
+
+
+class RetryableHTTPError(RuntimeError):
+    """HTTP response status for which a request may be retried safely."""
+
+
+def _positive_int_env(name: str, default: str) -> int:
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be a positive integer; got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer; got {raw!r}")
+    return value
+
+
+def _finite_nonnegative_float_env(name: str, default: str) -> float:
+    raw = os.environ.get(name, default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be a finite, non-negative number; got {raw!r}"
+        ) from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(
+            f"{name} must be a finite, non-negative number; got {raw!r}"
+        )
+    return value
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None, timeout: int = 120) -> dict[str, Any]:
@@ -18,8 +51,24 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             body = resp.read().decode("utf-8", errors="replace")
             return json.loads(body or "{}")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} from {url}: {body[:1000]}") from exc
+        error_type = (
+            RetryableHTTPError
+            if exc.code in {408, 429} or 500 <= exc.code <= 599
+            else RuntimeError
+        )
+        try:
+            raw_body = exc.read()
+        except http.client.IncompleteRead as body_error:
+            raw_body = body_error.partial
+        except Exception:
+            raw_body = b""
+        body = (
+            raw_body.decode("utf-8", errors="replace")
+            if isinstance(raw_body, bytes)
+            else str(raw_body)
+        )
+        message = f"HTTP {exc.code} from {url}: {body[:1000]}"
+        raise error_type(message) from exc
 
 
 def _extract_embeddings(response: dict[str, Any]) -> List[List[float]]:
@@ -38,6 +87,30 @@ def _extract_embeddings(response: dict[str, Any]) -> List[List[float]]:
     raise RuntimeError(f"Embedding endpoint response did not contain embeddings. Keys: {sorted(response.keys())}")
 
 
+def _response_metadata(response: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("request_id", "requestId", "id", "model"):
+        value = response.get(key)
+        if isinstance(value, (str, int)) and str(value):
+            metadata[key] = str(value)[:512]
+    provider = response.get("ResponseMetadata")
+    if isinstance(provider, dict):
+        request_id = provider.get("RequestId")
+        if isinstance(request_id, (str, int)) and str(request_id):
+            metadata["request_id"] = str(request_id)[:512]
+    return metadata
+
+
+def _input_tokens(response: dict[str, Any]) -> int | None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("input_tokens", usage.get("prompt_tokens"))
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 class OpenAIEmbeddingAdapter:
     def __init__(self, model_name: str, dimensions: int = 3072, batch_size: int = 32, api_key_env: str = "OPENAI_API_KEY", url: str = "https://api.openai.com/v1/embeddings", **_: Any):
         self.name = model_name
@@ -45,9 +118,18 @@ class OpenAIEmbeddingAdapter:
         self.dimensions = int(dimensions)
         self.batch_size = int(batch_size)
         self.url = url
+        self.last_response_metadata: dict[str, Any] = {}
+        self.input_tokens = 0
+        self.input_tokens_complete = True
         self.api_key = os.environ.get(api_key_env, "").strip()
         if not self.api_key:
             raise RuntimeError(f"{api_key_env} is required for {model_name}. Put it in .env or the process environment.")
+        self.timeout_seconds = _positive_int_env(
+            "OPENAI_EMBEDDING_TIMEOUT_SECONDS", "300"
+        )
+        self.retry_delay_seconds = _finite_nonnegative_float_env(
+            "OPENAI_EMBEDDING_RETRY_DELAY_SECONDS", "2"
+        )
 
     def embed_many(self, texts: Iterable[str]) -> List[List[float]]:
         items = [str(t or "") for t in texts]
@@ -62,31 +144,39 @@ class OpenAIEmbeddingAdapter:
                         self.url,
                         {"model": self.model_name, "input": batch},
                         headers=headers,
-                        timeout=int(os.environ.get(
-                            "OPENAI_EMBEDDING_TIMEOUT_SECONDS",
-                            "300",
-                        )),
+                        timeout=self.timeout_seconds,
                     )
                     break
                 except (
+                    RetryableHTTPError,
                     TimeoutError,
                     urllib.error.URLError,
                     http.client.IncompleteRead,
                     OSError,
                 ) as exc:
+                    self.input_tokens_complete = False
                     if attempt == 5:
                         raise
-                    delay = float(os.environ.get(
-                        "OPENAI_EMBEDDING_RETRY_DELAY_SECONDS",
-                        "2",
-                    )) * (2 ** attempt)
+                    delay = self.retry_delay_seconds * (2**attempt)
                     print(
-                        f"OPENAI_EMBEDDING_RETRY attempt={attempt + 1} delay_s={delay} error={exc!r}",
+                        "OPENAI_EMBEDDING_RETRY "
+                        f"attempt={attempt + 1} delay_s={delay} error={exc!r}",
                         flush=True,
                     )
                     time.sleep(delay)
             if response is None:
-                raise RuntimeError("OpenAI embedding request exhausted retries without a response")
+                raise RuntimeError(
+                    "OpenAI embedding request exhausted retries without a response"
+                )
+            metadata = _response_metadata(response)
+            measured = _input_tokens(response)
+            if measured is None:
+                self.input_tokens_complete = False
+            elif self.input_tokens_complete:
+                self.input_tokens += measured
+            if self.input_tokens_complete:
+                metadata["embedding_input_tokens"] = self.input_tokens
+            self.last_response_metadata = metadata
             vectors = _extract_embeddings(response)
             if len(vectors) != len(batch):
                 raise RuntimeError(f"OpenAI returned {len(vectors)} embeddings for {len(batch)} inputs")
@@ -106,6 +196,7 @@ class RemoteHTTPEmbeddingAdapter:
         self.dimensions = int(dimensions)
         self.batch_size = int(batch_size)
         self.url = os.environ.get(endpoint_env, "").strip()
+        self.last_response_metadata: dict[str, Any] = {}
         if not self.url:
             raise RuntimeError(f"{endpoint_env} is required for {model_name}. Open-source embeddings must run from the VM endpoint, not local fallback.")
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
@@ -124,7 +215,9 @@ class RemoteHTTPEmbeddingAdapter:
             last_error: Exception | None = None
             for payload in payloads:
                 try:
-                    vectors = _extract_embeddings(_post_json(self.url, payload, headers=headers))
+                    response = _post_json(self.url, payload, headers=headers)
+                    self.last_response_metadata = _response_metadata(response)
+                    vectors = _extract_embeddings(response)
                     if len(vectors) == len(batch):
                         out.extend(vectors)
                         break

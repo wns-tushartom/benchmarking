@@ -19,6 +19,7 @@ from typing import Any
 DEFAULT_DATASET_ID = "dataset:wns-default"
 NONE_GROUNDTRUTH_ID = "groundtruth:none"
 CANONICAL_WORKBOOK = Path("data/chunking_methods_output_v2.xlsx")
+BENCHMARK_CONFIG = Path("configs/benchmark.local.json")
 TABLE_SUFFIXES = {".csv", ".xlsx"}
 
 QUERY_COLUMNS = ("query", "question", "user_query", "prompt")
@@ -195,6 +196,20 @@ def _workbook_chunk_counts(path: Path | None) -> tuple[tuple[str, int], ...]:
             workbook.close()
     except Exception:
         return ()
+
+
+def _configured_default_chunkers(root: Path) -> tuple[str, ...] | None:
+    config_path = _safe_file(root, root / BENCHMARK_CONFIG)
+    payload = _read_json(config_path) if config_path is not None else {}
+    matrix = payload.get("matrix")
+    raw_chunkers = matrix.get("chunkers") if isinstance(matrix, dict) else None
+    if not isinstance(raw_chunkers, list):
+        return None
+    chunkers = tuple(dict.fromkeys(
+        value.strip() for value in raw_chunkers
+        if isinstance(value, str) and value.strip()
+    ))
+    return chunkers or None
 
 
 def _table_metadata(path: Path) -> tuple[int, list[str]] | None:
@@ -434,7 +449,21 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
     chunk_count = _default_chunk_count(root)
     workbook_candidate = _safe_file(root, root / CANONICAL_WORKBOOK)
     workbook = workbook_candidate if workbook_candidate is not None and _runnable_workbook_sheets(workbook_candidate) else None
-    default_ready = bool(document_count > 0 and chunk_count > 0 and workbook is not None)
+    workbook_sheets = _workbook_sheet_names(workbook)
+    workbook_counts = _workbook_chunk_counts(workbook)
+    configured_chunkers = _configured_default_chunkers(root)
+    configured_sheets_present = True
+    if configured_chunkers is not None:
+        count_by_sheet = dict(workbook_counts)
+        workbook_sheets = tuple(name for name in configured_chunkers if name in count_by_sheet)
+        workbook_counts = tuple((name, count_by_sheet[name]) for name in workbook_sheets)
+        configured_sheets_present = len(workbook_sheets) == len(configured_chunkers)
+    default_ready = bool(
+        document_count > 0
+        and chunk_count > 0
+        and workbook is not None
+        and configured_sheets_present
+    )
     datasets = [
         DatasetSource(
             DEFAULT_DATASET_ID,
@@ -444,8 +473,8 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
             chunk_count,
             default_ready,
             "ready" if default_ready else "documents_chunks_or_workbook_missing",
-            sheets=_workbook_sheet_names(workbook),
-            chunk_counts_by_strategy=_workbook_chunk_counts(workbook),
+            sheets=workbook_sheets,
+            chunk_counts_by_strategy=workbook_counts,
             document_path=pdf_dir,
             workbook_path=workbook,
         )

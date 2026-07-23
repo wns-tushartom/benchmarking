@@ -44,6 +44,17 @@ def _write_workbook(path: Path, rows: int = 2) -> None:
     workbook.save(path)
 
 
+def _append_workbook_sheet(path: Path, name: str, rows: int) -> None:
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(path)
+    worksheet = workbook.create_sheet(name)
+    worksheet.append(["id", "pdf_name", "paragraph"])
+    for index in range(1, rows + 1):
+        worksheet.append([index, "source.pdf", f"{name} chunk {index}"])
+    workbook.save(path)
+
+
 def _fixture_root(tmp_path: Path) -> Path:
     pdf_dir = tmp_path / "data" / "pdfs"
     pdf_dir.mkdir(parents=True)
@@ -183,6 +194,52 @@ def test_build_source_catalog_discovers_allowlisted_sources_and_truthful_counts(
     assert "questions.csv" not in public_json
     assert "project_questions.csv" not in public_json
     assert "chunking_methods_output_v2.xlsx" not in public_json
+
+
+def test_default_dataset_uses_configured_official_chunkers_in_matrix_order(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    workbook = root / "data" / "chunking_methods_output_v2.xlsx"
+    _append_workbook_sheet(workbook, "official_second", rows=4)
+    _append_workbook_sheet(workbook, "candidate_optional", rows=9)
+    _append_workbook_sheet(workbook, "official_first", rows=2)
+    config = root / "configs" / "benchmark.local.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps({"matrix": {"chunkers": ["official_first", "official_second"]}}),
+        encoding="utf-8",
+    )
+
+    datasets = {source["id"]: source for source in build_source_catalog(root)["datasets"]}
+
+    assert datasets["dataset:wns-default"]["sheets"] == ["official_first", "official_second"]
+    assert datasets["dataset:wns-default"]["chunk_counts_by_strategy"] == {
+        "official_first": 2,
+        "official_second": 4,
+    }
+    assert datasets["dataset:wns-default"]["ready"] is True
+    assert datasets["project:customer-demo"]["sheets"] == ["uploaded_chunks"]
+
+
+def test_default_dataset_is_not_ready_when_configured_official_sheet_is_missing(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    workbook = root / "data" / "chunking_methods_output_v2.xlsx"
+    _append_workbook_sheet(workbook, "official_present", rows=4)
+    _append_workbook_sheet(workbook, "candidate_optional", rows=9)
+    config = root / "configs" / "benchmark.local.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps({"matrix": {"chunkers": ["official_present", "official_missing"]}}),
+        encoding="utf-8",
+    )
+
+    default = next(
+        source for source in build_source_catalog(root)["datasets"]
+        if source["id"] == "dataset:wns-default"
+    )
+
+    assert default["sheets"] == ["official_present"]
+    assert default["chunk_counts_by_strategy"] == {"official_present": 4}
+    assert default["ready"] is False
 
 
 def test_fresh_extracted_project_is_selectable_before_index_or_workbook_exists(tmp_path: Path) -> None:
