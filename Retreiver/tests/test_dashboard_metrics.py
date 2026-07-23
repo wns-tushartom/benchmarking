@@ -586,6 +586,14 @@ def test_evidence_browser_wording_is_clear_about_display_rows_vs_raw_artifacts()
     assert "Benchmark final top 5 evidence" in app
 
 
+def test_results_api_publishes_source_catalog_for_global_selectors() -> None:
+    root = Path(__file__).resolve().parents[1]
+    server = (root / "scripts" / "serve_benchmark_dashboard.py").read_text(encoding="utf-8")
+
+    assert "build_source_catalog" in server
+    assert '"source_catalog": build_source_catalog(ROOT)' in server
+
+
 def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")

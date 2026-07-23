@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import generate_matrix, load_benchmark_config
 from source.benchmark_pipeline import load_chunks_from_workbook
 from source.services.document_parser import DocumentParserService
+from source.services.project_run_results import ProjectRunResultService, ProjectRunResultsError
+from source.services.project_workspace import ProjectWorkspace
+from scripts.dashboard_source_catalog import build_source_catalog
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1684,11 +1687,48 @@ def upload_next_steps(saved_path: Path, dataset_dir: Path, extracted: list[str])
     return steps
 
 
+def official_evaluated_count(_evaluation: dict[str, Any]) -> int:
+    """Return complete official rows from the canonical pipeline-state resolver."""
+    return len(complete_pipeline_metric_rows())
+
+
+def project_result_service() -> ProjectRunResultService:
+    return ProjectRunResultService(ProjectWorkspace(USER_PROJECTS_DIR))
+
+
+def exact_query_value(query: dict[str, list[str]], name: str) -> str:
+    values = query.get(name, [])
+    if len(values) != 1 or not values[0]:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return values[0]
+
+
+def _bounded_result_integer(
+    query: dict[str, list[str]],
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = exact_query_value(query, name)
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+    return value
+
+
+def _require_result_query_keys(query: dict[str, list[str]], allowed: set[str]) -> None:
+    if set(query) != allowed:
+        raise ProjectRunResultsError("invalid_request", "Invalid result request", 400)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1704,6 +1744,60 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {
+            "/api/result-sources",
+            "/api/project-runs",
+            "/api/project-run-results",
+            "/api/project-run-evidence",
+        }:
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                service = project_result_service()
+                if parsed.path == "/api/result-sources":
+                    _require_result_query_keys(query, set())
+                    evaluation = read_evaluation()
+                    reference = evaluation.get("benchmark_reference", {})
+                    report = reference.get("report", {})
+                    configured = report.get("official_matrix_rows") if isinstance(report, dict) else None
+                    if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
+                        configured = len(official_matrix_keys())
+                    payload = service.result_sources(
+                        official_configured=configured,
+                        official_evaluated=official_evaluated_count(evaluation),
+                    )
+                elif parsed.path == "/api/project-runs":
+                    _require_result_query_keys(query, {"project_id"})
+                    payload = service.project_runs(exact_query_value(query, "project_id"))
+                elif parsed.path == "/api/project-run-results":
+                    _require_result_query_keys(query, {"project_id", "run_id"})
+                    payload = service.project_run_results(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                    )
+                else:
+                    _require_result_query_keys(
+                        query,
+                        {"project_id", "run_id", "combo_id", "limit", "offset"},
+                    )
+                    payload = service.project_run_evidence(
+                        exact_query_value(query, "project_id"),
+                        exact_query_value(query, "run_id"),
+                        exact_query_value(query, "combo_id"),
+                        limit=_bounded_result_integer(query, "limit", minimum=1, maximum=100),
+                        offset=_bounded_result_integer(query, "offset", minimum=0, maximum=10_000_000),
+                    )
+                self.send_json(payload)
+            except ProjectRunResultsError as exc:
+                self.send_json(
+                    {"error": {"code": exc.code, "message": exc.public_message}},
+                    exc.status,
+                )
+            except Exception:
+                self.send_json(
+                    {"error": {"code": "run_unavailable", "message": "Result service is unavailable"}},
+                    500,
+                )
+            return
         if parsed.path == "/api/run/status":
             job_id = parse_qs(parsed.query).get("job_id", [""])[0]
             self.send_json(job_status(job_id))
@@ -1850,6 +1944,7 @@ class Handler(SimpleHTTPRequestHandler):
                 },
                 "files": [f for f in files if (ROOT / f).exists()],
                 "options": benchmark_options(),
+                "source_catalog": build_source_catalog(ROOT),
             })
             return
         return super().do_GET()
