@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "web" / "app.js"
 INDEX = ROOT / "web" / "index.html"
+VISUALS = ROOT / "web" / "recommendation-visuals.js"
+RECOMMENDATIONS = ROOT / "web" / "recommendations.js"
 
 
 ANALYTICS_IDS = {
@@ -16,8 +18,11 @@ ANALYTICS_IDS = {
     "metricYAxis",
     "metricColorBy",
     "metricBubbleBy",
+    "metricQuickView",
     "metricExplorerKpis",
     "tradeoffChart",
+    "metricChartTooltip",
+    "metricPointDetails",
     "metricInterpretation",
     "heatmapTitle",
     "metricHeatmapLegend",
@@ -51,13 +56,13 @@ const context = {{
     createElement(tag) {{ return makeElement(tag); }},
     body: {{ insertAdjacentHTML() {{}} }},
   }},
-  window: {{}}, location: {{hash:'#compare'}}, history: {{replaceState() {{}}}},
+  window: {{}}, RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: require({str(RECOMMENDATIONS)!r}), location: {{hash:'#compare'}}, history: {{replaceState() {{}}}},
   fetch: async () => ({{ok:true, json:async()=>({{}}), text:async()=>''}}),
   setTimeout() {{}}, clearTimeout() {{}}, AbortController,
 }};
 vm.createContext(context);
 const code = fs.readFileSync({str(APP)!r}, 'utf8').split("loadOptions().then(refresh)")[0];
-vm.runInContext(code, context);
+vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n`, context);
 {assertions}
 """
     proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=10)
@@ -80,8 +85,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/styles.css?v=20260723-canonical-dashboard-v4' in html
-    assert '/app.js?v=20260723-canonical-dashboard-v4' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5') < html.index('/app.js?v=20260724-canonical-dashboard-v5')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:
@@ -102,12 +109,83 @@ const payload = {payload};
 context.renderRecommendationAnalytics(payload);
 const chart = el('tradeoffChart').innerHTML;
 const heatmap = el('metricHeatmap').innerHTML;
-if ((chart.match(/<circle/g)||[]).length !== 3) throw new Error(chart);
+if ((chart.match(/class="metric-point/g)||[]).length !== 3) throw new Error(chart);
 if ((chart.match(/<title>/g)||[]).length !== 3) throw new Error('missing accessible titles');
 if (!chart.includes('Faster ←') || !chart.includes('Better ↑')) throw new Error(chart);
-if (!chart.includes('Quality') || !chart.includes('Speed') || !chart.includes('Value')) throw new Error(chart);
+if (!chart.includes('Rank 1') || !chart.includes('metric-rank-top')) throw new Error(chart);
+if (chart.includes('svg-winner-label')) throw new Error('persistent winner label obscures nearby points');
 if (!heatmap.includes('not run') || !heatmap.includes('0.000') && !heatmap.includes('0.900')) throw new Error(heatmap);
+if (!heatmap.includes('is-best') || !heatmap.includes('is-worst')) throw new Error(heatmap);
+if (!heatmap.includes('data-heatmap-row="c1"') || !heatmap.includes('data-heatmap-column="Qdrant"')) throw new Error(heatmap);
+if (!el('metricHeatmapLegend').innerHTML.includes('metric-state-swatch')) throw new Error(el('metricHeatmapLegend').innerHTML);
 if (!el('metricExplorerHint').textContent.includes('3 complete')) throw new Error(el('metricExplorerHint').textContent);
+"""
+    )
+
+
+def test_heatmap_extrema_are_calculated_within_visible_filter_slice() -> None:
+    payload = labelled_payload("""[
+  {combo_id:'visible-low',sheet:'c1',embedding:'e-a',store:'Qdrant',reranker:'Amazon Rerank v1',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.70,mrr:.6,ndcg_at_5:.65,avg_latency_seconds:.3},
+  {combo_id:'visible-high',sheet:'c2',embedding:'e-a',store:'FAISS',reranker:'Amazon Rerank v1',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.80,mrr:.7,ndcg_at_5:.75,avg_latency_seconds:.2},
+  {combo_id:'hidden-global-high',sheet:'c1',embedding:'e-b',store:'Qdrant',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.99,mrr:.9,ndcg_at_5:.95,avg_latency_seconds:.1},
+  {combo_id:'hidden-global-low',sheet:'c2',embedding:'e-b',store:'FAISS',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.10,mrr:.1,ndcg_at_5:.10,avg_latency_seconds:.4}
+]""", source_type="uploaded_project")
+    run_dashboard_probe(
+        f"""
+context.renderRecommendationAnalytics({payload});
+const heatmap = el('metricHeatmap').innerHTML;
+if (!heatmap.includes('0.700') || !heatmap.includes('0.800')) throw new Error(heatmap);
+if (!heatmap.includes('is-best') || !heatmap.includes('is-worst')) throw new Error(heatmap);
+"""
+    )
+
+
+def test_heatmap_extrema_and_legend_are_scoped_to_visible_slice() -> None:
+    payload = labelled_payload("""[
+  {combo_id:'bge-low',sheet:'c1',embedding:'BGE',store:'FAISS',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.7,mrr:.6,ndcg_at_5:.65,avg_latency_seconds:.2},
+  {combo_id:'bge-high',sheet:'c1',embedding:'BGE',store:'Qdrant',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.8,mrr:.7,ndcg_at_5:.75,avg_latency_seconds:.3},
+  {combo_id:'openai-global-low',sheet:'c1',embedding:'OpenAI',store:'FAISS',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.1,mrr:.1,ndcg_at_5:.1,avg_latency_seconds:.1},
+  {combo_id:'openai-global-high',sheet:'c1',embedding:'OpenAI',store:'Qdrant',reranker:'none',status:'completed',state:'complete',evaluated_queries:500,recall_at_5:.9,mrr:.9,ndcg_at_5:.9,avg_latency_seconds:.4}
+]""")
+    run_dashboard_probe(
+        f"""
+state = {{options:{{chunkers:['c1'],embeddings:['BGE','OpenAI'],vector_stores:['FAISS','Qdrant'],rerankers:['none']}}}};
+context.renderRecommendationSource({payload});
+const heatmap = el('metricHeatmap').innerHTML;
+const legend = el('metricHeatmapLegend').innerHTML;
+if ((heatmap.match(/is-best/g)||[]).length !== 1) throw new Error(heatmap);
+if ((heatmap.match(/is-worst/g)||[]).length !== 1) throw new Error(heatmap);
+if (!legend.includes('Low 0.700') || !legend.includes('High 0.800')) throw new Error(legend);
+"""
+    )
+
+
+def test_relationship_scatter_exposes_rank_shapes_family_and_quick_views() -> None:
+    run_dashboard_probe(
+        """
+const rows = Array.from({length:12}, (_, index) => ({
+  combo_id:`combo-${index}`,
+  sheet:'chunk-a',
+  embedding:'embed-a',
+  store:['FAISS','PGVector','Qdrant','Weaviate'][index % 4],
+  reranker:['none','bge-reranker-base','Amazon Rerank v1'][Math.floor(index / 4)],
+  status:'completed', state:'complete', evaluated_queries:500,
+  recall_at_5:.95 - index * .01, mrr:.9 - index * .01, ndcg_at_5:.92 - index * .01,
+  avg_latency_seconds:.1 + index * .02,
+}));
+const payload = {source_type:'uploaded_project',scoring_mode:'retrieval_labels',mode:'labelled',rows};
+context.__recommendationState.analyticsResult = {mode:'labelled',completed:rows,rows,roles:{}};
+context.renderRecommendationAnalytics(payload);
+let chart = el('tradeoffChart').innerHTML;
+if ((chart.match(/class="metric-point/g)||[]).length !== 12) throw new Error(chart);
+if (!chart.includes('metric-rank-top') || !chart.includes('metric-rank-bottom')) throw new Error(chart);
+if (!chart.includes('metric-shape-circle') || !chart.includes('metric-shape-diamond') || !chart.includes('metric-shape-triangle')) throw new Error(chart);
+if (!chart.includes('data-family-key=') || !chart.includes('data-rank="1"') || !chart.includes('data-rank="12"')) throw new Error(chart);
+if (!el('metricPointDetails').textContent.includes('Select a point')) throw new Error(el('metricPointDetails').textContent);
+el('metricQuickView').value = 'top10';
+context.renderRecommendationAnalytics(payload);
+chart = el('tradeoffChart').innerHTML;
+if ((chart.match(/class="metric-point/g)||[]).length !== 10) throw new Error(chart);
 """
     )
 

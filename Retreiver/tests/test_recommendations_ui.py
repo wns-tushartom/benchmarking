@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "web" / "index.html"
 APP = ROOT / "web" / "app.js"
 SOURCE_STATE = ROOT / "web" / "source-state.js"
+VISUALS = ROOT / "web" / "recommendation-visuals.js"
 STYLES = ROOT / "web" / "styles.css"
 
 
@@ -27,6 +28,9 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
         "recommendationTable",
         "pricingLedger",
         "tradeoffChart",
+        "metricQuickView",
+        "metricChartTooltip",
+        "metricPointDetails",
         "metricHeatmap",
         "metricHeatmapLegend",
         "projectEvidenceDialog",
@@ -43,10 +47,14 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert "No-reranker baseline — measured results" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260723-canonical-dashboard-v4"' in index
+    assert 'href="/styles.css?v=20260724-canonical-dashboard-v5"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
+    assert 'src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/app.js?v=20260723-canonical-dashboard-v4'
+        '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5'
+    )
+    assert index.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5') < index.index(
+        '/app.js?v=20260724-canonical-dashboard-v5'
     )
 
     for endpoint in (
@@ -58,6 +66,8 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
         assert endpoint in app
     assert "AbortController" in app
     assert "configured combinations" in app
+    assert "event.key === 'Enter'" in app
+    assert "event.key === ' '" in app
 
 
 def test_recommendations_styles_are_responsive_and_use_existing_tokens() -> None:
@@ -76,6 +86,30 @@ def test_recommendations_styles_are_responsive_and_use_existing_tokens() -> None
     assert "var(--mint)" in styles
     assert "var(--accent)" in styles
     assert "var(--amber)" in styles
+    for token in (
+        "--chart-cyan",
+        "--chart-mint",
+        "--chart-violet",
+        "--chart-amber",
+        "--chart-rose",
+        "--chart-blue",
+    ):
+        assert token in styles
+    for selector in (
+        ".metric-rank-top",
+        ".metric-rank-bottom",
+        ".metric-point.is-muted",
+        ".metric-point.is-related",
+        ".metric-family-link",
+        ".metric-chart-tooltip",
+        ".metric-point-details",
+        ".metric-legend-filter",
+        ".metric-heatmap-cell.is-best",
+        ".metric-heatmap-cell.is-worst",
+        ".metric-state-swatch",
+    ):
+        assert selector in styles
+    assert "grid-template-columns:repeat(5,minmax(0,1fr))" in styles.replace(" ", "")
     assert ".result-source-bar label[hidden]" in styles
 
 
@@ -98,7 +132,7 @@ const context = {{
   console,
   AbortController,
   URLSearchParams,
-  PipelineRecommendations: {{
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: {{
     recommendationsForSource(source) {{
       return {{mode: source.scoring_mode === 'retrieval_labels' ? 'labelled' : 'evidence_only', roles: {{}}, completed: source.rows || [], failed: [], rows: source.rows || []}};
     }},
@@ -179,7 +213,7 @@ function element(id) {{
 }}
 const context = {{
   console, AbortController, URLSearchParams,
-  PipelineRecommendations: {{
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: {{
     recommendationsForSource(source) {{return {{mode:'evidence_only',roles:{{}},completed:source.rows||[],failed:[],rows:source.rows||[]}};}},
     pricingLedger() {{return []; }}, metricLabels() {{return {{}};}}, rowBadges() {{return []; }},
     pricingForRow() {{return {{state:'no_api_fee'}};}},
@@ -233,7 +267,7 @@ function element(id) {{
 }}
 const context = {{
   console, AbortController, URLSearchParams,
-  PipelineRecommendations: {{
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: {{
     recommendationsForSource(source) {{return {{mode:'labelled',roles:{{}},completed:source.rows||[],failed:[],rows:source.rows||[]}};}},
     pricingLedger() {{return [];}}, metricLabels() {{return {{}};}}, rowBadges() {{return [];}},
     pricingForRow() {{return {{state:'no_api_fee'}};}},
@@ -277,7 +311,7 @@ const R = require({str(ROOT / 'web' / 'recommendations.js')!r});
 function element() {{return {{value:'',textContent:'',innerHTML:'',hidden:false,open:false,selectedOptions:[],classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}}
 const context = {{
   console,
-  PipelineRecommendations:R,
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:R,
   AbortController,
   URLSearchParams,
   document:{{getElementById(){{return element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},
@@ -312,7 +346,7 @@ def test_evidence_only_aggregate_roles_have_decision_useful_titles() -> None:
     script = f"""
 const fs=require('fs'), vm=require('vm');
 function element() {{return {{value:'',textContent:'',innerHTML:'',hidden:false,open:false,selectedOptions:[],classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}}
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(){{return element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(){{return element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const source=fs.readFileSync({str(APP)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source+`
@@ -336,7 +370,7 @@ const fs=require('fs'), vm=require('vm');
 function element() {{return {{value:'',textContent:'',innerHTML:'',hidden:false,open:false,selectedOptions:[],classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}}
 const ids=['recommendationStatus','recommendationContext','recommendationStrip','recommendationTable','pricingLedger','recommendationModeNote'];
 const elements=Object.fromEntries(ids.map(id=>[id,element()]));
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const source=fs.readFileSync({str(APP)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source+`
@@ -366,7 +400,7 @@ def test_mixed_commercial_cost_text_and_ledger_distinguish_shared_and_combinatio
 const fs=require('fs'),vm=require('vm');
 const elements={{pricingLedger:{{innerHTML:'',textContent:'',classList:{{toggle(){{}}}},addEventListener(){{}}}}}};
 function element(){{return {{value:'',textContent:'',innerHTML:'',hidden:false,open:false,selectedOptions:[],classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}}
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||(elements[id]=element());}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||(elements[id]=element());}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const source=fs.readFileSync({str(APP)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source+`
@@ -388,7 +422,7 @@ const fs=require('fs'), vm=require('vm');
 function element() {{return {{value:'',textContent:'',innerHTML:'',hidden:false,open:false,selectedOptions:[],classList:{{toggle(){{}}}},addEventListener(){{}},querySelectorAll(){{return [];}},setAttribute(){{}}}};}}
 const ids=['recommendationStatus','recommendationContext','recommendationStrip','recommendationTable','recommendationSort','recommendationFilters','pricingLedger','recommendationModeNote'];
 const elements=Object.fromEntries(ids.map(id=>[id,element()]));
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const rows=Array.from({{length:12}},(_,i)=>({{
   combo_id:`combo-${{i}}`,status:'completed',chunker_id:`chunk-${{i}}`,embedding_id:'e',vector_store_id:'s',reranker_id:'r',
@@ -422,7 +456,7 @@ const elements={{projectEvidenceStatus:element(),projectEvidenceRows:element(),p
 const first=Array.from({{length:25}},(_,i)=>({{combo_id:'combo',query_id:`q${{i}}`,query:'Q',source_name:'safe.txt',excerpt:'E',rank:i+1}}));
 const second=Array.from({{length:5}},(_,i)=>({{combo_id:'combo',query_id:`q${{i+25}}`,query:'Q',source_name:'safe.txt',excerpt:'E',rank:i+26}}));
 const pages=[{{rows:first,next_offset:25}},{{rows:second,next_offset:null}}];
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>pages.shift(),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>pages.shift(),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const source=fs.readFileSync({str(APP)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source+`
@@ -450,7 +484,7 @@ function element(){{return {{value:'',textContent:'',innerHTML:'',hidden:false,o
 const elements={{projectEvidenceStatus:element(),projectEvidenceRows:element(),projectEvidenceMore:element()}};
 const row={{combo_id:'combo',query_id:'q1',query:'Q',source_name:'safe.txt',excerpt:'E',rank:1}};
 const pages=[{{rows:[row],next_offset:25}},{{rows:[row],next_offset:25}}];
-const context={{console,AbortController,URLSearchParams,PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>pages.shift(),text:async()=>''}}),setTimeout(){{}}}};
+const context={{console,AbortController,URLSearchParams,RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations:require({str(ROOT / 'web' / 'recommendations.js')!r}),document:{{getElementById(id){{return elements[id]||element();}},querySelectorAll(){{return [];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>pages.shift(),text:async()=>''}}),setTimeout(){{}}}};
 vm.createContext(context);
 const source=fs.readFileSync({str(APP)!r},'utf8').split('loadOptions().then(refresh)')[0];
 vm.runInContext(source+`
@@ -490,7 +524,7 @@ function element(id) {{
 }}
 const context = {{
   console, AbortController, URLSearchParams,
-  PipelineRecommendations: {{}},
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: {{}},
   document: {{getElementById:element,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},
   window: {{}}, location: {{hash:'#compare'}}, history: {{replaceState(){{}}}}, setTimeout, clearTimeout,
   fetch() {{throw new Error('unexpected fetch');}},
@@ -578,7 +612,7 @@ function element(id) {{
 }}
 const context = {{
   console, AbortController, URLSearchParams,
-  PipelineRecommendations: {{}},
+  RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: {{}},
   document: {{
     getElementById:element,
     querySelectorAll(){{return[];}},

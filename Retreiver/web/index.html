@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260723-canonical-dashboard-v4" />
+  <link rel="stylesheet" href="/styles.css?v=20260724-canonical-dashboard-v5" />
 </head>
 <body>
   <main class="shell">
@@ -177,9 +177,12 @@
           <label>Y axis<select id="metricYAxis"></select></label>
           <label>Color by<select id="metricColorBy"></select></label>
           <label>Bubble size<select id="metricBubbleBy"></select></label>
+          <label>Show<select id="metricQuickView"><option value="all">All combinations</option><option value="top10">Top 10</option><option value="bottom10">Bottom 10</option><option value="pareto">Pareto frontier</option></select></label>
         </div>
         <div id="metricExplorerKpis" class="metric-explorer-kpis"></div>
         <div id="tradeoffChart" class="svg-chart metric-tradeoff-chart"></div>
+        <div id="metricChartTooltip" class="metric-chart-tooltip" hidden></div>
+        <div id="metricPointDetails" class="metric-point-details" aria-live="polite">Select a point to inspect exact metrics.</div>
         <p id="metricInterpretation" class="metric-interpretation"></p>
       </section>
 
@@ -459,6 +462,7 @@ Passenger wants return refund due to illness</textarea><span class="inline-uploa
   </main>
   <script src="/source-state.js?v=20260716-metrics-integrity"></script>
   <script src="/recommendations.js?v=20260716-extraction-override"></script>
-  <script src="/app.js?v=20260723-canonical-dashboard-v4"></script>
+  <script src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5"></script>
+  <script src="/app.js?v=20260724-canonical-dashboard-v5"></script>
 </body>
 </html>

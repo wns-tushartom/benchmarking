@@ -973,7 +973,17 @@ const recommendationState = {
   tablePage: 0,
   tablePayload: null,
   tableResult: null,
+  visualSelectedFamily: '',
+  visualSelectedCombo: '',
+  visualHiddenCategories: new Set(),
+  visualPointData: new Map(),
 };
+
+function recommendationVisualModule() {
+  const module = globalThis.RecommendationVisuals;
+  if (!module || typeof module.categoryColorMap !== 'function') throw new Error('Recommendation visualization rules are unavailable');
+  return module;
+}
 
 function recommendationModule() {
   const module = globalThis.PipelineRecommendations;
@@ -1341,6 +1351,124 @@ function recommendationWinnerLabels(payload, result) {
   return labels;
 }
 
+function recommendationMetricDirection(key) {
+  return key === 'avg_latency_seconds' ? 'lower' : 'higher';
+}
+
+function recommendationMarkerSvg(shape, x, y, radius, color, rankClass) {
+  const common = `class="metric-tradeoff-dot metric-shape-${shape} ${rankClass}" style="--point-color:${color}"`;
+  if (shape === 'diamond') {
+    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="1.5" transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})" ${common} />`;
+  }
+  if (shape === 'triangle') {
+    const top = `${x.toFixed(1)},${(y - radius).toFixed(1)}`;
+    const right = `${(x + radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
+    const left = `${(x - radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
+    return `<path d="M ${top} L ${right} L ${left} Z" ${common} />`;
+  }
+  if (shape === 'square') {
+    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="2" ${common} />`;
+  }
+  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" ${common} />`;
+}
+
+// Rich detail markup is safe because every row-derived string is escaped and every metric is numerically formatted.
+function recommendationPointDetailHtml(meta) {
+  if (!meta) return 'Select a point to inspect exact metrics.';
+  const row = meta.row;
+  const badges = meta.badges.length ? `<span class="metric-detail-badges">${meta.badges.map(badge => `<b>${esc(badge)}</b>`).join('')}</span>` : '';
+  return `<strong>#${fmtInt(meta.rank)} · ${esc(pipelineLabel(row))}</strong>${badges}<span>${esc(recommendationMetricLabel(meta.xKey))}: ${fmt(meta.xValue, 3)} · ${esc(recommendationMetricLabel(meta.yKey))}: ${fmt(meta.yValue, 3)}</span><small>Recall@5 ${fmt(recommendationMetricValue(row, 'recall_at_5'), 3)} · MRR ${fmt(recommendationMetricValue(row, 'mrr'), 3)} · nDCG@5 ${fmt(recommendationMetricValue(row, 'ndcg_at_5'), 3)} · latency ${fmt(recommendationMetricValue(row, 'avg_latency_seconds'), 3)}s · ${fmtInt(recommendationEvaluatedQueries(row))} evaluated queries</small>`;
+}
+
+function applyRecommendationFamilyState(chart, familyKey = '') {
+  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
+  const points = [...chart.querySelectorAll('.metric-point')];
+  const related = points.filter(point => point.dataset.familyKey === familyKey);
+  points.forEach(point => {
+    point.classList.toggle('is-related', Boolean(familyKey) && point.dataset.familyKey === familyKey);
+    point.classList.toggle('is-muted', Boolean(familyKey) && point.dataset.familyKey !== familyKey);
+    point.classList.toggle('is-selected', point.dataset.comboId === recommendationState.visualSelectedCombo);
+  });
+  const overlay = chart.querySelector('.metric-family-overlay');
+  if (!overlay) return;
+  const ordered = related.map(point => ({
+    x: Number(point.dataset.pointX),
+    y: Number(point.dataset.pointY),
+    color: point.dataset.color,
+  })).sort((a, b) => a.x - b.x || a.y - b.y);
+  overlay.innerHTML = ordered.slice(1).map((point, index) => {
+    const previous = ordered[index];
+    return `<line x1="${previous.x}" y1="${previous.y}" x2="${point.x}" y2="${point.y}" class="metric-family-link" style="--family-color:${point.color}" />`;
+  }).join('');
+}
+
+function bindRecommendationChartInteractions(chart, payload) {
+  const details = $('metricPointDetails');
+  const tooltip = $('metricChartTooltip');
+  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
+  const showPoint = (point, event, lock = false) => {
+    const meta = recommendationState.visualPointData.get(point.dataset.comboId);
+    if (!meta) return;
+    if (lock) {
+      recommendationState.visualSelectedFamily = point.dataset.familyKey;
+      recommendationState.visualSelectedCombo = point.dataset.comboId;
+    }
+    if (details) details.innerHTML = recommendationPointDetailHtml(meta);
+    if (tooltip) {
+      tooltip.innerHTML = recommendationPointDetailHtml(meta);
+      tooltip.hidden = false;
+      const bounds = chart.getBoundingClientRect?.();
+      if (bounds && Number.isFinite(event?.clientX)) {
+        tooltip.style.left = `${Math.max(8, event.clientX - bounds.left + 14)}px`;
+        tooltip.style.top = `${Math.max(8, event.clientY - bounds.top + 14)}px`;
+      }
+    }
+    applyRecommendationFamilyState(chart, point.dataset.familyKey);
+  };
+  const clearTransient = () => {
+    if (tooltip) tooltip.hidden = true;
+    applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
+  };
+  chart.querySelectorAll('.metric-point').forEach(point => {
+    point.addEventListener('pointerenter', event => showPoint(point, event));
+    point.addEventListener('pointerleave', clearTransient);
+    point.addEventListener('focus', event => showPoint(point, event));
+    point.addEventListener('blur', clearTransient);
+    point.addEventListener('click', event => {
+      event.stopPropagation();
+      showPoint(point, event, true);
+    });
+    point.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        showPoint(point, event, true);
+        return;
+      }
+      if (event.key !== 'Escape') return;
+      recommendationState.visualSelectedFamily = '';
+      recommendationState.visualSelectedCombo = '';
+      if (details) details.textContent = 'Select a point to inspect exact metrics.';
+      clearTransient();
+    });
+  });
+  chart.querySelectorAll('.metric-legend-filter').forEach(button => {
+    button.addEventListener('click', () => {
+      const category = button.dataset.category;
+      if (recommendationState.visualHiddenCategories.has(category)) recommendationState.visualHiddenCategories.delete(category);
+      else recommendationState.visualHiddenCategories.add(category);
+      renderRecommendationAnalytics(recommendationState.active || payload);
+    });
+  });
+  chart.addEventListener('click', event => {
+    if (event.target.closest?.('.metric-point') || event.target.closest?.('.metric-legend-filter')) return;
+    recommendationState.visualSelectedFamily = '';
+    recommendationState.visualSelectedCombo = '';
+    if (details) details.textContent = 'Select a point to inspect exact metrics.';
+    clearTransient();
+  });
+  applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
+}
+
 function renderRecommendationExplorer(payload, complete, result) {
   const chart = $('tradeoffChart');
   const kpis = $('metricExplorerKpis');
@@ -1362,7 +1490,36 @@ function renderRecommendationExplorer(payload, complete, result) {
     {none: 'Fixed size', evaluated_queries: 'Evaluated queries'},
     'none',
   );
-  const plotted = complete.filter(row => Number.isFinite(recommendationMetricValue(row, xKey)) && Number.isFinite(recommendationMetricValue(row, yKey)));
+  const quickView = fillRecommendationMetricControl(
+    'metricQuickView',
+    ['all', 'top10', 'bottom10', 'pareto'],
+    {all: 'All combinations', top10: 'Top 10', bottom10: 'Bottom 10', pareto: 'Pareto frontier'},
+    'all',
+  );
+  const visual = recommendationVisualModule();
+  const completeByKey = new Map(complete.map(row => [metricRowKey(row), row]));
+  const rankedRows = (Array.isArray(result?.completed) ? result.completed : complete)
+    .map(row => completeByKey.get(metricRowKey(canonicalMetricRow(row))) || canonicalMetricRow(row))
+    .filter(row => completeByKey.has(metricRowKey(row)));
+  const rankByKey = new Map(rankedRows.map((row, index) => [metricRowKey(row), index + 1]));
+  const eligible = complete
+    .filter(row => Number.isFinite(recommendationMetricValue(row, xKey)) && Number.isFinite(recommendationMetricValue(row, yKey)))
+    .map(row => ({...row, recommendation_rank: rankByKey.get(metricRowKey(row)) || null}))
+    .sort((a, b) => (a.recommendation_rank || Infinity) - (b.recommendation_rank || Infinity) || metricRowKey(a).localeCompare(metricRowKey(b)));
+  const categoryValues = [...new Set(eligible.map(row => String(row[colorKey] || 'none')))];
+  const categoryColors = visual.categoryColorMap(categoryValues);
+  let plotted = eligible.filter(row => !recommendationState.visualHiddenCategories.has(String(row[colorKey] || 'none')));
+  if (quickView === 'pareto') {
+    plotted = visual.paretoRows(
+      plotted,
+      row => recommendationMetricValue(row, xKey),
+      row => recommendationMetricValue(row, yKey),
+      recommendationMetricDirection(xKey),
+      recommendationMetricDirection(yKey),
+    ).sort((a, b) => a.recommendation_rank - b.recommendation_rank);
+  } else {
+    plotted = visual.applyQuickView(plotted, quickView);
+  }
   if (!plotted.length) {
     const unavailable = 'Metrics unavailable until ground truth evaluation completes';
     hint.textContent = '0 complete evaluations';
@@ -1371,7 +1528,7 @@ function renderRecommendationExplorer(payload, complete, result) {
     interpretation.textContent = unavailable;
     return;
   }
-  hint.textContent = `${plotted.length} complete evaluation${plotted.length === 1 ? '' : 's'}`;
+  hint.textContent = `${plotted.length} shown · ${eligible.length} complete evaluation${eligible.length === 1 ? '' : 's'}`;
   const best = [...plotted].sort((a, b) => recommendationMetricValue(b, yKey) - recommendationMetricValue(a, yKey) || metricScore(b) - metricScore(a))[0];
   const fastest = [...plotted].sort((a, b) => recommendationMetricValue(a, 'avg_latency_seconds') - recommendationMetricValue(b, 'avg_latency_seconds'))[0];
   const mean = plotted.reduce((sum, row) => sum + recommendationMetricValue(row, yKey), 0) / plotted.length;
@@ -1383,33 +1540,86 @@ function renderRecommendationExplorer(payload, complete, result) {
   ].map(([label, value, note]) => `<article class="metric-explorer-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></article>`).join('');
 
   const box = {left: 76, top: 58, width: 610, height: 230};
-  const xValues = plotted.map(row => recommendationMetricValue(row, xKey));
-  const yValues = plotted.map(row => recommendationMetricValue(row, yKey));
+  const xValues = eligible.map(row => recommendationMetricValue(row, xKey));
+  const yValues = eligible.map(row => recommendationMetricValue(row, yKey));
   const minX = Math.min(...xValues), maxX = Math.max(...xValues);
   const minY = Math.min(...yValues), maxY = Math.max(...yValues);
   const xRange = maxX - minX || 1, yRange = maxY - minY || 1;
-  const colorValues = [...new Set(plotted.map(row => String(row[colorKey] || 'none')))];
   const queries = plotted.map(recommendationEvaluatedQueries);
   const minQueries = Math.min(...queries), maxQueries = Math.max(...queries), queryRange = maxQueries - minQueries || 1;
-  const winnerLabels = recommendationWinnerLabels(payload, result);
   const sourceLabel = payload.source_type === 'uploaded_project'
     ? (payload.project_label || payload.project_id || 'Uploaded project')
     : 'Official WNS benchmark';
-  const points = plotted.map((row, index) => {
-    const x = box.left + ((recommendationMetricValue(row, xKey) - minX) / xRange) * box.width;
-    const y = box.top + box.height - ((recommendationMetricValue(row, yKey) - minY) / yRange) * box.height;
-    const colorIndex = Math.max(0, colorValues.indexOf(String(row[colorKey] || 'none'))) % 4;
+  const offsets = visual.collisionOffsets(
+    plotted,
+    row => recommendationMetricValue(row, xKey),
+    row => recommendationMetricValue(row, yKey),
+  );
+  recommendationState.visualPointData.clear();
+  const points = plotted.map(row => {
+    const offset = offsets.get(row) || {dx: 0, dy: 0};
+    const x = box.left + ((recommendationMetricValue(row, xKey) - minX) / xRange) * box.width + offset.dx;
+    const y = box.top + box.height - ((recommendationMetricValue(row, yKey) - minY) / yRange) * box.height + offset.dy;
+    const category = String(row[colorKey] || 'none');
+    const color = categoryColors[category] || visual.palette[0];
     const radius = bubbleKey === 'evaluated_queries'
       ? 7 + ((recommendationEvaluatedQueries(row) - minQueries) / queryRange) * 10
-      : 9;
+      : 8;
     const comboId = String(row.combo_id || metricRowKey(row));
-    const roleText = (winnerLabels.get(comboId) || []).join(' / ');
-    const title = `${pipelineLabel(row)} · ${recommendationMetricLabel(xKey)} ${fmt(recommendationMetricValue(row, xKey), 3)} · ${recommendationMetricLabel(yKey)} ${fmt(recommendationMetricValue(row, yKey), 3)} · ${sourceLabel} · complete`;
-    return `<g class="metric-point" data-color-index="${colorIndex}" tabindex="0"><title>${esc(title)}</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" class="metric-tradeoff-dot dot-${colorIndex}" />${roleText ? `<text x="${(x + radius + 4).toFixed(1)}" y="${(y + 4).toFixed(1)}" class="svg-winner-label">${esc(roleText)}</text>` : ''}</g>`;
+    const rank = row.recommendation_rank || eligible.length;
+    const rankClass = rank <= 5 ? 'metric-rank-top' : rank > Math.max(0, eligible.length - 5) ? 'metric-rank-bottom' : 'metric-rank-middle';
+    const familyKey = visual.familyKey(row);
+    const shape = visual.rerankerShape(row.reranker);
+    const badges = recommendationModule().rowBadges(row, result?.roles || {});
+    const title = `Rank ${rank} · ${pipelineLabel(row)} · ${recommendationMetricLabel(xKey)} ${fmt(recommendationMetricValue(row, xKey), 3)} · ${recommendationMetricLabel(yKey)} ${fmt(recommendationMetricValue(row, yKey), 3)} · ${sourceLabel} · complete`;
+    recommendationState.visualPointData.set(comboId, {
+      row, rank, badges, xKey, yKey,
+      xValue: recommendationMetricValue(row, xKey),
+      yValue: recommendationMetricValue(row, yKey),
+    });
+    const halo = rankClass === 'metric-rank-top'
+      ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 4).toFixed(1)}" class="metric-rank-top-halo" />`
+      : rankClass === 'metric-rank-bottom'
+        ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 3).toFixed(1)}" class="metric-rank-bottom-halo" />`
+        : '';
+    const rankNumber = rankClass === 'metric-rank-top'
+      ? `<text x="${x.toFixed(1)}" y="${(y + 3).toFixed(1)}" class="metric-rank-number">${rank}</text>`
+      : '';
+    return `<g class="metric-point ${rankClass}" data-combo-id="${esc(comboId)}" data-family-key="${esc(familyKey)}" data-category="${esc(category)}" data-rank="${rank}" data-point-x="${x.toFixed(1)}" data-point-y="${y.toFixed(1)}" data-color="${esc(color)}" tabindex="0"><title>${esc(title)}</title>${halo}${recommendationMarkerSvg(shape, x, y, radius, color, rankClass)}${rankNumber}</g>`;
   }).join('');
-  const legend = colorValues.map((value, index) => `<li><span class="metric-legend-dot dot-${index % 4}"></span><strong>${esc(value)}</strong></li>`).join('');
-  chart.innerHTML = `<svg viewBox="0 0 760 350" role="img" aria-label="${esc(recommendationMetricLabel(yKey))} versus ${esc(recommendationMetricLabel(xKey))} complete evaluation trade-off chart"><text x="14" y="24" class="svg-title">Complete-run trade-off</text><line x1="${box.left}" y1="${box.top + box.height}" x2="${box.left + box.width}" y2="${box.top + box.height}" class="svg-axis" /><line x1="${box.left}" y1="${box.top}" x2="${box.left}" y2="${box.top + box.height}" class="svg-axis" /><text x="${box.left}" y="${box.top + box.height + 24}" class="svg-value">${fmt(minX, 3)}</text><text x="${box.left + box.width - 34}" y="${box.top + box.height + 24}" class="svg-value">${fmt(maxX, 3)}</text><text x="${box.left - 54}" y="${box.top + box.height}" class="svg-value">${fmt(minY, 3)}</text><text x="${box.left - 54}" y="${box.top + 5}" class="svg-value">${fmt(maxY, 3)}</text><text x="${box.left + box.width - 120}" y="${box.top + box.height + 48}" class="svg-guidance">${xKey === 'avg_latency_seconds' ? 'Faster ←' : 'Lower ←'}</text><text x="14" y="${box.top - 16}" class="svg-guidance">Better ↑</text>${points}</svg><ul class="metric-tradeoff-legend" aria-label="Color grouping legend">${legend}</ul>`;
-  interpretation.textContent = `${recommendationMetricLabel(xKey)} is horizontal${xKey === 'avg_latency_seconds' ? '; lower is faster' : ''}. ${recommendationMetricLabel(yKey)} is vertical; color groups by ${recommendationComponentLabel(colorKey).toLowerCase()}. Labels remain pinned only to recommendation winners.`;
+  const legend = categoryValues.map(value => {
+    const hidden = recommendationState.visualHiddenCategories.has(value);
+    return `<li><button type="button" class="metric-legend-filter${hidden ? ' is-hidden' : ''}" data-category="${esc(value)}" aria-pressed="${hidden ? 'false' : 'true'}"><span class="metric-legend-dot" style="--point-color:${esc(categoryColors[value])}"></span><strong>${esc(value)}</strong></button></li>`;
+  }).join('');
+  const idealZone = recommendationMetricDirection(xKey) === 'lower' && recommendationMetricDirection(yKey) === 'higher'
+    ? `<rect x="${box.left}" y="${box.top}" width="${(box.width * .34).toFixed(1)}" height="${(box.height * .34).toFixed(1)}" rx="12" class="metric-ideal-zone" /><text x="${box.left + 10}" y="${(box.top + box.height * .34 - 10).toFixed(1)}" class="metric-ideal-label">Ideal zone</text>`
+    : '';
+  chart.innerHTML = `<svg viewBox="0 0 760 350" role="img" aria-label="${esc(recommendationMetricLabel(yKey))} versus ${esc(recommendationMetricLabel(xKey))} complete evaluation trade-off chart"><text x="14" y="24" class="svg-title">Complete-run trade-off</text>${idealZone}<line x1="${box.left}" y1="${box.top + box.height}" x2="${box.left + box.width}" y2="${box.top + box.height}" class="svg-axis" /><line x1="${box.left}" y1="${box.top}" x2="${box.left}" y2="${box.top + box.height}" class="svg-axis" /><text x="${box.left}" y="${box.top + box.height + 24}" class="svg-value">${fmt(minX, 3)}</text><text x="${box.left + box.width - 34}" y="${box.top + box.height + 24}" class="svg-value">${fmt(maxX, 3)}</text><text x="${box.left - 54}" y="${box.top + box.height}" class="svg-value">${fmt(minY, 3)}</text><text x="${box.left - 54}" y="${box.top + 5}" class="svg-value">${fmt(maxY, 3)}</text><text x="${box.left + box.width - 120}" y="${box.top + box.height + 48}" class="svg-guidance">${xKey === 'avg_latency_seconds' ? 'Faster ←' : 'Lower ←'}</text><text x="14" y="${box.top - 16}" class="svg-guidance">Better ↑</text><g class="metric-family-overlay" aria-hidden="true"></g>${points}</svg><ul class="metric-tradeoff-legend" aria-label="Color grouping legend">${legend}</ul>`;
+  const details = $('metricPointDetails');
+  if (details && !recommendationState.visualSelectedCombo) details.textContent = 'Select a point to inspect exact metrics.';
+  bindRecommendationChartInteractions(chart, payload);
+  interpretation.textContent = `${recommendationMetricLabel(xKey)} is horizontal${xKey === 'avg_latency_seconds' ? '; lower is faster' : ''}. ${recommendationMetricLabel(yKey)} is vertical; color groups by ${recommendationComponentLabel(colorKey).toLowerCase()}. Mint rings identify the top five; select a point for exact metrics.`;
+}
+
+function bindRecommendationHeatmapInteractions(target) {
+  if (!target || typeof target.querySelectorAll !== 'function') return;
+  const cells = [...target.querySelectorAll('.metric-heatmap-cell')];
+  const clear = () => cells.forEach(cell => cell.classList.remove('is-axis-related'));
+  const highlight = active => {
+    const row = active.dataset.heatmapRow;
+    const column = active.dataset.heatmapColumn;
+    cells.forEach(cell => cell.classList.toggle(
+      'is-axis-related',
+      cell.dataset.heatmapRow === row || cell.dataset.heatmapColumn === column,
+    ));
+  };
+  cells.forEach(cell => {
+    cell.tabIndex = 0;
+    cell.addEventListener('pointerenter', () => highlight(cell));
+    cell.addEventListener('pointerleave', clear);
+    cell.addEventListener('focus', () => highlight(cell));
+    cell.addEventListener('blur', clear);
+  });
 }
 
 function renderRecommendationHeatmap(payload, stateRows) {
@@ -1431,27 +1641,45 @@ function renderRecommendationHeatmap(payload, stateRows) {
     return;
   }
   const rowsByKey = new Map(stateRows.map(row => [metricRowKey(row), row]));
-  const measuredValues = stateRows
+  const visibleRows = chunkers.flatMap(sheet => stores.map(store => (
+    rowsByKey.get(`${sheet}|${embedding}|${store}|${canonicalRerankerName(reranker)}`)
+  ))).filter(Boolean);
+  const measuredValues = visibleRows
     .filter(row => recommendationRowState(row) === 'complete' && recommendationEvaluatedQueries(row) > 0)
     .map(row => recommendationMetricValue(row, metric))
     .filter(Number.isFinite);
   const minValue = measuredValues.length ? Math.min(...measuredValues) : 0;
   const maxValue = measuredValues.length ? Math.max(...measuredValues) : 0;
   const range = maxValue - minValue || 1;
-  legend.textContent = measuredValues.length
-    ? `Low ${fmt(minValue, 3)} → High ${fmt(maxValue, 3)}`
-    : 'No complete measured values';
+  const lowerIsBetter = recommendationMetricDirection(metric) === 'lower';
+  const bestValue = measuredValues.length ? (lowerIsBetter ? minValue : maxValue) : null;
+  const worstValue = measuredValues.length ? (lowerIsBetter ? maxValue : minValue) : null;
+  const stateSwatches = ['not_run', 'running', 'incomplete', 'failed']
+    .map(value => `<span class="metric-state-swatch" data-state="${value}">${esc(value.replace('_', ' '))}</span>`)
+    .join('');
+  // Heatmap markup is safe: state names are allowlisted, identifiers are escaped, and metrics are numerically formatted.
+  legend.innerHTML = measuredValues.length
+    ? `<span class="metric-scale-label">Low ${fmt(minValue, 3)}</span><span class="metric-scale-ramp" aria-hidden="true"></span><span class="metric-scale-label">High ${fmt(maxValue, 3)}</span>${stateSwatches}`
+    : `<span>No complete measured values</span>${stateSwatches}`;
   const cells = chunkers.flatMap(sheet => stores.map(store => {
     const row = rowsByKey.get(`${sheet}|${embedding}|${store}|${canonicalRerankerName(reranker)}`);
     const rowState = recommendationRowState(row);
     const metricValue = recommendationMetricValue(row, metric);
     const measured = rowState === 'complete' && recommendationEvaluatedQueries(row) > 0 && Number.isFinite(metricValue);
-    const bucket = measured ? Math.max(0, Math.min(4, Math.round(((metricValue - minValue) / range) * 4))) : 0;
+    const normalized = measured ? (metricValue - minValue) / range : 0;
+    const performance = lowerIsBetter ? 1 - normalized : normalized;
+    const bucket = measured ? Math.max(0, Math.min(4, Math.round(performance * 4))) : 0;
+    const extrema = measured && metricValue === bestValue
+      ? ' is-best'
+      : measured && metricValue === worstValue
+        ? ' is-worst'
+        : '';
     const stateLabel = rowState.replace('_', ' ');
     const display = measured ? fmt(metricValue, 3) : stateLabel;
-    return `<div class="metric-heatmap-cell ${measured ? `metric-quality-${bucket}` : ''}" data-state="${esc(rowState)}" role="gridcell" aria-label="${esc(`${sheet}, ${store}: ${measured ? `${recommendationMetricLabel(metric)} ${display}` : stateLabel}`)}"><strong>${esc(display)}</strong><small>${measured ? esc(recommendationMetricLabel(metric)) : 'No complete metric'}</small></div>`;
+    return `<div class="metric-heatmap-cell ${measured ? `metric-quality-${bucket}` : ''}${extrema}" data-state="${esc(rowState)}" data-heatmap-row="${esc(sheet)}" data-heatmap-column="${esc(store)}" role="gridcell" aria-label="${esc(`${sheet}, ${store}: ${measured ? `${recommendationMetricLabel(metric)} ${display}` : stateLabel}`)}"><strong>${esc(display)}</strong><small>${measured ? esc(recommendationMetricLabel(metric)) : 'No complete metric'}</small></div>`;
   }));
   target.innerHTML = `<div class="metric-heatmap-scroll-note">Scroll horizontally to view all configured vector DB columns.</div><div class="metric-heatmap-grid" role="grid" aria-label="${esc(recommendationMetricLabel(metric))} by chunker and vector DB" style="grid-template-columns:minmax(180px,1.2fr) repeat(${stores.length},minmax(132px,1fr))"><div class="metric-heatmap-head">Chunker / vector DB</div>${stores.map(store => `<div class="metric-heatmap-head">${esc(store)}</div>`).join('')}${chunkers.map((sheet, index) => `<div class="metric-heatmap-row-label">${esc(sheet)}</div>${cells.slice(index * stores.length, (index + 1) * stores.length).join('')}`).join('')}</div>`;
+  bindRecommendationHeatmapInteractions(target);
 }
 
 function renderRecommendationAnalytics(payload = recommendationState.active || {}) {
@@ -2493,7 +2721,7 @@ async function runAction(kind) {
   const payload = recommendationState.active || officialRecommendationPayload('official');
   renderMetricsSource(payload);
 }));
-['metricXAxis','metricYAxis','metricColorBy','metricBubbleBy','heatmapMetric','heatmapEmbedding','heatmapReranker'].forEach(id => {
+['metricXAxis','metricYAxis','metricColorBy','metricBubbleBy','metricQuickView','heatmapMetric','heatmapEmbedding','heatmapReranker'].forEach(id => {
   $(id)?.addEventListener('input', () => renderRecommendationAnalytics(recommendationState.active || {}));
 });
 ['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));

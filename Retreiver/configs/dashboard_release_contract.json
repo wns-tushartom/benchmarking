@@ -24,6 +24,9 @@
     "metricYAxis",
     "metricColorBy",
     "metricBubbleBy",
+    "metricQuickView",
+    "metricChartTooltip",
+    "metricPointDetails",
     "tradeoffChart",
     "heatmapMetric",
     "heatmapEmbedding",
@@ -49,6 +52,7 @@
   },
   "required_files": [
     "web/recommendations.js",
+    "web/recommendation-visuals.js",
     "web/source-state.js",
     "benchmarking/core/runner.py",
     "scripts/dashboard_source_catalog.py",
@@ -58,9 +62,17 @@
   ],
   "file_tokens": {
     "web/index.html": [
-      "20260723-canonical-dashboard-v4",
+      "20260724-canonical-dashboard-v5",
       "id=\"tradeoffChart\"",
+      "id=\"metricQuickView\"",
+      "id=\"metricPointDetails\"",
       "id=\"metricHeatmap\""
+    ],
+    "web/recommendation-visuals.js": [
+      "categoryColorMap",
+      "rerankerShape",
+      "familyKey",
+      "paretoRows"
     ],
     "web/app.js": [
       "renderRecommendationAnalytics",

@@ -50,6 +50,8 @@ def test_release_contract_declares_every_required_surface() -> None:
         "recommendationStrip",
         "recommendationTable",
         "tradeoffChart",
+        "metricQuickView",
+        "metricPointDetails",
         "metricHeatmap",
         "runSourceContext",
     }.issubset(contract["dom_ids"])
@@ -60,7 +62,8 @@ def test_release_contract_declares_every_required_surface() -> None:
         "/api/run/complete-pipeline",
     }.issubset(contract["api_routes"])
     file_tokens = contract["file_tokens"]
-    assert "20260723-canonical-dashboard-v4" in file_tokens["web/index.html"]
+    assert "20260724-canonical-dashboard-v5" in file_tokens["web/index.html"]
+    assert "web/recommendation-visuals.js" in contract["required_files"]
     assert "linked_groundtruth_id" in file_tokens["scripts/dashboard_source_catalog.py"]
     assert "groundtruth_500.csv" in file_tokens["scripts/dashboard_source_catalog.py"]
     assert "OFFICIAL_GROUNDTRUTH_ID" in file_tokens["benchmarking/core/runner.py"]
