@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260724-canonical-dashboard-v5" />
+  <link rel="stylesheet" href="/styles.css?v=20260724-canonical-dashboard-v5.1" />
 </head>
 <body>
   <main class="shell">
@@ -229,12 +229,11 @@
           <label hidden data-source-mirror><select id="runGroundtruth"></select><small>Choose a validated file or None for evidence-only</small></label>
           <label>Retrieval Top K<input id="runRetrievalTopK" type="number" min="1" max="100" value="10" /><small>Candidate chunks retrieved per query before reranking</small></label>
           <label>Reranked Output K<input id="runRerankedOutputK" type="number" min="1" max="100" value="5" /><small>Final chunks retained after reranking; cannot exceed Retrieval Top K</small></label>
-          <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
           <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
           <label class="check-row"><input id="runAllowPartialExtraction" type="checkbox" /> Allow audited text-only documents <small>Explicitly permits PyPDF2 fallback/review rows while preserving the extraction warning.</small></label>
-          <label id="runQueryField" class="query-field" hidden>Evidence-only queries<textarea id="runQueries">What to do when flights have been cancelled
+          <label id="runQueryField" class="query-field">Typed query evidence smoke<textarea id="runQueries">What to do when flights have been cancelled
 How to add infant manually
-Passenger wants return refund due to illness</textarea><span class="inline-upload"><input id="runQueryFile" type="file" accept=".txt,.csv,.xlsx" /><button id="runQueryUploadBtn" type="button">Load query file</button></span><small id="runQueryUploadStatus">Required in evidence-only mode. Type one query per line or load a validated TXT, CSV, or XLSX file.</small></label>
+Passenger wants return refund due to illness</textarea><span class="inline-upload"><input id="runQueryFile" type="file" accept=".txt,.csv,.xlsx" /><button id="runQueryUploadBtn" type="button">Load query file</button></span><small id="runQueryUploadStatus">Always available. Use <strong>Test typed query evidence</strong> for ad-hoc evidence without changing the evaluated ground-truth run. Evaluated runs always use the full linked ground truth (query limit fixed at 0).</small></label>
         </div>
         <p id="runModeHint" class="status-note">Evaluated mode — retrieval metrics will use the selected ground truth.</p>
         <div class="run-actions primary-run-actions">
@@ -462,7 +461,7 @@ Passenger wants return refund due to illness</textarea><span class="inline-uploa
   </main>
   <script src="/source-state.js?v=20260716-metrics-integrity"></script>
   <script src="/recommendations.js?v=20260716-extraction-override"></script>
-  <script src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5"></script>
-  <script src="/app.js?v=20260724-canonical-dashboard-v5"></script>
+  <script src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1"></script>
+  <script src="/app.js?v=20260724-canonical-dashboard-v5.1"></script>
 </body>
 </html>

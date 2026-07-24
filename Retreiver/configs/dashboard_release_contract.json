@@ -62,11 +62,13 @@
   ],
   "file_tokens": {
     "web/index.html": [
-      "20260724-canonical-dashboard-v5",
+      "20260724-canonical-dashboard-v5.1",
       "id=\"tradeoffChart\"",
       "id=\"metricQuickView\"",
       "id=\"metricPointDetails\"",
-      "id=\"metricHeatmap\""
+      "id=\"metricHeatmap\"",
+      "id=\"runQueryField\"",
+      "Test typed query evidence"
     ],
     "web/recommendation-visuals.js": [
       "categoryColorMap",
@@ -79,7 +81,11 @@
       "renderRecommendationHeatmap",
       "syncLinkedGroundtruth",
       "cache: 'no-store'",
-      "/api/result-sources"
+      "/api/result-sources",
+      "semanticRunStatus",
+      "selectedParams",
+      "query_limit",
+      "renderOperational"
     ],
     "scripts/serve_benchmark_dashboard.py": [
       "\"source_catalog\": build_source_catalog(ROOT)",

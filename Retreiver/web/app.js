@@ -608,19 +608,81 @@ function renderNvidiaRag(nvidia) {
   ]);
 }
 
+function parseSemanticRunPayload(output) {
+  const text = String(output || '').trim();
+  if (!text) return null;
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (!(line.startsWith('{') && line.endsWith('}'))) continue;
+    try {
+      const payload = JSON.parse(line);
+      if (payload && typeof payload === 'object') return payload;
+    } catch (_) {
+      // keep scanning earlier lines
+    }
+  }
+  return null;
+}
+
+function semanticRunStatus(payload = {}) {
+  if (payload.running) {
+    return {ok: null, label: 'Running', detail: 'job still running', state: 'running'};
+  }
+  const semantic = parseSemanticRunPayload(payload.output || payload.raw_output || '');
+  const state = String(semantic?.state || '').toLowerCase();
+  const succeeded = Number(semantic?.succeeded);
+  const failed = Number(semantic?.failed);
+  if (state === 'completed' || (Number.isFinite(succeeded) && succeeded > 0 && failed === 0 && state !== 'partial' && state !== 'failed')) {
+    return {
+      ok: true,
+      label: 'Passed',
+      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
+      state: state || 'completed',
+      semantic,
+    };
+  }
+  if (state === 'partial') {
+    return {
+      ok: false,
+      label: 'Partial',
+      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
+      state,
+      semantic,
+    };
+  }
+  if (state === 'failed' || (Number.isFinite(failed) && failed > 0 && (!Number.isFinite(succeeded) || succeeded === 0))) {
+    return {
+      ok: false,
+      label: 'Failed',
+      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
+      state: state || 'failed',
+      semantic,
+    };
+  }
+  if (payload.exit_code === 0) {
+    return {ok: true, label: 'Passed', detail: `exit code ${payload.exit_code}`, state: 'completed', semantic};
+  }
+  if (payload.exit_code == null) {
+    return {ok: null, label: 'Running', detail: 'awaiting exit code', state: 'running', semantic};
+  }
+  return {ok: false, label: 'Needs attention', detail: `exit code ${payload.exit_code}`, state: 'failed', semantic};
+}
+
 function renderRunResult(kind, payload) {
   const cards = $('runResultCards');
   const tbl = $('runResultTable');
   const output = payload.output || '';
   if (!cards || !tbl) return;
-  const ok = payload.exit_code === 0;
+  const status = semanticRunStatus(payload);
+  const ok = status.ok === true;
   const lines = output.split('\n').filter(Boolean);
   const retrievalLines = lines.filter(l => l.includes('query=') && l.includes('hits='));
   const extracted = retrievalLines.map(line => {
     const get = (rx) => (line.match(rx) || [,''])[1];
     return {combo:get(/^([^q]+?)\s+query=/), query:get(/query="([^"]+)"/), hits:get(/hits=(\d+)/), seconds:get(/seconds=([0-9.]+)/), raw:line};
   });
-  cards.innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Status</span><strong>${ok ? 'Passed' : 'Needs attention'}</strong><small>${esc(kind)} · exit code ${esc(payload.exit_code ?? '—')}</small></article>
+  cards.innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Status</span><strong>${esc(status.label)}</strong><small>${esc(kind)} · ${esc(status.detail)} · exit code ${esc(payload.exit_code ?? '—')}</small></article>
     <article class="run-result-card"><span>Result rows</span><strong>${extracted.length || lines.length}</strong><small>${extracted.length ? 'retrieval checks parsed' : 'output lines'}</small></article>
     <article class="run-result-card"><span>Next useful view</span><strong>${kind.includes('hallucination') ? 'Grounding audit' : kind.includes('eval') ? 'Quality decision' : 'Retrieval evidence'}</strong><small>Refresh already completed</small></article>`;
   if (extracted.length) {
@@ -2163,17 +2225,25 @@ function renderOperational() {
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   renderDatasetStatusSummary();
-  $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
-  $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
-  const evidenceRowsLoaded = retrieval.length + rerank.length;
-  $('retrievalStatus').textContent = String(evidenceRowsLoaded);
-  $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
+  const projectOverview = activeProjectOverviewCounts();
+  if (projectOverview) {
+    $('comboStatus').textContent = String(projectOverview.comboCount);
+    $('comboNote').textContent = projectOverview.comboNote;
+    $('retrievalStatus').textContent = String(projectOverview.evidenceCount);
+    $('retrievalNote').textContent = projectOverview.evidenceNote;
+  } else {
+    $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
+    $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
+    const evidenceRowsLoaded = retrieval.length + rerank.length;
+    $('retrievalStatus').textContent = String(evidenceRowsLoaded);
+    $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
+  }
   setText('embeddingStatus', embeddings.length ? embeddings.join(' + ') : '—');
   setText('dbStatus', stores.length ? stores.join(' + ') : '—');
   syncStatusDialog();
   $('ingestionHint').textContent = `${latest.length} latest successful component rows`;
   $('rerankHint').textContent = `${rerank.length} artifacts`;
-  $('artifactHint').textContent = `${state.files.length} files`;
+  $('artifactHint').textContent = `${(state.files || []).length} files`;
   $('healthHint').textContent = `${health.filter(h => h.ok).length}/${health.length || 0} healthy`;
   const pdfAudit = op.pdf_audit || {};
   $('pdfAuditHint') && ($('pdfAuditHint').textContent = pdfAudit.total ? `${pdfAudit.ok_count || 0}/${pdfAudit.total} ready · review hidden from KPI` : 'No audit file yet');
@@ -2291,7 +2361,7 @@ function syncRunMode() {
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
   const defaultDataset = !dataset || dataset.kind === 'default';
-  if ($('runQueryField')) $('runQueryField').hidden = !evidenceOnly;
+  if ($('runQueryField')) $('runQueryField').hidden = false;
   if ($('runModeHint')) {
     $('runModeHint').textContent = !defaultDataset
       ? evidenceOnly
@@ -2452,6 +2522,43 @@ async function loadOptions() {
   updateSelectedMatrixCount();
 }
 
+function activeProjectOverviewCounts() {
+  const datasetId = $('globalDataset')?.value || $('runDataset')?.value || '';
+  if (!String(datasetId).startsWith('project:')) return null;
+  const active = recommendationState.active;
+  if (active?.source_type === 'uploaded_project') {
+    const rows = recommendationResultRows(active);
+    const comboCount = rows.length || Number(active.combination_count || 0) || 0;
+    const evidenceCount = rows.reduce((sum, row) => {
+      const value = Number(row?.evidence_count);
+      return sum + (Number.isFinite(value) ? value : 0);
+    }, 0);
+    const failed = rows.filter(row => String(row?.status || '').toLowerCase() === 'failed').length;
+    return {
+      comboCount,
+      comboNote: `Project run ${active.run_id || ''} · ${failed ? `${failed} failed` : 'selected source'}`.trim(),
+      evidenceCount,
+      evidenceNote: `${fmtInt(evidenceCount)} evidence rows from the selected project run. Official smoke totals are hidden while a project dataset is active.`,
+    };
+  }
+  const runs = Array.isArray(recommendationState.runs) ? recommendationState.runs : [];
+  if (runs.length) {
+    const comboCount = runs.reduce((sum, run) => sum + Number(run?.combination_count || 0), 0);
+    return {
+      comboCount,
+      comboNote: `${runs.length} project run(s) discovered for this dataset`,
+      evidenceCount: 0,
+      evidenceNote: 'No admitted project-run evidence selected yet. Complete a run or choose a completed project result source.',
+    };
+  }
+  return {
+    comboCount: 0,
+    comboNote: 'No project matrix combinations recorded yet',
+    evidenceCount: 0,
+    evidenceNote: 'Project dataset selected — official evidence/smoke counters are hidden until a project run is admitted.',
+  };
+}
+
 function isProjectDatasetSelected() {
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   return datasetId.startsWith('project:');
@@ -2510,7 +2617,7 @@ function selectedParams() {
   selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
   selectedValues('runStore').forEach(v => p.append('store', v));
   selectedValues('runRerankerMain').forEach(v => p.append('reranker', v));
-  p.set('query_limit', $('runQueryLimit')?.value || '0');
+  p.set('query_limit', '0');
   p.set('retrieval_top_k', $('runRetrievalTopK')?.value || '10');
   p.set('reranked_output_k', $('runRerankedOutputK')?.value || '5');
   p.set('dataset_id', $('runDataset')?.value || 'dataset:wns-default');
@@ -2580,7 +2687,7 @@ function renderPreflight(payload) {
   if (diagnostics) diagnostics.open = false;
   $('runResultCards').innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Requirements</span><strong>${ok ? 'Ready' : 'Blocked'}</strong><small>${missing.length ? `${missing.length} item(s) needed` : 'All required inputs found'}</small></article>
     <article class="run-result-card"><span>Pipeline size</span><strong>${esc(payload.combo_count || 0)}</strong><small>chunker · embedding · DB combinations</small></article>
-    <article class="run-result-card"><span>Mode</span><strong>${evidenceOnly ? 'Evidence-only' : 'Evaluated'}</strong><small>${payload.query_limit ? `${payload.query_limit} query limit` : 'all queries'}</small></article>`;
+    <article class="run-result-card"><span>Mode</span><strong>${evidenceOnly ? 'Evidence-only' : 'Evaluated'}</strong><small>query limit fixed at 0 (all GT queries)</small></article>`;
   const rows = [
     ...missing.map(x => ({type:'Needed', item:x})),
     ...warnings.map(x => ({type:'Warning', item:x})),
@@ -2625,9 +2732,11 @@ async function pollRunJob(jobId) {
   const payload = await api(`/api/run/status?job_id=${encodeURIComponent(jobId)}`);
   const output = payload.output || '';
   const running = !!payload.running;
-  $('runStatus').textContent = running ? 'Running' : (payload.exit_code === 0 ? 'Done' : 'Check output');
+  const status = semanticRunStatus({...payload, running, output});
+  $('runStatus').textContent = running ? 'Running' : (status.ok === true ? 'Done' : 'Check output');
   $('runOutput').textContent = output;
-  $('runResultCards').innerHTML = `<article class="run-result-card ${payload.exit_code === 0 ? 'ok' : running ? '' : 'warn'}"><span>Status</span><strong>${running ? 'Running' : payload.exit_code === 0 ? 'Passed' : 'Needs attention'}</strong><small>job ${esc(jobId)}</small></article>
+  const cardClass = running ? '' : (status.ok === true ? 'ok' : 'warn');
+  $('runResultCards').innerHTML = `<article class="run-result-card ${cardClass}"><span>Status</span><strong>${esc(status.label)}</strong><small>job ${esc(jobId)} · ${esc(status.detail)}</small></article>
     <article class="run-result-card"><span>Live log</span><strong>${output.split('\n').filter(Boolean).length}</strong><small>${esc(payload.log_path || '')}</small></article>
     <article class="run-result-card"><span>Result view</span><strong>Quality + evidence</strong><small>Tables refresh when stages finish</small></article>`;
   table($('runResultTable'), parseLiveOutputRows(output), [
@@ -2638,7 +2747,40 @@ async function pollRunJob(jobId) {
     setTimeout(() => pollRunJob(jobId).catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }), 1500);
   } else {
     await refresh();
+    await loadResultSources();
+    if ($('globalDataset')?.value) await applyGlobalSourceContext();
   }
+}
+
+
+async function runTypedQuerySmoke() {
+  const queries = typedRunQueries();
+  if (!queries.length) throw new Error('Type at least one query for evidence smoke.');
+  if (!isProjectDatasetSelected()) {
+    return runAction('smoke');
+  }
+  const payload = projectMatrixPayload();
+  payload.groundtruth_id = 'groundtruth:none';
+  payload.typed_queries = queries;
+  $('runStatus').textContent = 'Checking typed evidence smoke';
+  const preflight = await postProjectMatrix('/api/run/preflight-project-matrix', payload);
+  renderPreflight({
+    ...preflight,
+    combo_count: preflight.combination_count || 0,
+    warnings: preflight.warning ? [preflight.warning] : [],
+    groundtruth_id: 'groundtruth:none',
+    query_limit: 0,
+  });
+  if (!preflight.ok) return;
+  $('runStatus').textContent = 'Starting typed evidence smoke';
+  const launched = await postProjectMatrix('/api/run/project-matrix', {
+    ...payload,
+    large_matrix_confirmation: preflight.confirmation_token || null,
+  });
+  const jobId = launched.job?.job_id;
+  if (!jobId) throw new Error('Typed evidence smoke did not return a job ID.');
+  $('runOutput').textContent = `Started typed evidence smoke ${launched.run_id}\njob ${jobId}`;
+  await pollRunJob(jobId);
 }
 
 async function runCompletePipeline() {
@@ -2738,7 +2880,7 @@ $('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline
 $('runQueryUploadBtn')?.addEventListener('click', () => uploadRunQueries().catch(e => { if ($('runQueryUploadStatus')) $('runQueryUploadStatus').textContent = String(e); }));
 $('runParseMineruBtn')?.addEventListener('click', () => runAction('parseMineru').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
-$('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runSmokeBtn')?.addEventListener('click', () => runTypedQuerySmoke().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankerBtn')?.addEventListener('click', () => runAction('rerank').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));

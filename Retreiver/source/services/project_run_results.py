@@ -71,6 +71,7 @@ _V2_FIELDS = (
     "rerank_usage_scope",
     "error_code",
 )
+_V2_FIELDS_WITH_DETAIL = _V2_FIELDS + ("error_detail",)
 _EVIDENCE_FIELDS = (
     "combo_id",
     "query_id",
@@ -496,7 +497,7 @@ class ProjectRunResultService:
             if headers is None or len(headers) != len(set(headers)):
                 raise ValueError
             legacy = tuple(headers) == _LEGACY_FIELDS
-            if not legacy and tuple(headers) != _V2_FIELDS:
+            if not legacy and tuple(headers) not in {_V2_FIELDS, _V2_FIELDS_WITH_DETAIL}:
                 raise ValueError
             raw_rows: list[dict[str, str]] = []
             for raw in reader:

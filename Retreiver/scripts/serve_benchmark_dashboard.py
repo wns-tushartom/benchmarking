@@ -2311,6 +2311,38 @@ def _project_matrix_stages(
     }
 
 
+def _project_matrix_adapter_missing(request: Any) -> list[str]:
+    """Fail closed on missing commercial credentials or known-stale local endpoints."""
+    missing: list[str] = []
+    embeddings = list(getattr(request, "embeddings", ()) or ())
+    rerankers = list(getattr(request, "rerankers", ()) or ())
+
+    if "openai_text-embedding-3-large" in embeddings and not (
+        os.getenv("OPENAI_API_KEY") or ""
+    ).strip():
+        missing.append("OPENAI_API_KEY is required for openai_text-embedding-3-large")
+
+    bge_url = (os.getenv("BGE_RERANK_URL") or "").strip()
+    qwen_url = (os.getenv("QWEN_RERANK_URL") or "").strip()
+    if "bge-reranker-base" in rerankers and re.search(r":5001(?:/|$)", bge_url):
+        missing.append(
+            "BGE_RERANK_URL points to stale port 5001; use the unified adapter on port 5000"
+        )
+    if any(name in rerankers for name in ("qwen3_4b_rerank", "Qwen3:4B Rerank")) and re.search(
+        r":5001(?:/|$)", qwen_url
+    ):
+        missing.append(
+            "QWEN_RERANK_URL points to stale port 5001; use the unified adapter on port 5000"
+        )
+    if "Amazon Rerank v1" in rerankers and not (
+        os.getenv("AWS_ACCESS_KEY_ID")
+        or os.getenv("AWS_PROFILE")
+        or os.getenv("AWS_WEB_IDENTITY_TOKEN_FILE")
+    ):
+        missing.append("Amazon Rerank v1 requires AWS credentials or an AWS profile")
+    return missing
+
+
 def preflight_project_matrix(
     payload: Any,
     *,
@@ -2328,8 +2360,9 @@ def preflight_project_matrix(
             persist_prepared_questions=False,
         )
     )
+    missing = _project_matrix_adapter_missing(validated.request)
     response = {
-        "ok": True,
+        "ok": not missing,
         "dataset_id": dataset_id,
         "project_id": project_id,
         "combination_count": validated.combination_count,
@@ -2338,6 +2371,8 @@ def preflight_project_matrix(
         "confirmation_required": validated.confirmation_required,
         "confirmation_verified": validated.confirmation_verified,
         "confirmation_token": confirmation_token,
+        "missing": missing,
+        "query_limit": 0,
         "stages": _project_matrix_stages(
             project_id,
             workspace,
@@ -2390,6 +2425,13 @@ def launch_project_matrix(
             persist_prepared_questions=True,
         )
     )
+    missing = _project_matrix_adapter_missing(validated.request)
+    if missing:
+        raise ProjectMatrixBridgeError(
+            "project_matrix_not_ready",
+            "; ".join(missing[:3]),
+            400,
+        )
     run_id = workspace.new_run_id()
     run_root: Path | None = None
     try:

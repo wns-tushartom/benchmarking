@@ -281,6 +281,34 @@ def _summary_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(source))
 
 
+def test_cli_exit_code_follows_semantic_run_state(monkeypatch):
+    class FakeRunner:
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def run(self, project_id, run_id):
+            return {
+                "project_id": project_id,
+                "run_id": run_id,
+                "state": "failed",
+                "succeeded": 0,
+                "failed": 1,
+                "combination_count": 1,
+            }
+
+    monkeypatch.setattr(run_project_matrix, "ProjectMatrixRunner", FakeRunner)
+    monkeypatch.setattr(run_project_matrix, "ProjectWorkspace", lambda root: object())
+    code = run_project_matrix.main(
+        [
+            "--project-id",
+            "alpha_123e4567e89b42d3a456426614174000",
+            "--run-id",
+            "run_123e4567e89b42d3a456426614174000",
+        ]
+    )
+    assert code == 1
+
+
 def test_cli_accepts_only_project_and_run_ids():
     parsed = run_project_matrix.build_parser().parse_args(
         ["--project-id", "alpha_123e4567e89b42d3a456426614174000", "--run-id", "run_123e4567e89b42d3a456426614174000"]

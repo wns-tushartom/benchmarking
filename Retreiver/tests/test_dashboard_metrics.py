@@ -527,9 +527,9 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260724-canonical-dashboard-v5" in index
-    assert "/styles.css?v=20260724-canonical-dashboard-v5" in index
-    assert "/recommendation-visuals.js?v=20260724-canonical-dashboard-v5" in index
+    assert "/app.js?v=20260724-canonical-dashboard-v5.1" in index
+    assert "/styles.css?v=20260724-canonical-dashboard-v5.1" in index
+    assert "/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1" in index
     assert "/app.js?v=20260722-complete-ui-metrics\"" not in index
     assert "/styles.css?v=20260716-meeting-hardening" not in index
     assert "20260709-query-ui" not in index
@@ -922,8 +922,12 @@ def test_frontend_has_multi_select_controls_without_legacy_lexical_preview():
     assert "projectSelections()" not in app
     assert "lexical_preview" not in app
     assert "selections: projectSelections()" not in app
-    assert "Evidence-only queries" in index
+    assert "Typed query evidence smoke" in index
+    assert 'id="runQueryLimit"' not in index
     assert "id=\"runQueries\"" in index
+    assert "semanticRunStatus" in app
+    assert "runTypedQuerySmoke" in app
+    assert "p.set('query_limit', '0')" in app
     assert 'id="runDataset"' in index
     assert 'id="nvidiaDataset"' in index
     assert 'id="uploadType"' in index

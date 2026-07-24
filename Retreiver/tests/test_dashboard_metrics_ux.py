@@ -58,11 +58,11 @@ const context = {{
   }},
   window: {{}}, RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: require({str(RECOMMENDATIONS)!r}), location: {{hash:'#compare'}}, history: {{replaceState() {{}}}},
   fetch: async () => ({{ok:true, json:async()=>({{}}), text:async()=>''}}),
-  setTimeout() {{}}, clearTimeout() {{}}, AbortController,
+  setTimeout() {{}}, clearTimeout() {{}}, AbortController, URLSearchParams,
 }};
 vm.createContext(context);
 const code = fs.readFileSync({str(APP)!r}, 'utf8').split("loadOptions().then(refresh)")[0];
-vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n`, context);
+vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n  globalThis.__setDashboardState = (value) => {{ state = value; }};\n  globalThis.__setBenchmarkOptions = (value) => {{ benchmarkOptions = value; }};\n`, context);
 {assertions}
 """
     proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=10)
@@ -85,10 +85,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5' in html
-    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5') < html.index('/app.js?v=20260724-canonical-dashboard-v5')
-    assert '/styles.css?v=20260724-canonical-dashboard-v5' in html
-    assert '/app.js?v=20260724-canonical-dashboard-v5' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1') < html.index('/app.js?v=20260724-canonical-dashboard-v5.1')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5.1' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5.1' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:
@@ -259,5 +259,63 @@ state = {{operational:{{pipeline_state:[{{sheet:'official',embedding:'official',
 context.renderRecommendationAnalytics({payload});
 const heatmap = el('metricHeatmap').innerHTML;
 if (!heatmap.includes('baseline_chunker') || !heatmap.includes('FAISS') || !heatmap.includes('0.500') || heatmap.includes('OfficialDB')) throw new Error(heatmap);
+"""
+    )
+
+
+def test_semantic_job_status_prefers_run_payload_over_exit_code() -> None:
+    run_dashboard_probe(
+        """
+const failed = context.semanticRunStatus({exit_code:0, output:'{"state":"failed","succeeded":0,"failed":1,"run_id":"run_x"}'});
+if (failed.label !== 'Failed' || failed.ok !== false) throw new Error(JSON.stringify(failed));
+const passed = context.semanticRunStatus({exit_code:0, output:'{"state":"completed","succeeded":1,"failed":0}'});
+if (passed.label !== 'Passed' || passed.ok !== true) throw new Error(JSON.stringify(passed));
+const partial = context.semanticRunStatus({exit_code:0, output:'{"state":"partial","succeeded":1,"failed":1}'});
+if (partial.label !== 'Partial' || partial.ok !== false) throw new Error(JSON.stringify(partial));
+const running = context.semanticRunStatus({exit_code:null, running:true, output:''});
+if (running.label !== 'Running') throw new Error(JSON.stringify(running));
+"""
+    )
+
+
+def test_selected_params_always_submit_query_limit_zero_without_query_limit_control() -> None:
+    html = INDEX.read_text(encoding='utf-8')
+    assert 'id="runQueryLimit"' not in html
+    assert 'id="runQueryField"' in html
+    assert 'id="runSmokeBtn"' in html
+    run_dashboard_probe(
+        """
+el('runDataset').value = 'dataset:wns-default';
+el('runGroundtruth').value = 'groundtruth:official';
+el('runRetrievalTopK').value = '10';
+el('runRerankedOutputK').value = '5';
+el('runQueries').value = 'alpha\\nbeta';
+el('runSheet').selectedOptions = [{value:'fixed_tok1200_ov150'}];
+el('runEmbedding').selectedOptions = [{value:'gte_multilingual_base'}];
+el('runStore').selectedOptions = [{value:'FAISS'}];
+el('runRerankerMain').selectedOptions = [{value:'bge-reranker-base'}];
+context.__setBenchmarkOptions({chunkers:['fixed_tok1200_ov150'],embeddings:['gte_multilingual_base'],vector_stores:['FAISS'],rerankers:['bge-reranker-base'],matrix_count:1});
+const params = context.selectedParams();
+if (params.get('query_limit') !== '0') throw new Error(String(params));
+if (el('runQueryField').hidden) throw new Error('typed query field must stay visible');
+"""
+    )
+
+
+def test_project_overview_counts_use_active_project_payload_not_official_matrix() -> None:
+    run_dashboard_probe(
+        """
+context.__setDashboardState({operational:{known_matrix_count:180,retrieval_smokes:[{},{}],reranker_smokes:[],benchmark_detail_evidence:[],options_formula:'official'},files:[],options:{},sourceCatalog:{datasets:[{id:'project:test1_abc',label:'test1',kind:'uploaded_project',document_count:5,ready:true,validation:'ready'}],groundtruth:[{id:'groundtruth:project:test1_abc',label:'test1',valid:true,row_count:11}]}});
+el('globalDataset').value = 'project:test1_abc';
+el('globalGroundtruth').value = 'groundtruth:project:test1_abc';
+context.__recommendationState.sourceType = 'uploaded_project';
+context.__recommendationState.active = {
+  source_type:'uploaded_project', project_id:'test1_abc', run_id:'run_1', combination_count:1,
+  rows:[{status:'failed', evidence_count:0},{status:'completed', evidence_count:11}]
+};
+context.renderOperational();
+if (el('comboStatus').textContent !== '2') throw new Error('combo ' + el('comboStatus').textContent);
+if (!String(el('comboNote').textContent).toLowerCase().includes('project')) throw new Error(el('comboNote').textContent);
+if (el('retrievalStatus').textContent !== '11') throw new Error('evidence ' + el('retrievalStatus').textContent);
 """
     )

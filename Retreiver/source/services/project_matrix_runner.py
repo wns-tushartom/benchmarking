@@ -75,6 +75,7 @@ _SUMMARY_FIELDS = (
     "rerank_search_units",
     "rerank_usage_scope",
     "error_code",
+    "error_detail",
 )
 
 
@@ -434,6 +435,35 @@ def _safe_error_code(stage: str) -> str:
         "retrieval": "retrieval_failed",
         "reranker": "reranker_failed",
     }.get(stage, "combination_failed")
+
+
+def _safe_error_detail(exc: BaseException) -> str:
+    """Return a short operator-safe failure detail without free-form provider text."""
+    name = type(exc).__name__
+    if isinstance(exc, FileExistsError):
+        return f"{name}: target already exists"
+    if isinstance(exc, FileNotFoundError):
+        return f"{name}: required path missing"
+    if isinstance(exc, PermissionError):
+        return f"{name}: permission denied"
+    if isinstance(exc, TimeoutError):
+        return f"{name}: timed out"
+    if isinstance(exc, ConnectionError):
+        return f"{name}: connection failed"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) is not None:
+        return f"{name}: errno={exc.errno}"
+    if isinstance(exc, ValueError):
+        message = " ".join(str(exc).split())
+        if (
+            message
+            and len(message) <= 80
+            and "://" not in message
+            and "/home/" not in message
+            and "token" not in message.lower()
+            and "key" not in message.lower()
+        ):
+            return f"{name}: {message}"
+    return name
 
 
 class ProjectMatrixRunner:
@@ -1104,6 +1134,7 @@ class ProjectMatrixRunner:
                     "avg_query_latency_s": query_metrics["avg_query_latency_s"],
                     "evidence_count": len(combo_evidence_rows),
                     "error_code": "",
+                    "error_detail": "",
                 }
                 receipt = {
                     "combo_id": combo_id,
@@ -1143,10 +1174,11 @@ class ProjectMatrixRunner:
                     _atomic_write(reranking_artifact, reranking_content)
                 details_rows.extend(combo_detail_rows)
                 evidence_rows.extend(combo_evidence_rows)
-            except Exception:
+            except Exception as exc:
                 if failure_stage == "reranker":
                     rerank_search_units = None
                 error_code = _safe_error_code(failure_stage or "combination")
+                error_detail = _safe_error_detail(exc)
                 summary = {
                     "project_id": project_id,
                     "run_id": run_id,
@@ -1169,11 +1201,13 @@ class ProjectMatrixRunner:
                     "avg_query_latency_s": None,
                     "evidence_count": 0,
                     "error_code": error_code,
+                    "error_detail": error_detail,
                 }
                 receipt = {
                     "combo_id": combo_id,
                     "status": "failed",
                     "error_code": error_code,
+                    "error_detail": error_detail,
                     "config_sha256": config_sha256,
                     "adapters": {
                         "chunker": {

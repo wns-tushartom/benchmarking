@@ -348,3 +348,25 @@ def test_post_routes_project_preflight_and_returns_safe_validation_error(
     assert payload["error"]["code"] == "invalid_project_matrix_request"  # type: ignore[index]
     assert payload["error"]["request_id"]  # type: ignore[index]
     assert "private" not in json.dumps(payload)
+
+
+def test_preflight_blocks_openai_without_api_key(project, monkeypatch):
+    root, project_id, workspace = project
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    payload = _public_request(project_id)
+    payload["selections"]["embeddings"] = ["openai_text-embedding-3-large"]
+    response = dashboard.preflight_project_matrix(payload, root=root, workspace=workspace)
+    assert response["ok"] is False
+    assert any("OPENAI_API_KEY" in item for item in response.get("missing", []))
+
+
+def test_preflight_blocks_stale_bge_port(project, monkeypatch):
+    root, project_id, workspace = project
+    monkeypatch.setenv("BGE_RERANK_URL", "http://127.0.0.1:5001/rerank/bge")
+    payload = _public_request(project_id)
+    payload["selections"]["rerankers"] = ["bge-reranker-base"]
+    response = dashboard.preflight_project_matrix(payload, root=root, workspace=workspace)
+    assert response["ok"] is False
+    joined = " ".join(response.get("missing", []))
+    assert "BGE_RERANK_URL" in joined
+    assert "5001" in joined or "stale" in joined.lower()
