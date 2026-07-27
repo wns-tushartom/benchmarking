@@ -52,6 +52,55 @@ def test_summary_uses_labelled_denominator_and_real_rank_positions():
     assert result["mrr_at_k"] == 0.25
     assert math.isclose(result["ndcg_at_k"], 0.19342640361727081)
     assert math.isclose(result["avg_query_latency_s"], 0.3)
+    # Multi-cutoff dashboard suite is always emitted for labelled runs.
+    assert result["recall_at_1"] == 0.0
+    assert result["recall_at_3"] == 0.5
+    assert result["recall_at_5"] == 0.5
+    assert result["recall_at_10"] == 0.5
+    assert math.isclose(result["precision_at_5"], 0.1)  # 1 hit in top-5 across 2 queries / 5
+    assert math.isclose(result["ndcg_at_5"], result["ndcg_at_k"])
+    assert result["avg_first_relevant_rank"] == 2.0
+    assert result["no_hit_queries"] == 1
+
+
+def test_multi_cutoff_metrics_match_dashboard_official_shape():
+    metrics = _metrics_module()
+    rows = [
+        metrics.QueryMetricInput(
+            query_id="q1",
+            label_applies=True,
+            relevant_ranks=(1, 4),
+            relevant_corpus_count=2,
+            retrieval_latency_s=0.05,
+            rerank_latency_s=0.05,
+        ),
+        metrics.QueryMetricInput(
+            query_id="q2",
+            label_applies=True,
+            relevant_ranks=(3,),
+            relevant_corpus_count=1,
+            retrieval_latency_s=0.05,
+            rerank_latency_s=0.05,
+        ),
+        metrics.QueryMetricInput(
+            query_id="q3",
+            label_applies=True,
+            relevant_ranks=(),
+            relevant_corpus_count=1,
+            retrieval_latency_s=0.05,
+            rerank_latency_s=0.05,
+        ),
+    ]
+    result = metrics.summarize_query_metrics(rows, k=10)
+    assert result["recall_at_1"] == pytest.approx(1 / 3)
+    assert result["recall_at_3"] == pytest.approx(2 / 3)
+    assert result["recall_at_5"] == pytest.approx(2 / 3)
+    assert result["recall_at_10"] == pytest.approx(2 / 3)
+    assert result["precision_at_5"] == pytest.approx((2 / 5 + 1 / 5 + 0) / 3)
+    assert result["mrr_at_k"] == pytest.approx((1.0 + 1 / 3 + 0.0) / 3)
+    assert result["avg_first_relevant_rank"] == pytest.approx((1 + 3) / 2)
+    assert result["no_hit_queries"] == 1
+    assert result["ndcg_at_5"] is not None
 
 
 def test_evidence_only_summary_keeps_latency_without_quality_scores():
@@ -73,6 +122,14 @@ def test_evidence_only_summary_keeps_latency_without_quality_scores():
         "recall_at_k": None,
         "mrr_at_k": None,
         "ndcg_at_k": None,
+        "recall_at_1": None,
+        "recall_at_3": None,
+        "recall_at_5": None,
+        "recall_at_10": None,
+        "precision_at_5": None,
+        "ndcg_at_5": None,
+        "avg_first_relevant_rank": None,
+        "no_hit_queries": None,
         "avg_query_latency_s": 0.5,
     }
 
@@ -91,6 +148,14 @@ def test_labelled_miss_is_zero_not_missing_and_invalid_k_fails_closed():
     assert result["recall_at_k"] == 0.0
     assert result["mrr_at_k"] == 0.0
     assert result["ndcg_at_k"] == 0.0
+    assert result["recall_at_1"] == 0.0
+    assert result["recall_at_3"] == 0.0
+    assert result["recall_at_5"] == 0.0
+    assert result["recall_at_10"] == 0.0
+    assert result["precision_at_5"] == 0.0
+    assert result["ndcg_at_5"] == 0.0
+    assert result["avg_first_relevant_rank"] is None
+    assert result["no_hit_queries"] == 1
 
     for invalid_k in (0, -1, True):
         with pytest.raises(ValueError):

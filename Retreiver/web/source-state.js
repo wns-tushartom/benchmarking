@@ -253,6 +253,10 @@
       if (finite(next.recall_at_5) === null && finite(next.recall_at_k) !== null) next.recall_at_5 = next.recall_at_k;
       if (finite(next.mrr) === null && finite(next.mrr_at_k) !== null) next.mrr = next.mrr_at_k;
       if (finite(next.ndcg_at_5) === null && finite(next.ndcg_at_k) !== null) next.ndcg_at_5 = next.ndcg_at_k;
+      // Multi-cutoff project metrics (schema v3) map 1:1 onto Metrics columns.
+      ['recall_at_1', 'recall_at_3', 'recall_at_10', 'precision_at_5', 'avg_first_relevant_rank', 'no_hit_queries'].forEach((field) => {
+        if (finite(next[field]) === null && finite(row?.[field]) !== null) next[field] = row[field];
+      });
       if (finite(next.avg_latency_seconds) === null && finite(next.avg_query_latency_s) !== null) {
         next.avg_latency_seconds = next.avg_query_latency_s;
       }

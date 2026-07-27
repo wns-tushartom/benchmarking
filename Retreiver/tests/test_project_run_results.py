@@ -574,9 +574,17 @@ def test_schema_v2_results_are_normalized_without_cross_source_fallback(
     assert result["succeeded"] == 1
     assert result["failed"] == 0
     assert result["metric_names"] == [
+        "recall_at_1",
+        "recall_at_3",
+        "recall_at_5",
+        "recall_at_10",
         "recall_at_k",
         "mrr_at_k",
+        "precision_at_5",
+        "ndcg_at_5",
         "ndcg_at_k",
+        "avg_first_relevant_rank",
+        "no_hit_queries",
         "avg_query_latency_s",
     ]
     assert result["evidence_counts_by_combo"] == {"combo_labeled": 3}

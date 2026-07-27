@@ -93,10 +93,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.4' in html
-    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.4') < html.index('/app.js?v=20260724-canonical-dashboard-v5.4')
-    assert '/styles.css?v=20260724-canonical-dashboard-v5.4' in html
-    assert '/app.js?v=20260724-canonical-dashboard-v5.4' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.5' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.5') < html.index('/app.js?v=20260724-canonical-dashboard-v5.5')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5.5' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5.5' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:
@@ -362,6 +362,49 @@ if (row.mrr !== 0.9) throw new Error('mrr alias');
 if (row.ndcg_at_5 !== 0.8) throw new Error('ndcg alias');
 if (row.avg_latency_seconds !== 0.12) throw new Error('latency alias');
 if (row.evaluated_queries !== 11) throw new Error('evaluated queries');
+"""
+    )
+
+
+def test_project_multi_cutoff_metrics_map_to_metrics_table_fields() -> None:
+    run_dashboard_probe(
+        """
+const payload = context.DashboardSourceState.normalizeResultPayload({
+  source_type:'uploaded_project',
+  scoring_mode:'retrieval_labels',
+  metric_k:10,
+  rows:[{
+    status:'completed',
+    combo_id:'combo_1',
+    chunker_id:'entity_heuristic_w6',
+    embedding_id:'gte_multilingual_base',
+    vector_store_id:'FAISS',
+    reranker_id:'bge-reranker-base',
+    recall_at_k:1,
+    mrr_at_k:0.9,
+    ndcg_at_k:0.85,
+    recall_at_1:0.7,
+    recall_at_3:0.9,
+    recall_at_5:1.0,
+    recall_at_10:1.0,
+    precision_at_5:0.4,
+    ndcg_at_5:0.85,
+    avg_first_relevant_rank:1.4,
+    no_hit_queries:0,
+    avg_query_latency_s:0.12,
+    labelled_queries:11,
+    evidence_count:110
+  }]
+});
+const row = payload.rows[0];
+if (row.recall_at_1 !== 0.7) throw new Error('r1');
+if (row.recall_at_3 !== 0.9) throw new Error('r3');
+if (row.recall_at_5 !== 1.0) throw new Error('r5');
+if (row.recall_at_10 !== 1.0) throw new Error('r10');
+if (row.precision_at_5 !== 0.4) throw new Error('p5');
+if (row.avg_first_relevant_rank !== 1.4) throw new Error('afrr');
+if (row.no_hit_queries !== 0) throw new Error('nohit');
+if (row.mrr !== 0.9) throw new Error('mrr');
 """
     )
 
