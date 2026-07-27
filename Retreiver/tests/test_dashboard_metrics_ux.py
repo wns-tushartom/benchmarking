@@ -34,6 +34,7 @@ ANALYTICS_IDS = {
 
 
 def run_dashboard_probe(assertions: str) -> None:
+    source_state = ROOT / "web" / "source-state.js"
     js = f"""
 const fs = require('fs'), vm = require('vm');
 const elements = {{}};
@@ -56,13 +57,18 @@ const context = {{
     createElement(tag) {{ return makeElement(tag); }},
     body: {{ insertAdjacentHTML() {{}} }},
   }},
-  window: {{}}, RecommendationVisuals: require({str(VISUALS)!r}), PipelineRecommendations: require({str(RECOMMENDATIONS)!r}), location: {{hash:'#compare'}}, history: {{replaceState() {{}}}},
+  window: {{}},
+  RecommendationVisuals: require({str(VISUALS)!r}),
+  PipelineRecommendations: require({str(RECOMMENDATIONS)!r}),
+  DashboardSourceState: require({str(source_state)!r}),
+  location: {{hash:'#compare'}},
+  history: {{replaceState() {{}}}},
   fetch: async () => ({{ok:true, json:async()=>({{}}), text:async()=>''}}),
   setTimeout() {{}}, clearTimeout() {{}}, AbortController, URLSearchParams,
 }};
 vm.createContext(context);
 const code = fs.readFileSync({str(APP)!r}, 'utf8').split("loadOptions().then(refresh)")[0];
-vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n  globalThis.__setDashboardState = (value) => {{ state = value; }};\n  globalThis.__setBenchmarkOptions = (value) => {{ benchmarkOptions = value; }};\n`, context);
+vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n  globalThis.__setDashboardState = (value) => {{ state = value; }};\n  globalThis.__setBenchmarkOptions = (value) => {{ benchmarkOptions = value; }};\n  globalThis.DashboardSourceState = DashboardSourceState;\n`, context);
 {assertions}
 """
     proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=10)
@@ -85,10 +91,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2' in html
-    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2') < html.index('/app.js?v=20260724-canonical-dashboard-v5.2')
-    assert '/styles.css?v=20260724-canonical-dashboard-v5.2' in html
-    assert '/app.js?v=20260724-canonical-dashboard-v5.2' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.3' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.3') < html.index('/app.js?v=20260724-canonical-dashboard-v5.3')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5.3' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5.3' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:
@@ -310,12 +316,49 @@ el('globalDataset').value = 'project:test1_abc';
 el('globalGroundtruth').value = 'groundtruth:project:test1_abc';
 context.__recommendationState.sourceType = 'uploaded_project';
 context.__recommendationState.active = {
-  source_type:'uploaded_project', project_id:'test1_abc', run_id:'run_1', combination_count:1,
-  rows:[{status:'failed', evidence_count:0},{status:'completed', evidence_count:11}]
+  source_type:'uploaded_project', dataset_id:'project:test1_abc', project_id:'test1_abc', run_id:'run_1', combination_count:1,
+  rows:[{status:'failed', evidence_count:0, combo_id:'c0'},{status:'completed', evidence_count:11, combo_id:'c1', chunker_id:'entity_heuristic_w6', embedding_id:'gte_multilingual_base', vector_store_id:'FAISS', reranker_id:'bge-reranker-base'}]
 };
 context.renderOperational();
 if (el('comboStatus').textContent !== '2') throw new Error('combo ' + el('comboStatus').textContent);
 if (!String(el('comboNote').textContent).toLowerCase().includes('project')) throw new Error(el('comboNote').textContent);
 if (el('retrievalStatus').textContent !== '11') throw new Error('evidence ' + el('retrievalStatus').textContent);
+if (!String(el('retrievalTable').innerHTML || '').includes('View 11')) throw new Error('project evidence browser missing open button: ' + el('retrievalTable').innerHTML);
+"""
+    )
+
+
+def test_project_result_normalization_aliases_matrix_fields_for_metrics() -> None:
+    run_dashboard_probe(
+        """
+const payload = context.DashboardSourceState.normalizeResultPayload({
+  source_type:'uploaded_project',
+  scoring_mode:'retrieval_labels',
+  metric_k:10,
+  rows:[{
+    status:'completed',
+    combo_id:'combo_1',
+    chunker_id:'entity_heuristic_w6',
+    embedding_id:'gte_multilingual_base',
+    vector_store_id:'FAISS',
+    reranker_id:'bge-reranker-base',
+    recall_at_k:1,
+    mrr_at_k:0.9,
+    ndcg_at_k:0.8,
+    avg_query_latency_s:0.12,
+    labelled_queries:11,
+    evidence_count:110
+  }]
+});
+const row = payload.rows[0];
+if (row.sheet !== 'entity_heuristic_w6') throw new Error('sheet ' + row.sheet);
+if (row.embedding !== 'gte_multilingual_base') throw new Error('embedding');
+if (row.store !== 'FAISS') throw new Error('store');
+if (row.reranker !== 'bge-reranker-base') throw new Error('reranker');
+if (row.recall_at_5 !== 1) throw new Error('recall alias');
+if (row.mrr !== 0.9) throw new Error('mrr alias');
+if (row.ndcg_at_5 !== 0.8) throw new Error('ndcg alias');
+if (row.avg_latency_seconds !== 0.12) throw new Error('latency alias');
+if (row.evaluated_queries !== 11) throw new Error('evaluated queries');
 """
     )

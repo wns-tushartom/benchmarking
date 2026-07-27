@@ -512,6 +512,15 @@ class ProjectRunResultService:
                         "state": manifest["state"],
                         "scoring_mode": result["scoring_mode"],
                         "metric_k": context["validated"].request.top_k,
+                        "combination_count": int(result.get("combination_count") or manifest.get("combination_count") or 0),
+                        "succeeded": int(result.get("succeeded") or manifest.get("succeeded") or 0),
+                        "failed": int(result.get("failed") or manifest.get("failed") or 0),
+                        "evidence_count": int(
+                            sum(
+                                int(value or 0)
+                                for value in (result.get("evidence_counts_by_combo") or {}).values()
+                            )
+                        ),
                         "created_at": manifest.get("created_at") if created else None,
                         "completed_at": manifest.get("completed_at") if completed else None,
                         "timestamp_label": manifest.get("completed_at") if completed else (manifest.get("created_at") if created else "Legacy artifact time"),

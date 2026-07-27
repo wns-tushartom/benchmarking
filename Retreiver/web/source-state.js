@@ -241,9 +241,36 @@
     const normalized = Object.assign({}, payload || {});
     normalized.source_type = normalized.source_type || 'uploaded_project';
     normalized.scoring_mode = normalized.scoring_mode || 'evidence_only';
-    normalized.rows = Object.freeze((Array.isArray(normalized.rows) ? normalized.rows : []).map(row =>
-      Object.freeze(Object.assign({}, row))
-    ));
+    const metricK = finite(normalized.metric_k);
+    normalized.rows = Object.freeze((Array.isArray(normalized.rows) ? normalized.rows : []).map(row => {
+      const next = Object.assign({}, row || {});
+      // Alias project-matrix fields onto the dashboard's official display keys so
+      // Metrics/Overview/Evidence filters and pipeline labels update immediately.
+      next.sheet = next.sheet || next.chunker_id || '';
+      next.embedding = next.embedding || next.embedding_id || '';
+      next.store = next.store || next.vector_store_id || '';
+      next.reranker = canonicalRerankerName(next.reranker || next.reranker_id || 'none');
+      if (finite(next.recall_at_5) === null && finite(next.recall_at_k) !== null) next.recall_at_5 = next.recall_at_k;
+      if (finite(next.mrr) === null && finite(next.mrr_at_k) !== null) next.mrr = next.mrr_at_k;
+      if (finite(next.ndcg_at_5) === null && finite(next.ndcg_at_k) !== null) next.ndcg_at_5 = next.ndcg_at_k;
+      if (finite(next.avg_latency_seconds) === null && finite(next.avg_query_latency_s) !== null) {
+        next.avg_latency_seconds = next.avg_query_latency_s;
+      }
+      if (finite(next.evaluated_queries) === null) {
+        const labelled = finite(next.labelled_queries);
+        const queries = finite(next.query_count);
+        next.evaluated_queries = labelled !== null ? labelled : queries;
+      }
+      if (!next.combo_id) {
+        next.combo_id = metricRowKey(next);
+      }
+      if (metricK !== null && next.metric_k == null) next.metric_k = metricK;
+      if (finite(next.winner_score) === null) {
+        const score = metricScore(next);
+        if (score !== null) next.winner_score = score;
+      }
+      return Object.freeze(next);
+    }));
     return Object.freeze(normalized);
   }
 

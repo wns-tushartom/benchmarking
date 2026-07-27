@@ -389,6 +389,11 @@ function filteredRetrieval(rows) {
 }
 
 function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
+  const active = recommendationState.active;
+  if (active?.source_type === 'uploaded_project') {
+    renderProjectEvidenceBrowser(active);
+    return;
+  }
   const evidence = buildEvidenceRows(retrievalSmokes, rerankerSmokes);
   const opts = matrixOptions();
   fillSelect('retrievalChunkerFilter', opts.chunkers.length ? opts.chunkers : uniq(evidence, 'sheet'), 'All chunkers');
@@ -408,6 +413,43 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'evidence_snippet', label:'Retrieved evidence excerpts', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
+  ]);
+}
+
+function renderProjectEvidenceBrowser(payload) {
+  const rows = recommendationResultRows(payload).map(row => ({
+    ...row,
+    sheet: row.sheet || row.chunker_id || '',
+    embedding: row.embedding || row.embedding_id || '',
+    store: row.store || row.vector_store_id || '',
+    reranker: row.reranker || row.reranker_id || 'none',
+  }));
+  fillSelect('retrievalChunkerFilter', uniq(rows, 'sheet'), 'All chunkers');
+  fillSelect('retrievalEmbeddingFilter', uniq(rows, 'embedding'), 'All embeddings');
+  fillSelect('retrievalDbFilter', uniq(rows, 'store'), 'All DBs');
+  fillSelect('retrievalRerankerFilter', uniq(rows, 'reranker'), 'All rerankers');
+  const filtered = filterBySelect(rows, {
+    retrievalChunkerFilter: 'sheet',
+    retrievalEmbeddingFilter: 'embedding',
+    retrievalDbFilter: 'store',
+    retrievalRerankerFilter: 'reranker',
+  });
+  const hint = $('retrievalHint');
+  if (hint) {
+    hint.textContent = filtered.length
+      ? `${fmtInt(filtered.length)} project combination${filtered.length === 1 ? '' : 's'} · open evidence per combo`
+      : 'No project combinations in the selected run';
+  }
+  table($('retrievalTable'), filtered, [
+    {key:'combo', label:'Pipeline', render:r=>esc(pipelineLabel(r))},
+    {key:'status', label:'Status', render:r=>esc(r.status || '—')},
+    {key:'sheet', label:'Chunker'},
+    {key:'embedding', label:'Embedding'},
+    {key:'store', label:'Vector DB'},
+    {key:'reranker', label:'Reranker'},
+    {key:'query_count', label:'Queries', render:r=>esc(fmtInt(r.query_count || r.evaluated_queries || 0))},
+    {key:'evidence_count', label:'Evidence', render:r=>recommendationEvidenceCell(payload, r, String(r.status || '').toLowerCase() === 'failed')},
+    {key:'avg_latency_seconds', label:'Avg sec/query', render:r=>fmt(r.avg_latency_seconds ?? r.avg_query_latency_s, 3)},
   ]);
 }
 
@@ -702,7 +744,7 @@ function renderRunResult(kind, payload) {
 }
 
 function pipelineLabel(r) {
-  return `${r.sheet || '—'} · ${r.embedding || '—'} · ${r.store || '—'} · ${r.reranker || 'none'}`;
+  return `${r.sheet || r.chunker_id || '—'} · ${r.embedding || r.embedding_id || '—'} · ${r.store || r.vector_store_id || '—'} · ${r.reranker || r.reranker_id || 'none'}`;
 }
 
 function filterBySelect(rows, mapping) {
@@ -1203,9 +1245,12 @@ function recommendationEvidenceCell(payload, row, failed) {
     ? null
     : Number(rawCount);
   if (!Number.isFinite(count) || count < 0) return 'Not recorded';
-  const comboId = String(row.combo_id || '');
-  if (payload.source_type === 'uploaded_project' && comboId && count > 0) {
-    return `<button class="mini-run-btn view-project-evidence" type="button" data-combo-id="${esc(comboId)}">View ${esc(fmtInt(count))} evidence rows</button>`;
+  const comboId = String(row.combo_id || pipelineLabel(row) || '');
+  if (payload.source_type === 'uploaded_project' && comboId && count > 0 && row.combo_id) {
+    return `<button class="mini-run-btn view-project-evidence" type="button" data-combo-id="${esc(row.combo_id)}">View ${esc(fmtInt(count))} evidence rows</button>`;
+  }
+  if (payload.source_type === 'uploaded_project' && count > 0) {
+    return esc(`${fmtInt(count)} rows`);
   }
   return esc(fmtInt(count));
 }
@@ -1820,17 +1865,21 @@ function renderCanonicalResultPayload(payload) {
   const scored = payload?.scoring_mode === 'retrieval_labels';
   const officialMatrix = payload?.source_type === 'official' && payload?.result_set === 'official';
   const stable = !officialMatrix || payload?.matrix_complete === true;
-  const best = scored && stable ? rows[0] || null : null;
-  const fastest = scored && stable
-    ? rows.filter(row => num(row.avg_latency_seconds) > 0).sort((a, b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null
+  const latencyOf = row => num(row.avg_latency_seconds ?? row.avg_query_latency_s);
+  const recallOf = row => num(row.recall_at_5 ?? row.recall_at_k);
+  const best = scored && stable
+    ? [...rows].sort((a, b) => (metricScore(b) ?? -1) - (metricScore(a) ?? -1) || recallOf(b) - recallOf(a))[0] || null
     : null;
-  setText('bestR5Status', best ? `${(num(best.recall_at_5) * 100).toFixed(1)}%` : '—');
+  const fastest = scored && stable
+    ? rows.filter(row => latencyOf(row) > 0).sort((a, b) => latencyOf(a) - latencyOf(b))[0] || null
+    : null;
+  setText('bestR5Status', best ? `${(recallOf(best) * 100).toFixed(1)}%` : '—');
   setText('bestConfigNote', best
     ? pipelineLabel(best)
     : (officialMatrix && !stable
       ? `Final winner pending · ${fmtInt(payload.evaluated ?? rows.length)}/${fmtInt(payload.configured ?? 180)} fully scored`
       : (scored ? 'best accuracy score' : 'quality unavailable without labels')));
-  setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
+  setText('bestLatencyStatus', fastest ? `${fmt(latencyOf(fastest), 3)}s` : '—');
   setText('bestLatencyNote', fastest
     ? `${pipelineLabel(fastest)} · avg/query`
     : (officialMatrix && !stable ? 'Final latency winner pending full matrix' : 'average query latency'));
@@ -1848,6 +1897,19 @@ function renderCanonicalResultPayload(payload) {
   renderMetricsSource(payload);
   syncSourceSelectorControls();
   if (scored) renderPipelineComparison(state.operational?.evaluation || {}, stable ? rows : []);
+  // Keep Overview + Evidence browser locked to the active source after dataset/run changes.
+  renderDatasetStatusSummary();
+  const projectOverview = activeProjectOverviewCounts();
+  if (projectOverview) {
+    setText('comboStatus', String(projectOverview.comboCount));
+    setText('comboNote', projectOverview.comboNote);
+    setText('retrievalStatus', String(projectOverview.evidenceCount));
+    setText('retrievalNote', projectOverview.evidenceNote);
+    syncStatusDialog();
+  }
+  if (payload?.source_type === 'uploaded_project') {
+    renderProjectEvidenceBrowser(payload);
+  }
 }
 
 function populateRecommendationProjects() {
@@ -1918,10 +1980,28 @@ function matchingRecommendationRuns() {
 function populateRecommendationRuns() {
   const select = $('recommendationRun');
   if (!select) return;
-  const runs = matchingRecommendationRuns();
+  const rank = stateName => {
+    const value = String(stateName || '').toLowerCase();
+    if (value === 'completed') return 0;
+    if (value === 'partial') return 1;
+    if (value === 'failed') return 2;
+    return 3;
+  };
+  const runs = matchingRecommendationRuns().slice().sort((a, b) => {
+    const byState = rank(a.state) - rank(b.state);
+    if (byState) return byState;
+    return String(b.completed_at || b.created_at || '').localeCompare(String(a.completed_at || a.created_at || ''));
+  });
+  const previous = select.value;
   select.innerHTML = runs.length
-    ? runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.timestamp_label || run.completed_at || run.created_at || run.run_id)}</option>`).join('')
+    ? runs.map(run => {
+      const stamp = run.timestamp_label || run.completed_at || run.created_at || run.run_id;
+      const comboNote = Number(run.combination_count || 0) ? ` · ${fmtInt(run.combination_count)} combo` : '';
+      return `<option value="${esc(run.run_id)}">${esc(`${stamp} · ${run.state || 'unknown'}${comboNote}`)}</option>`;
+    }).join('')
     : '<option value="">No completed run for this dataset and ground truth</option>';
+  if (runs.some(run => run.run_id === previous)) select.value = previous;
+  else if (runs[0]) select.value = runs[0].run_id;
   syncSourceSelectorControls();
 }
 
@@ -2219,7 +2299,20 @@ function renderDatasetStatusSummary() {
     const validation = String(dataset.validation || (dataset.ready ? 'ready' : 'not ready')).replaceAll('_', ' ');
     setText('pdfStatus', `${fmtInt(readyCount)}/${fmtInt(documentCount)}`);
     setText('pdfNote', `${dataset.label || 'Selected project'} · ${validation}`);
-    setText('groundTruthStatus', groundtruthId === 'groundtruth:none' ? 'Evidence-only' : 'Selected, not evaluated');
+    const active = recommendationState.active;
+    if (
+      active?.source_type === 'uploaded_project'
+      && active.scoring_mode === 'retrieval_labels'
+      && recommendationResultRows(active).some(row => String(row.status || '').toLowerCase() === 'completed')
+    ) {
+      const labelled = recommendationResultRows(active).reduce((max, row) => {
+        const value = Number(row.labelled_queries || row.evaluated_queries || row.query_count || 0);
+        return Number.isFinite(value) ? Math.max(max, value) : max;
+      }, 0);
+      setText('groundTruthStatus', labelled ? `${fmtInt(labelled)} queries evaluated` : 'Project run evaluated');
+    } else {
+      setText('groundTruthStatus', groundtruthId === 'groundtruth:none' ? 'Evidence-only' : 'Selected, awaiting admitted run');
+    }
   } else {
     const repo = op.document_repository || {};
     const evaluation = op.evaluation || {};
@@ -2485,21 +2578,35 @@ async function applyGlobalSourceContext({syncResults = true} = {}) {
   if (datasetId === 'dataset:wns-default') {
     if (groundtruthId !== globalSourceContextState.officialGroundtruthId) {
       clearGlobalResultViews('No completed official result for the selected global ground truth');
+      renderOperational();
       return;
     }
     setSourceMirrorValue('recommendationDataset', 'official');
     setSourceMirrorValue('recommendationGroundtruth', 'groundtruth:official');
     await selectRecommendationDataset('official');
+    renderOperational();
     return;
   }
 
   await selectRecommendationDataset(datasetId);
   if (recommendationState.sourceType !== 'uploaded_project') return;
+  populateRecommendationGroundtruths();
   if (!setSourceMirrorValue('recommendationGroundtruth', groundtruthId)) {
+    // Ensure the locked project GT option exists even before runs finish loading.
+    const select = $('recommendationGroundtruth');
+    if (select && groundtruthId) {
+      const label = (state.sourceCatalog?.groundtruth || []).find(row => row.id === groundtruthId)?.label || groundtruthId;
+      select.insertAdjacentHTML('beforeend', `<option value="${esc(groundtruthId)}">${esc(label)}</option>`);
+      select.value = groundtruthId;
+    }
+  }
+  if (($('recommendationGroundtruth')?.value || '') !== groundtruthId) {
     clearGlobalResultViews('No completed run for the selected dataset and ground truth');
+    renderOperational();
     return;
   }
   await selectRecommendationGroundtruth(groundtruthId);
+  renderOperational();
 }
 
 function renderSourceSelectors(catalog) {
@@ -2556,29 +2663,37 @@ function activeProjectOverviewCounts() {
   const datasetId = $('globalDataset')?.value || $('runDataset')?.value || '';
   if (!String(datasetId).startsWith('project:')) return null;
   const active = recommendationState.active;
-  if (active?.source_type === 'uploaded_project') {
+  if (active?.source_type === 'uploaded_project' && (!active.dataset_id || active.dataset_id === datasetId)) {
     const rows = recommendationResultRows(active);
     const comboCount = rows.length || Number(active.combination_count || 0) || 0;
     const evidenceCount = rows.reduce((sum, row) => {
       const value = Number(row?.evidence_count);
       return sum + (Number.isFinite(value) ? value : 0);
-    }, 0);
-    const failed = rows.filter(row => String(row?.status || '').toLowerCase() === 'failed').length;
+    }, 0) || Number(active.evidence_count || 0) || 0;
+    const failed = rows.filter(row => String(row?.status || '').toLowerCase() === 'failed').length
+      || Number(active.failed || 0);
+    const succeeded = rows.filter(row => String(row?.status || '').toLowerCase() === 'completed').length
+      || Number(active.succeeded || 0);
     return {
       comboCount,
-      comboNote: `Project run ${active.run_id || ''} · ${failed ? `${failed} failed` : 'selected source'}`.trim(),
+      comboNote: `Project run ${active.run_id || ''} · ${fmtInt(succeeded)} completed · ${fmtInt(failed)} failed`.trim(),
       evidenceCount,
       evidenceNote: `${fmtInt(evidenceCount)} evidence rows from the selected project run. Official smoke totals are hidden while a project dataset is active.`,
     };
   }
-  const runs = Array.isArray(recommendationState.runs) ? recommendationState.runs : [];
+  const runs = (Array.isArray(recommendationState.runs) ? recommendationState.runs : [])
+    .filter(run => !run.dataset_id || run.dataset_id === datasetId);
   if (runs.length) {
     const comboCount = runs.reduce((sum, run) => sum + Number(run?.combination_count || 0), 0);
+    const evidenceCount = runs.reduce((sum, run) => sum + Number(run?.evidence_count || 0), 0);
+    const completed = runs.filter(run => String(run.state || '').toLowerCase() === 'completed').length;
     return {
       comboCount,
-      comboNote: `${runs.length} project run(s) discovered for this dataset`,
-      evidenceCount: 0,
-      evidenceNote: 'No admitted project-run evidence selected yet. Complete a run or choose a completed project result source.',
+      comboNote: `${fmtInt(runs.length)} project run(s) · ${fmtInt(completed)} completed · ${fmtInt(comboCount)} combinations`,
+      evidenceCount,
+      evidenceNote: evidenceCount
+        ? `${fmtInt(evidenceCount)} evidence rows across discovered project runs. Open Metrics/Recommendations for the selected run.`
+        : 'No admitted project-run evidence selected yet. Complete a run or choose a completed project result source.',
     };
   }
   return {
@@ -2888,7 +3003,13 @@ async function runAction(kind) {
   await refresh();
 }
 
-['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
+['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => {
+  if (recommendationState.active?.source_type === 'uploaded_project') {
+    renderProjectEvidenceBrowser(recommendationState.active);
+    return;
+  }
+  renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows());
+}));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => {
   const payload = recommendationState.active || officialRecommendationPayload('official');
   renderMetricsSource(payload);

@@ -62,7 +62,7 @@ def test_release_contract_declares_every_required_surface() -> None:
         "/api/run/complete-pipeline",
     }.issubset(contract["api_routes"])
     file_tokens = contract["file_tokens"]
-    assert "20260724-canonical-dashboard-v5.2" in file_tokens["web/index.html"]
+    assert "20260724-canonical-dashboard-v5.3" in file_tokens["web/index.html"]
     assert "web/recommendation-visuals.js" in contract["required_files"]
     assert "linked_groundtruth_id" in file_tokens["scripts/dashboard_source_catalog.py"]
     assert "groundtruth_500.csv" in file_tokens["scripts/dashboard_source_catalog.py"]
