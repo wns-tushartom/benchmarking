@@ -85,10 +85,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1' in html
-    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1') < html.index('/app.js?v=20260724-canonical-dashboard-v5.1')
-    assert '/styles.css?v=20260724-canonical-dashboard-v5.1' in html
-    assert '/app.js?v=20260724-canonical-dashboard-v5.1' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2') < html.index('/app.js?v=20260724-canonical-dashboard-v5.2')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5.2' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5.2' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:

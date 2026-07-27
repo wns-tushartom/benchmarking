@@ -527,9 +527,9 @@ def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260724-canonical-dashboard-v5.1" in index
-    assert "/styles.css?v=20260724-canonical-dashboard-v5.1" in index
-    assert "/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.1" in index
+    assert "/app.js?v=20260724-canonical-dashboard-v5.2" in index
+    assert "/styles.css?v=20260724-canonical-dashboard-v5.2" in index
+    assert "/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2" in index
     assert "/app.js?v=20260722-complete-ui-metrics\"" not in index
     assert "/styles.css?v=20260716-meeting-hardening" not in index
     assert "20260709-query-ui" not in index

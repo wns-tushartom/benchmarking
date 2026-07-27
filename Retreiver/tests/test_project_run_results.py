@@ -1351,3 +1351,53 @@ def test_project_evidence_rejects_windows_drive_relative_source_names(
             offset=0,
         )
     _error(caught, "run_unavailable", 409)
+
+
+def test_browser_question_set_runs_publish_project_owned_groundtruth_identity(
+    tmp_path: Path,
+):
+    workspace = ProjectWorkspace(tmp_path / "projects")
+    service = ProjectRunResultService(workspace, catalog_path=CATALOG_PATH)
+    project_id = _make_project(workspace, "test1", "2026-07-24T10:00:00Z")
+    gt_csv = (
+        "query,source,answer\n"
+        "What is the daily meal allowance for employee travel?,policy.pdf,INR 1500\n"
+    ).encode("utf-8")
+    questions_dir = workspace.layout(project_id)["questions"]
+    (questions_dir / "northstar-demo-groundtruth.csv").write_bytes(gt_csv)
+    question_set = workspace.create_question_set(
+        project_id,
+        "northstar-demo-groundtruth.csv",
+        gt_csv,
+    )
+    row = _base_row(project_id, "pending", "combo_project_gt")
+    request = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "top_k": 10,
+        "questions_source": {
+            "type": "question_set",
+            "question_set_id": question_set["question_set_id"],
+            "content_sha256": question_set["content_sha256"],
+        },
+        "selections": {
+            "chunkers": ["fixed_tok1200_ov150"],
+            "embeddings": ["openai_text-embedding-3-large"],
+            "vector_stores": ["FAISS"],
+            "rerankers": ["Amazon Rerank v1"],
+        },
+        "large_matrix_confirmation": None,
+    }
+    run_id, _root = _make_run(workspace, project_id, rows=[row], request=request)
+
+    runs = service.project_runs(project_id)
+    assert runs
+    assert runs[0]["run_id"] == run_id
+    assert runs[0]["groundtruth_id"] == f"groundtruth:project:{project_id}"
+    assert "uploaded ground truth" in runs[0]["groundtruth_label"]
+
+    result = service.project_run_results(project_id, run_id)
+    assert result["groundtruth_id"] == f"groundtruth:project:{project_id}"
+    assert result["dataset_id"] == f"project:{project_id}"
+    assert result["scoring_mode"] == "retrieval_labels"
+    assert result["rows"]

@@ -1878,6 +1878,14 @@ function populateRecommendationGroundtruths() {
   }
   const current = select.value;
   const unique = new Map();
+  const linkedId = linkedGroundtruthId();
+  const linked = (state.sourceCatalog?.groundtruth || []).find(row => row.id === linkedId);
+  if (linkedId) {
+    unique.set(
+      linkedId,
+      linked?.label || (linkedId === 'groundtruth:none' ? 'None (evidence-only)' : linkedId),
+    );
+  }
   recommendationState.runs.forEach(run => unique.set(
     run.groundtruth_id || 'groundtruth:none',
     run.groundtruth_label || 'None (evidence-only)',
@@ -1886,11 +1894,25 @@ function populateRecommendationGroundtruths() {
     ? [...unique].map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join('')
     : '<option value="">No ground truth with completed runs</option>';
   if (Array.from(select.options || []).some(option => option.value === current)) select.value = current;
+  else if (linkedId && unique.has(linkedId)) select.value = linkedId;
 }
 
 function matchingRecommendationRuns() {
   const groundtruthId = $('recommendationGroundtruth')?.value;
-  return recommendationState.runs.filter(run => !groundtruthId || run.groundtruth_id === groundtruthId);
+  return recommendationState.runs.filter(run => {
+    const runGt = run.groundtruth_id || 'groundtruth:none';
+    if (!groundtruthId || runGt === groundtruthId) return true;
+    // Tolerate legacy question-set identity against the locked project-owned GT.
+    if (
+      groundtruthId.startsWith('groundtruth:project:')
+      && String(runGt).startsWith('groundtruth:question-set:')
+      && run.project_id
+      && groundtruthId === `groundtruth:project:${run.project_id}`
+    ) {
+      return true;
+    }
+    return false;
+  });
 }
 
 function populateRecommendationRuns() {
@@ -1975,12 +1997,20 @@ async function loadProjectRun(projectId, runId) {
     if (!requestIsCurrent(generation)) return;
     const selectedDataset = $('recommendationDataset')?.value;
     const selectedGroundtruth = $('recommendationGroundtruth')?.value;
+    const payloadGt = payload?.groundtruth_id || '';
+    const groundtruthMatches = !selectedGroundtruth
+      || payloadGt === selectedGroundtruth
+      || (
+        String(selectedGroundtruth).startsWith('groundtruth:project:')
+        && String(payloadGt).startsWith('groundtruth:question-set:')
+        && selectedGroundtruth === `groundtruth:project:${projectId}`
+      );
     if (
       payload?.source_type !== 'uploaded_project'
       || payload?.project_id !== projectId
       || payload?.run_id !== runId
       || (selectedDataset && payload?.dataset_id !== selectedDataset)
-      || (selectedGroundtruth && payload?.groundtruth_id !== selectedGroundtruth)
+      || !groundtruthMatches
     ) {
       throw new Error('Project run response identity mismatch');
     }

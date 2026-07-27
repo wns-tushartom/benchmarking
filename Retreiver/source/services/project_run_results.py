@@ -273,14 +273,51 @@ class ProjectRunResultService:
     MAX_EVIDENCE_PART_BYTES = 4 * 1024 * 1024
     MAX_EVIDENCE_PAGE = 100
 
-    @staticmethod
-    def _result_source_identity(request: Any) -> dict[str, str]:
+    _TABLE_SUFFIXES = {".csv", ".xlsx"}
+
+    def _project_owned_groundtruth_identity(
+        self, project_id: str, project_manifest: dict[str, Any] | None = None
+    ) -> dict[str, str] | None:
+        """Map project-owned GT files to the catalog ID the UI locks onto."""
+        try:
+            questions_dir = self.workspace.layout(project_id)["questions"]
+        except (KeyError, TypeError, ValueError, OSError):
+            return None
+        if not questions_dir.is_dir() or questions_dir.is_symlink():
+            return None
+        owned_files = sorted(
+            candidate
+            for candidate in questions_dir.iterdir()
+            if candidate.is_file()
+            and not candidate.is_symlink()
+            and candidate.suffix.lower() in self._TABLE_SUFFIXES
+        )
+        if len(owned_files) != 1:
+            return None
+        label = str((project_manifest or {}).get("label") or project_id).strip() or project_id
+        return {
+            "groundtruth_id": f"groundtruth:project:{project_id}",
+            "groundtruth_label": f"{label} — uploaded ground truth",
+        }
+
+    def _result_source_identity(
+        self,
+        request: Any,
+        *,
+        project_id: str,
+        project_manifest: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        # Browser launches convert catalog ground-truth IDs into immutable question sets.
+        # The UI still locks on groundtruth:project:<id> / groundtruth:none, so result
+        # identity must match those catalog IDs or Metrics/Recommendations stay empty.
         source = request.questions_source
         if source.get("type") == "question_set":
-            question_set_id = source["question_set_id"]
+            owned = self._project_owned_groundtruth_identity(project_id, project_manifest)
+            if owned is not None:
+                return owned
             return {
-                "groundtruth_id": f"groundtruth:question-set:{question_set_id}",
-                "groundtruth_label": f"Question set · {question_set_id}",
+                "groundtruth_id": "groundtruth:none",
+                "groundtruth_label": "None (evidence-only)",
             }
         return {
             "groundtruth_id": "groundtruth:none",
@@ -462,7 +499,11 @@ class ProjectRunResultService:
                 created = _safe_time(manifest.get("created_at"))
                 artifact_timestamp = entry.joinpath("manifest.json").lstat().st_mtime
                 semantic = completed or created
-                source_identity = self._result_source_identity(context["validated"].request)
+                source_identity = self._result_source_identity(
+                    context["validated"].request,
+                    project_id=project_id,
+                    project_manifest=context.get("project_manifest"),
+                )
                 runs.append(
                     {
                         "project_id": project_id,
@@ -1036,7 +1077,11 @@ class ProjectRunResultService:
             {key: value for key, value in row.items() if key != "physical_namespace"}
             for row in rows
         ]
-        source_identity = self._result_source_identity(context["validated"].request)
+        source_identity = self._result_source_identity(
+                    context["validated"].request,
+                    project_id=project_id,
+                    project_manifest=context.get("project_manifest"),
+                )
         return {
             "source_type": "uploaded_project",
             "project_id": project_id,

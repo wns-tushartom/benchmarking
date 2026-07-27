@@ -47,14 +47,14 @@ def test_source_aware_recommendations_markup_and_scripts_are_wired() -> None:
     assert "No-reranker baseline — measured results" in index
     assert '<dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">' in index
     assert "Average retrieval plus reranking latency per query" in index
-    assert 'href="/styles.css?v=20260724-canonical-dashboard-v5"' in index
+    assert 'href="/styles.css?v=20260724-canonical-dashboard-v5.2"' in index
     assert 'src="/recommendations.js?v=20260716-extraction-override"' in index
-    assert 'src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5"' in index
+    assert 'src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2"' in index
     assert index.index('/recommendations.js?v=20260716-extraction-override') < index.index(
-        '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5'
+        '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2'
     )
-    assert index.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5') < index.index(
-        '/app.js?v=20260724-canonical-dashboard-v5'
+    assert index.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.2') < index.index(
+        '/app.js?v=20260724-canonical-dashboard-v5.2'
     )
 
     for endpoint in (
