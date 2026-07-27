@@ -68,8 +68,10 @@ const context = {{
 }};
 vm.createContext(context);
 const code = fs.readFileSync({str(APP)!r}, 'utf8').split("loadOptions().then(refresh)")[0];
-vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n  globalThis.__setDashboardState = (value) => {{ state = value; }};\n  globalThis.__setBenchmarkOptions = (value) => {{ benchmarkOptions = value; }};\n  globalThis.DashboardSourceState = DashboardSourceState;\n`, context);
+vm.runInContext(code + `\n  globalThis.__recommendationState = recommendationState;\n  globalThis.__setDashboardState = (value) => {{ state = value; }};\n  globalThis.__setBenchmarkOptions = (value) => {{ benchmarkOptions = value; }};\n  globalThis.DashboardSourceState = DashboardSourceState;\n  globalThis.loadProjectRun = loadProjectRun;\n  globalThis.renderCanonicalResultPayload = renderCanonicalResultPayload;\n  globalThis.renderOperational = renderOperational;\n`, context);
+(async () => {{
 {assertions}
+}})().catch(err => {{ console.error(err && err.stack || err); process.exit(1); }});
 """
     proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -91,10 +93,10 @@ def test_recommendation_analytics_markup_is_below_top_table_and_not_collapsed() 
     assert 'id="tradeoffDetails"' not in html
     assert "Only complete evaluations" in html
     assert "Missing never means zero" in html
-    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.3' in html
-    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.3') < html.index('/app.js?v=20260724-canonical-dashboard-v5.3')
-    assert '/styles.css?v=20260724-canonical-dashboard-v5.3' in html
-    assert '/app.js?v=20260724-canonical-dashboard-v5.3' in html
+    assert '/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.4' in html
+    assert html.index('/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.4') < html.index('/app.js?v=20260724-canonical-dashboard-v5.4')
+    assert '/styles.css?v=20260724-canonical-dashboard-v5.4' in html
+    assert '/app.js?v=20260724-canonical-dashboard-v5.4' in html
 
 
 def test_official_analytics_plot_complete_rows_and_show_all_heatmap_states() -> None:
@@ -360,5 +362,49 @@ if (row.mrr !== 0.9) throw new Error('mrr alias');
 if (row.ndcg_at_5 !== 0.8) throw new Error('ndcg alias');
 if (row.avg_latency_seconds !== 0.12) throw new Error('latency alias');
 if (row.evaluated_queries !== 11) throw new Error('evaluated queries');
+"""
+    )
+
+
+def test_project_run_load_does_not_reject_when_dataset_selector_still_says_official() -> None:
+    run_dashboard_probe(
+        """
+el('recommendationDataset').value = 'official';
+el('recommendationGroundtruth').value = 'groundtruth:project:test1_abc';
+el('recommendationProject').value = 'test1_abc';
+el('recommendationRun').value = 'run_1';
+el('globalDataset').value = 'project:test1_abc';
+el('globalGroundtruth').value = 'groundtruth:project:test1_abc';
+context.__setDashboardState({operational:{},files:[],options:{},sourceCatalog:{datasets:[{id:'project:test1_abc',label:'test1',kind:'uploaded_project',document_count:5,ready:true,linked_groundtruth_id:'groundtruth:project:test1_abc'}],groundtruth:[{id:'groundtruth:project:test1_abc',label:'test1',valid:true,row_count:11}]}});
+context.__recommendationState.projects = [{project_id:'test1_abc', dataset_id:'project:test1_abc', label:'test1'}];
+context.fetch = async () => ({
+  ok:true,
+  json: async () => ({
+    source_type:'uploaded_project',
+    project_id:'test1_abc',
+    dataset_id:'project:test1_abc',
+    project_label:'test1',
+    run_id:'run_1',
+    run_state:'completed',
+    scoring_mode:'retrieval_labels',
+    groundtruth_id:'groundtruth:project:test1_abc',
+    groundtruth_label:'test1 — uploaded ground truth',
+    metric_k:10,
+    combination_count:1,
+    succeeded:1,
+    failed:0,
+    rows:[{
+      status:'completed', combo_id:'c1', chunker_id:'entity_heuristic_w6', embedding_id:'gte_multilingual_base',
+      vector_store_id:'FAISS', reranker_id:'bge-reranker-base', recall_at_k:1, mrr_at_k:1, ndcg_at_k:1,
+      avg_query_latency_s:0.2, labelled_queries:11, query_count:11, evidence_count:110
+    }]
+  })
+});
+await context.loadProjectRun('test1_abc', 'run_1');
+if (context.__recommendationState.sourceType !== 'uploaded_project') throw new Error('sourceType ' + context.__recommendationState.sourceType);
+if (el('recommendationDataset').value !== 'project:test1_abc') throw new Error('dataset selector ' + el('recommendationDataset').value);
+if (!String(el('metricsSourceContext').textContent || '').toLowerCase().includes('test1')) throw new Error(el('metricsSourceContext').textContent);
+if (String(el('metricsSourceContext').textContent || '').includes('Official WNS')) throw new Error('still official metrics context');
+if (!String(el('qualityHint').textContent || '').toLowerCase().includes('project run')) throw new Error(el('qualityHint').textContent);
 """
     )

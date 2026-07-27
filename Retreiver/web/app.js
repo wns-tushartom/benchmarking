@@ -855,12 +855,25 @@ function renderMetricsSource(payload) {
   }
   renderEvaluation({
     summary: Array.isArray(payload?.rows) ? payload.rows : [],
-    report: {groundtruth_rows: payload?.evaluated_queries || payload?.query_count || '—'},
+    report: {
+      groundtruth_rows: payload?.evaluated_queries
+        || payload?.query_count
+        || payload?.rows?.[0]?.labelled_queries
+        || payload?.rows?.[0]?.query_count
+        || '—',
+    },
   }, false, null);
   if (payload?.source_type === 'official' && payload?.result_set === 'official') {
     setText(
       'qualityHint',
       `${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} ranked · ${fmtInt(incomplete.length)} incomplete/unranked · ${fmtInt(payload.configured ?? 180)} configured`,
+    );
+  } else if (payload?.source_type === 'uploaded_project') {
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    const completed = rows.filter(row => String(row.status || '').toLowerCase() === 'completed').length;
+    setText(
+      'qualityHint',
+      `${fmtInt(completed)} completed · ${fmtInt(rows.length)} combinations · project run ${payload.run_id || ''}`.trim(),
     );
   }
 }
@@ -2075,32 +2088,50 @@ async function loadProjectRun(projectId, runId) {
   try {
     const payload = await api(path, {signal});
     if (!requestIsCurrent(generation)) return;
-    const selectedDataset = $('recommendationDataset')?.value;
-    const selectedGroundtruth = $('recommendationGroundtruth')?.value;
+    const expectedDataset = `project:${projectId}`;
+    const selectedDataset = $('recommendationDataset')?.value || expectedDataset;
+    const selectedGroundtruth = $('recommendationGroundtruth')?.value || linkedGroundtruthId();
     const payloadGt = payload?.groundtruth_id || '';
+    const datasetMatches = !selectedDataset
+      || selectedDataset === 'official'
+      || selectedDataset === expectedDataset
+      || selectedDataset === payload?.dataset_id;
     const groundtruthMatches = !selectedGroundtruth
       || payloadGt === selectedGroundtruth
       || (
         String(selectedGroundtruth).startsWith('groundtruth:project:')
-        && String(payloadGt).startsWith('groundtruth:question-set:')
+        && (
+          String(payloadGt).startsWith('groundtruth:question-set:')
+          || payloadGt === selectedGroundtruth
+        )
         && selectedGroundtruth === `groundtruth:project:${projectId}`
       );
     if (
       payload?.source_type !== 'uploaded_project'
       || payload?.project_id !== projectId
       || payload?.run_id !== runId
-      || (selectedDataset && payload?.dataset_id !== selectedDataset)
+      || !datasetMatches
       || !groundtruthMatches
     ) {
       throw new Error('Project run response identity mismatch');
     }
+    // Keep selectors aligned with the admitted project source before paint.
+    if ($('recommendationDataset')) $('recommendationDataset').value = expectedDataset;
+    if ($('recommendationSource')) $('recommendationSource').value = 'uploaded_project';
+    if ($('recommendationProject')) $('recommendationProject').value = projectId;
+    if ($('recommendationRun')) $('recommendationRun').value = runId;
+    if (selectedGroundtruth && $('recommendationGroundtruth')) {
+      setSourceMirrorValue('recommendationGroundtruth', selectedGroundtruth)
+        || ($('recommendationGroundtruth').value = payloadGt || selectedGroundtruth);
+    }
     const normalizedPayload = sourceStateModule()?.normalizeResultPayload(payload) || payload;
+    recommendationState.sourceType = 'uploaded_project';
     renderCanonicalResultPayload(normalizedPayload);
     syncSourceSelectorControls();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
     recommendationState.active = null;
-    clearRecommendationView('Selected project run is unavailable');
+    clearGlobalResultViews('Selected project run is unavailable');
   }
 }
 
@@ -2343,6 +2374,10 @@ function renderOperational() {
   const officialPayload = recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations
     ? officialRecommendationPayload('official')
     : null;
+  const projectPayload = recommendationState.sourceType === 'uploaded_project'
+    && recommendationState.active?.source_type === 'uploaded_project'
+    ? recommendationState.active
+    : null;
 
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
@@ -2374,7 +2409,9 @@ function renderOperational() {
   renderCoverage(rows);
   renderServices(health);
   renderRetrieval(retrieval, rerank);
-  if (officialPayload) renderCanonicalResultPayload(officialPayload);
+  // Never let official matrix paint overwrite an admitted project source.
+  if (projectPayload) renderCanonicalResultPayload(projectPayload);
+  else if (officialPayload) renderCanonicalResultPayload(officialPayload);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
   renderDocumentRepository(op.document_repository || {});
@@ -2590,6 +2627,7 @@ async function applyGlobalSourceContext({syncResults = true} = {}) {
 
   await selectRecommendationDataset(datasetId);
   if (recommendationState.sourceType !== 'uploaded_project') return;
+  setSourceMirrorValue('recommendationDataset', datasetId);
   populateRecommendationGroundtruths();
   if (!setSourceMirrorValue('recommendationGroundtruth', groundtruthId)) {
     // Ensure the locked project GT option exists even before runs finish loading.
@@ -3095,20 +3133,23 @@ async function selectRecommendationSource(sourceType) {
 
 async function selectRecommendationDataset(datasetId) {
   if (datasetId === 'official') {
-    $('recommendationSource').value = 'official';
+    if ($('recommendationDataset')) $('recommendationDataset').value = 'official';
+    if ($('recommendationSource')) $('recommendationSource').value = 'official';
     await selectRecommendationSource('official');
     return;
   }
   const project = recommendationState.projects.find(item => (item.dataset_id || `project:${item.project_id}`) === datasetId);
   if (!project) {
     recommendationState.runs = [];
+    recommendationState.active = null;
     populateRecommendationGroundtruths();
     populateRecommendationRuns();
-    clearRecommendationView('No completed results for this dataset');
+    clearGlobalResultViews('No completed results for this dataset');
     return;
   }
-  $('recommendationSource').value = 'uploaded_project';
-  $('recommendationProject').value = project.project_id;
+  if ($('recommendationDataset')) $('recommendationDataset').value = datasetId;
+  if ($('recommendationSource')) $('recommendationSource').value = 'uploaded_project';
+  if ($('recommendationProject')) $('recommendationProject').value = project.project_id;
   await selectRecommendationSource('uploaded_project');
 }
 
