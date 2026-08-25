@@ -89,7 +89,13 @@ def cross_encoder_model(key: str):
     if key == "bge":
         return CrossEncoder(BGE_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
     if key == "qwen":
-        model = CrossEncoder(QWEN_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
+        import torch
+        model = CrossEncoder(
+            QWEN_RERANK_MODEL,
+            trust_remote_code=True,
+            device=DEVICE,
+            model_kwargs={"torch_dtype": torch.float16},
+        )
         if getattr(model, "tokenizer", None) is not None and getattr(model.tokenizer, "pad_token", None) is None:
             model.tokenizer.pad_token = model.tokenizer.eos_token
         if getattr(model, "model", None) is not None and getattr(model.model, "config", None) is not None:
@@ -149,7 +155,10 @@ def rerank(key: str, req: RerankRequest):
         else:
             formatted_query = format_qwen_query(req.query)
             pairs = [(formatted_query, format_qwen_document(doc)) for doc in docs]
-        raw_scores = model.predict(pairs)
+        raw_scores = model.predict(
+            pairs,
+            batch_size=int(os.getenv("QWEN_RERANK_BATCH_SIZE", "8")),
+        )
     else:
         pairs = [(req.query, doc) for doc in docs]
         raw_scores = model.predict(pairs)
