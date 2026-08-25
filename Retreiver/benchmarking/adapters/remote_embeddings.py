@@ -101,6 +101,18 @@ def _response_metadata(response: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def _require_expected_model(response: dict[str, Any], expected: str, required: bool) -> None:
+    if not required:
+        return
+    actual = response.get("model")
+    if not isinstance(actual, str) or not actual.strip():
+        raise RuntimeError(f"embedding endpoint did not report model; expected {expected!r}")
+    if actual.strip() != expected:
+        raise RuntimeError(
+            f"embedding endpoint model mismatch: expected {expected!r}, got {actual.strip()!r}"
+        )
+
+
 def _input_tokens(response: dict[str, Any]) -> int | None:
     usage = response.get("usage")
     if not isinstance(usage, dict):
@@ -119,6 +131,7 @@ class OpenAIEmbeddingAdapter:
         self.batch_size = int(batch_size)
         self.url = url
         self.last_response_metadata: dict[str, Any] = {}
+        self.response_metadata_history: list[dict[str, Any]] = []
         self.input_tokens = 0
         self.input_tokens_complete = True
         self.api_key = os.environ.get(api_key_env, "").strip()
@@ -177,6 +190,7 @@ class OpenAIEmbeddingAdapter:
             if self.input_tokens_complete:
                 metadata["embedding_input_tokens"] = self.input_tokens
             self.last_response_metadata = metadata
+            self.response_metadata_history.append(dict(metadata))
             vectors = _extract_embeddings(response)
             if len(vectors) != len(batch):
                 raise RuntimeError(f"OpenAI returned {len(vectors)} embeddings for {len(batch)} inputs")
@@ -190,13 +204,26 @@ class OpenAIEmbeddingAdapter:
 
 
 class RemoteHTTPEmbeddingAdapter:
-    def __init__(self, model_name: str, endpoint_env: str, dimensions: int = 768, batch_size: int = 32, api_key_env: str | None = None, **_: Any):
+    def __init__(
+        self,
+        model_name: str,
+        endpoint_env: str,
+        dimensions: int = 768,
+        batch_size: int = 32,
+        api_key_env: str | None = None,
+        require_response_model: bool = False,
+        expected_response_model: str | None = None,
+        **_: Any,
+    ):
         self.name = model_name
         self.model_name = model_name
+        self.require_response_model = bool(require_response_model)
+        self.expected_response_model = expected_response_model or model_name
         self.dimensions = int(dimensions)
         self.batch_size = int(batch_size)
         self.url = os.environ.get(endpoint_env, "").strip()
         self.last_response_metadata: dict[str, Any] = {}
+        self.response_metadata_history: list[dict[str, Any]] = []
         if not self.url:
             raise RuntimeError(f"{endpoint_env} is required for {model_name}. Open-source embeddings must run from the VM endpoint, not local fallback.")
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
@@ -216,7 +243,9 @@ class RemoteHTTPEmbeddingAdapter:
             for payload in payloads:
                 try:
                     response = _post_json(self.url, payload, headers=headers)
+                    _require_expected_model(response, self.expected_response_model, self.require_response_model)
                     self.last_response_metadata = _response_metadata(response)
+                    self.response_metadata_history.append(dict(self.last_response_metadata))
                     vectors = _extract_embeddings(response)
                     if len(vectors) == len(batch):
                         out.extend(vectors)

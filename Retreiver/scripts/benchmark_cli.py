@@ -9,7 +9,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarking.core.config import generate_matrix, load_benchmark_config
-from benchmarking.core.runner import run_experiment
+from benchmarking.core.runner import run_experiment, validate_output_directory
+
+
+def _output_directory(root: Path, config_path: Path, requested: str) -> Path:
+    """Fail closed when a candidate experiment targets an official artifact lane."""
+    output_dir = (root / requested).resolve()
+    config = load_benchmark_config(config_path)
+    return validate_output_directory(config, root, output_dir)
 
 
 def main() -> None:
@@ -54,15 +61,16 @@ def main() -> None:
             "retrieval_method": args.retrieval_method,
             "reranker": args.reranker,
         }
+        output_dir = _output_directory(root, config_path, args.output_dir)
         analysis = run_experiment(
             config_path,
             root,
-            root / args.output_dir,
+            output_dir,
             max_runs=args.max_runs,
             limit_queries=args.limit_queries,
             selections=selections,
         )
-        print(json.dumps({"ok": True, "best_config": analysis.get("best_config", {}), "report": str(root / args.output_dir / "MODULAR_REPORT.md")}, indent=2))
+        print(json.dumps({"ok": True, "best_config": analysis.get("best_config", {}), "report": str(output_dir / "MODULAR_REPORT.md")}, indent=2))
 
 
 if __name__ == "__main__":

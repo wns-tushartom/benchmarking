@@ -1,0 +1,70 @@
+{
+  "experiment": {
+    "name": "wns-retrieval-reranker-candidates",
+    "description": "Isolated candidate lane for GTE dense versus BM25 plus GTE RRF and reranker candidates",
+    "dataset": "data/qa_text_test.csv",
+    "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
+    "top_k": 10,
+    "mode": "vm_remote_required",
+    "random_seed": 42,
+    "repetitions": 1,
+    "candidate_depth": 50,
+    "fusion_depth": 20,
+    "rrf_k": 60,
+    "output_lane": "retrieval-reranker-candidates"
+  },
+  "matrix": {
+    "chunkers": [
+      "entity_heuristic_w6",
+      "entity_heuristic_w5",
+      "entity_heuristic_w4",
+      "Heading_sections_l2",
+      "fixed_tok1200_ov150"
+    ],
+    "embeddings": ["gte_multilingual_base"],
+    "vector_stores": ["FAISS"],
+    "index_types": ["HNSW"],
+    "retrieval_methods": ["GTE Dense Cosine", "BM25 + GTE Dense + RRF"],
+    "rerankers": [
+      "none",
+      "bge-reranker-base",
+      "Qwen3:4B Rerank",
+      "nemotron_rerank_1b",
+      "gte_modernbert_base"
+    ],
+    "evaluators": ["overlap_relevance"]
+  },
+  "techniques": {
+    "chunkers": {
+      "entity_heuristic_w6": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w6"},
+      "entity_heuristic_w5": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w5"},
+      "entity_heuristic_w4": {"adapter": "local_workbook", "sheet_name": "entity_heuristic_w4"},
+      "Heading_sections_l2": {"adapter": "local_workbook", "sheet_name": "Heading_sections_l2"},
+      "fixed_tok1200_ov150": {"adapter": "local_workbook", "sheet_name": "fixed_tok1200_ov150"}
+    },
+    "embeddings": {
+      "gte_multilingual_base": {
+        "adapter": "remote_http",
+        "dimensions": 768,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "GTE_EMBEDDING_URL",
+        "api_key_env": "HF_TOKEN",
+        "batch_size": 32,
+        "require_response_model": true,
+        "expected_response_model": "Alibaba-NLP/gte-multilingual-base"
+      }
+    },
+    "vector_stores": {
+      "FAISS": {"adapter": "faiss", "execution_location": "in_process", "index_type": "HNSW", "hnsw_m": 16, "ef_construction": 100, "ef_search": 64}
+    },
+    "rerankers": {
+      "none": {"adapter": "identity", "license": "open_source", "execution_location": "in_process", "model": "identity"},
+      "bge-reranker-base": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "BGE_RERANK_URL", "api_key_env": "HF_TOKEN", "model": "BAAI/bge-reranker-base", "require_response_model": true},
+      "Qwen3:4B Rerank": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "QWEN_RERANK_URL", "api_key_env": "QWEN_API_KEY", "model": "tomaarsen/Qwen3-Reranker-4B-seq-cls", "require_response_model": true},
+      "nemotron_rerank_1b": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "NEMOTRON_RERANK_URL", "api_key_env": "HF_TOKEN", "model": "nvidia/llama-nemotron-rerank-1b-v2", "require_response_model": true},
+      "gte_modernbert_base": {"adapter": "remote_http", "license": "open_source", "execution_location": "vm_only", "endpoint_env": "GTE_MODERNBERT_RERANK_URL", "api_key_env": "HF_TOKEN", "model": "Alibaba-NLP/gte-reranker-modernbert-base", "require_response_model": true}
+    }
+  },
+  "evaluation": {"overlap_threshold": 0.22, "bootstrap_iterations": 200}
+}

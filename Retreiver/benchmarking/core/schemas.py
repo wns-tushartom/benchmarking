@@ -33,6 +33,7 @@ class QueryCase:
 class SearchHit:
     chunk: Chunk
     score: float
+    provenance: Dict[str, Any] | None = None
 
 
 @dataclass

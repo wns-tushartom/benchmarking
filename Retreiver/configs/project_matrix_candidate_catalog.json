@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "candidate_lane": "retrieval_reranker_candidates",
+  "settings": {
+    "candidate_depth": 50,
+    "fusion_depth": 20,
+    "rrf_k": 60,
+    "top_k": 10
+  },
+  "matrix": {
+    "chunkers": [
+      "entity_heuristic_w6",
+      "entity_heuristic_w5",
+      "entity_heuristic_w4",
+      "Heading_sections_l2",
+      "fixed_tok1200_ov150"
+    ],
+    "embeddings": ["gte_multilingual_base"],
+    "vector_stores": ["FAISS"],
+    "retrieval_methods": ["GTE Dense Cosine", "BM25 + GTE Dense + RRF"],
+    "rerankers": ["none", "bge-reranker-base", "Qwen3:4B Rerank", "nemotron_rerank_1b", "gte_modernbert_base"]
+  },
+  "techniques": {
+    "chunkers": {
+      "entity_heuristic_w6": {"module": "source.services.project_chunking", "callable": "entity_heuristic_chunking", "params": {"window_size": 6}},
+      "entity_heuristic_w5": {"module": "source.services.project_chunking", "callable": "entity_heuristic_chunking", "params": {"window_size": 5}},
+      "entity_heuristic_w4": {"module": "source.services.project_chunking", "callable": "entity_heuristic_chunking", "params": {"window_size": 4}},
+      "Heading_sections_l2": {"module": "source.services.project_chunking", "callable": "heading_sections_chunking", "params": {"level": 2}},
+      "fixed_tok1200_ov150": {"module": "source.services.project_chunking", "callable": "fixed_token_chunks", "params": {"chunk_tokens": 1200, "overlap_tokens": 150}}
+    },
+    "embeddings": {
+      "gte_multilingual_base": {"adapter": "remote_http", "dimensions": 768, "license": "open_source", "execution_location": "vm_only", "endpoint_env": "GTE_EMBEDDING_URL", "api_key_env": "HF_TOKEN", "batch_size": 32}
+    },
+    "vector_stores": {
+      "FAISS": {"adapter": "faiss", "execution_location": "in_process", "index_type": "HNSW", "hnsw_m": 16, "ef_construction": 100, "ef_search": 64}
+    },
+    "retrieval_methods": {
+      "GTE Dense Cosine": {"kind": "dense_cosine", "candidate_depth": 50},
+      "BM25 + GTE Dense + RRF": {"kind": "hybrid_rrf", "candidate_depth": 50, "fusion_depth": 20, "rrf_k": 60, "dense_weight": 1.0, "bm25_weight": 1.0}
+    },
+    "rerankers": {
+      "none": {"adapter": "identity", "execution_location": "in_process", "model_id": "identity"},
+      "bge-reranker-base": {"adapter": "remote_http", "execution_location": "vm_only", "endpoint_env": "BGE_RERANK_URL", "model_id": "BAAI/bge-reranker-base"},
+      "Qwen3:4B Rerank": {"adapter": "remote_http", "execution_location": "vm_only", "endpoint_env": "QWEN_RERANK_URL", "model_id": "tomaarsen/Qwen3-Reranker-4B-seq-cls"},
+      "nemotron_rerank_1b": {"adapter": "remote_http", "execution_location": "vm_only", "endpoint_env": "NEMOTRON_RERANK_URL", "model_id": "nvidia/llama-nemotron-rerank-1b-v2"},
+      "gte_modernbert_base": {"adapter": "remote_http", "execution_location": "vm_only", "endpoint_env": "GTE_MODERNBERT_RERANK_URL", "model_id": "Alibaba-NLP/gte-reranker-modernbert-base"}
+    }
+  }
+}

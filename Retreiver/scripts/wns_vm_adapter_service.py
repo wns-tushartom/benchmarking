@@ -10,10 +10,29 @@ from pydantic import BaseModel
 
 app = FastAPI(title="WNS VM Model Adapter Service")
 
+
+GTE_CANDIDATE_MODEL = "Alibaba-NLP/gte-multilingual-base"
+NEMOTRON_CANDIDATE_MODEL = "nvidia/llama-nemotron-rerank-1b-v2"
+GTE_MODERNBERT_CANDIDATE_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
+
+
+def candidate_model_env(name: str, expected: str) -> str:
+    configured = os.getenv(name, expected).strip()
+    if configured != expected:
+        raise RuntimeError(
+            f"{name} must be {expected!r} for the isolated candidate lane; got {configured!r}"
+        )
+    return configured
+
+
 JINA_MODEL_NAME = os.getenv("JINA_EMBEDDING_MODEL", "jinaai/jina-embeddings-v3")
-GTE_MODEL_NAME = os.getenv("GTE_EMBEDDING_MODEL", "Alibaba-NLP/gte-multilingual-base")
+GTE_MODEL_NAME = candidate_model_env("GTE_EMBEDDING_MODEL", GTE_CANDIDATE_MODEL)
 BGE_RERANK_MODEL = os.getenv("BGE_RERANKER_MODEL", "BAAI/bge-reranker-base")
 QWEN_RERANK_MODEL = os.getenv("QWEN_RERANK_MODEL", "tomaarsen/Qwen3-Reranker-4B-seq-cls")
+NEMOTRON_RERANK_MODEL = candidate_model_env("NEMOTRON_RERANK_MODEL", NEMOTRON_CANDIDATE_MODEL)
+GTE_MODERNBERT_RERANK_MODEL = candidate_model_env(
+    "GTE_MODERNBERT_RERANK_MODEL", GTE_MODERNBERT_CANDIDATE_MODEL
+)
 QWEN_RERANK_INSTRUCTION = os.getenv(
     "QWEN_RERANK_INSTRUCTION",
     "Given a WNS airline support query, retrieve relevant policy or process passages that answer the query.",
@@ -61,6 +80,11 @@ def format_qwen_document(document: str) -> str:
     return f"<Document>: {document}{suffix}"
 
 
+def format_nemotron_pair(query: str, document: str) -> str:
+    """Use NVIDIA's documented single-sequence prompt for Nemotron Rerank."""
+    return f"question:{query} \n \n passage:{document}"
+
+
 def score_float(value) -> float:
     try:
         return float(value)
@@ -95,7 +119,49 @@ def cross_encoder_model(key: str):
         if getattr(model, "model", None) is not None and getattr(model.model, "config", None) is not None:
             model.model.config.pad_token_id = getattr(model.tokenizer, "eos_token_id", None)
         return model
+    if key == "gte-modernbert":
+        return CrossEncoder(
+            GTE_MODERNBERT_RERANK_MODEL,
+            trust_remote_code=True,
+            device=DEVICE,
+            max_length=8192,
+            automodel_args={"torch_dtype": "auto"},
+        )
     raise ValueError(f"unknown reranker key: {key}")
+
+
+@lru_cache(maxsize=1)
+def nemotron_model():
+    """Load Nemotron through its documented transformers sequence-classifier path."""
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(NEMOTRON_RERANK_MODEL, trust_remote_code=True)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        NEMOTRON_RERANK_MODEL,
+        trust_remote_code=True,
+        torch_dtype="auto",
+    ).to(DEVICE)
+    model.eval()
+    return tokenizer, model
+
+
+def nemotron_scores(query: str, documents: List[str]) -> List[float]:
+    import torch
+
+    tokenizer, model = nemotron_model()
+    encoded = tokenizer(
+        [format_nemotron_pair(query, document) for document in documents],
+        padding=True,
+        truncation=True,
+        max_length=8192,
+        return_tensors="pt",
+    )
+    encoded = {key: value.to(DEVICE) for key, value in encoded.items()}
+    with torch.no_grad():
+        logits = model(**encoded).logits
+    if len(logits.shape) > 1 and logits.shape[-1] > 1:
+        logits = logits[:, -1]
+    return [float(value) for value in logits.reshape(-1).detach().float().cpu().tolist()]
 
 
 @app.get("/health")
@@ -108,8 +174,17 @@ def health():
             "gte": GTE_MODEL_NAME,
             "bge_reranker": BGE_RERANK_MODEL,
             "qwen_reranker": QWEN_RERANK_MODEL,
+            "nemotron_reranker": NEMOTRON_RERANK_MODEL,
+            "gte_modernbert_reranker": GTE_MODERNBERT_RERANK_MODEL,
         },
-        "endpoints": ["/embed/jina", "/embed/gte", "/rerank/bge", "/rerank/qwen"],
+        "endpoints": [
+            "/embed/jina",
+            "/embed/gte",
+            "/rerank/bge",
+            "/rerank/qwen",
+            "/rerank/nemotron",
+            "/rerank/gte-modernbert",
+        ],
     }
 
 
@@ -142,23 +217,31 @@ def rerank(key: str, req: RerankRequest):
     docs = req.documents or req.texts or req.passages or []
     if not docs:
         raise ValueError("rerank request needs documents, texts, or passages")
-    model = cross_encoder_model(key)
-    if key == "qwen":
-        if os.getenv("QWEN_RERANK_FORMATTED", "1") == "0":
-            pairs = [(req.query, doc) for doc in docs]
-        else:
-            formatted_query = format_qwen_query(req.query)
-            pairs = [(formatted_query, format_qwen_document(doc)) for doc in docs]
-        raw_scores = model.predict(pairs)
+    if key == "nemotron":
+        raw_scores = nemotron_scores(req.query, docs)
     else:
-        pairs = [(req.query, doc) for doc in docs]
-        raw_scores = model.predict(pairs)
+        model = cross_encoder_model(key)
+        if key == "qwen":
+            if os.getenv("QWEN_RERANK_FORMATTED", "1") == "0":
+                pairs = [(req.query, doc) for doc in docs]
+            else:
+                formatted_query = format_qwen_query(req.query)
+                pairs = [(formatted_query, format_qwen_document(doc)) for doc in docs]
+            raw_scores = model.predict(pairs)
+        else:
+            pairs = [(req.query, doc) for doc in docs]
+            raw_scores = model.predict(pairs)
     scores = [score_float(s) for s in raw_scores]
     ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
     if req.top_k:
         ranked = ranked[: req.top_k]
     return {
-        "model": BGE_RERANK_MODEL if key == "bge" else QWEN_RERANK_MODEL,
+        "model": {
+            "bge": BGE_RERANK_MODEL,
+            "qwen": QWEN_RERANK_MODEL,
+            "nemotron": NEMOTRON_RERANK_MODEL,
+            "gte-modernbert": GTE_MODERNBERT_RERANK_MODEL,
+        }[key],
         "scores": scores,
         "results": [{"index": i, "score": score, "document": docs[i]} for i, score in ranked],
     }
@@ -172,3 +255,13 @@ def rerank_bge(req: RerankRequest):
 @app.post("/rerank/qwen")
 def rerank_qwen(req: RerankRequest):
     return rerank("qwen", req)
+
+
+@app.post("/rerank/nemotron")
+def rerank_nemotron(req: RerankRequest):
+    return rerank("nemotron", req)
+
+
+@app.post("/rerank/gte-modernbert")
+def rerank_gte_modernbert(req: RerankRequest):
+    return rerank("gte-modernbert", req)

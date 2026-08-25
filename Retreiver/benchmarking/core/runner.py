@@ -14,12 +14,107 @@ from benchmarking.adapters.local import load_query_cases
 from benchmarking.core.config import config_hash, dataset_hash, generate_matrix, load_benchmark_config, selected_config, technique
 from benchmarking.core.metrics import bootstrap_ci, mean, mrr, ndcg_at_k, precision_at_k, recall_at_k
 from benchmarking.core.registry import default_registry
-from scripts.dashboard_source_catalog import DEFAULT_DATASET_ID, OFFICIAL_GROUNDTRUTH_ID
+from benchmarking.retrieval import BM25Retriever, DenseCosineRetriever, HybridRRFRetriever
 from scripts.wns_env import load_env_files
 
 
 def load_env_file(root: Path) -> None:
     load_env_files(root)
+
+
+def validate_output_directory(config: Dict[str, Any], root: Path, output_dir: Path) -> Path:
+    """Keep candidate artifacts in their dedicated direct-child run namespace."""
+    lane = str(config.get("experiment", {}).get("output_lane", "")).strip()
+    resolved_output = output_dir.resolve()
+    if not lane:
+        return resolved_output
+
+    lane_root = (root / "data" / "modular_runs" / lane).resolve()
+    try:
+        relative = resolved_output.relative_to(lane_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"candidate output directory must be a direct run directory under {lane_root}; got {resolved_output}"
+        ) from exc
+    if len(relative.parts) != 1 or relative.name in {"", ".", ".."}:
+        raise ValueError(
+            f"candidate output directory must be a direct run directory under {lane_root}; got {resolved_output}"
+        )
+    return resolved_output
+
+
+def response_metadata(adapter: Any) -> Dict[str, str]:
+    """Return a JSON-safe snapshot of provider metadata exposed by an adapter."""
+    raw = getattr(adapter, "last_response_metadata", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): str(value)[:512]
+        for key, value in raw.items()
+        if isinstance(value, (str, int, float)) and str(value)
+    }
+
+
+def response_metadata_history(adapter: Any) -> List[Dict[str, str]]:
+    raw = getattr(adapter, "response_metadata_history", None)
+    if not isinstance(raw, list):
+        metadata = response_metadata(adapter)
+        return [metadata] if metadata else []
+    history = []
+    for item in raw:
+        if isinstance(item, dict):
+            history.append({
+                str(key): str(value)[:512]
+                for key, value in item.items()
+                if isinstance(value, (str, int, float)) and str(value)
+            })
+    return history
+
+
+def response_metadata_since(adapter: Any, start: int) -> List[Dict[str, str]]:
+    return response_metadata_history(adapter)[max(0, int(start)):]
+
+
+def source_provenance(root: Path) -> Dict[str, Any]:
+    """Describe the exact source state without claiming a dirty tree is a commit."""
+    try:
+        base_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        tracked_diff = subprocess.check_output(
+            ["git", "diff", "--binary", "HEAD"], cwd=root, stderr=subprocess.DEVNULL
+        )
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="surrogateescape").split("\0")
+    except Exception:
+        return {
+            "base_git_commit": "unknown",
+            "worktree_dirty": True,
+            "working_tree_fingerprint": "unknown",
+        }
+
+    digest = hashlib.sha256()
+    digest.update(base_commit.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(tracked_diff)
+    untracked_files = []
+    for relative_path in sorted(path for path in untracked if path):
+        path = root / relative_path
+        if path.is_file():
+            file_hash = sha256_file(path)
+            untracked_files.append({"path": relative_path, "sha256": file_hash})
+            digest.update(relative_path.encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            digest.update(file_hash.encode("ascii"))
+    return {
+        "base_git_commit": base_commit,
+        "worktree_dirty": bool(tracked_diff or untracked_files),
+        "working_tree_fingerprint": digest.hexdigest(),
+        "untracked_files": untracked_files,
+    }
 
 
 def run_experiment(
@@ -30,8 +125,9 @@ def run_experiment(
     limit_queries: int = 0,
     selections: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
-    load_env_file(root)
     official_cfg = load_benchmark_config(config_path)
+    output_dir = validate_output_directory(official_cfg, root, output_dir)
+    load_env_file(root)
     cfg = official_cfg
     run_selection: Dict[str, str] = {}
     if selections:
@@ -60,8 +156,8 @@ def run_experiment(
     manifest.update({
         "status": "running",
         "run_id": output_dir.name,
-        "dataset_id": DEFAULT_DATASET_ID,
-        "groundtruth_id": OFFICIAL_GROUNDTRUTH_ID,
+        "dataset_id": "dataset:wns-default",
+        "groundtruth_id": "groundtruth:repository:qa_text_test.csv",
     })
     write_json_atomic(output_dir / "manifest.json", manifest)
 
@@ -73,6 +169,7 @@ def run_experiment(
 
     chunk_cache: Dict[str, Any] = {}
     embedding_cache: Dict[Tuple[str, str], Any] = {}
+    bm25_cache: Dict[str, BM25Retriever] = {}
 
     for idx, row in enumerate(matrix, 1):
         combo_label = f"[{idx}/{len(matrix)}] {row['chunker']} | {row['embedding']} | {row['vector_store']} | {row['reranker']}"
@@ -97,19 +194,46 @@ def run_experiment(
             embed_cls = registry.get("embedding", embedding_cfg["adapter"])
             embedder = embed_cls(model_name=row["embedding"], **embedding_cfg)
             embed_start = time.perf_counter()
+            metadata_start = len(response_metadata_history(embedder))
             chunk_vectors = embedder.embed_many([c.paragraph for c in chunks])
+            chunk_response_metadata = response_metadata_history(embedder)[metadata_start:]
+            query_metadata_start = metadata_start + len(chunk_response_metadata)
             query_vectors = embedder.embed_many([q.query for q in queries])
-            embedding_cache[embed_key] = (embedder, chunk_vectors, query_vectors, time.perf_counter() - embed_start)
+            query_response_metadata = response_metadata_history(embedder)[query_metadata_start:]
+            embedding_cache[embed_key] = (
+                embedder,
+                chunk_vectors,
+                query_vectors,
+                time.perf_counter() - embed_start,
+                {
+                    "chunk_embeddings": chunk_response_metadata,
+                    "query_embeddings": query_response_metadata,
+                },
+            )
             print(f"  embedding done: {row['embedding']} seconds={embedding_cache[embed_key][3]:.2f}", flush=True)
         else:
             print(f"  embedding cached: {row['embedding']}", flush=True)
-        embedder, chunk_vectors, query_vectors, embedding_latency_s = embedding_cache[embed_key]
+        embedder, chunk_vectors, query_vectors, embedding_latency_s, embedding_response_metadata = embedding_cache[embed_key]
 
         print(f"  upsert start: {row['vector_store']} vectors={len(chunk_vectors)}", flush=True)
         vector_cls = registry.get("vector_store", vector_cfg["adapter"])
         store = vector_cls(name=row["vector_store"], **vector_cfg)
         upsert_metrics = store.upsert(chunks, chunk_vectors)
         print(f"  upsert done: {row['vector_store']} seconds={float(upsert_metrics.get('upsert_latency_s', 0)):.2f}", flush=True)
+        dense_retriever = DenseCosineRetriever(store)
+        retrieval_method = row.get("retrieval_method", "Cosine Similarity")
+        candidate_depth = int(exp.get("candidate_depth", max(top_k, 20)))
+        fusion_depth = int(exp.get("fusion_depth", max(top_k, 20)))
+        hybrid_retriever: HybridRRFRetriever | None = None
+        if retrieval_method == "BM25 + GTE Dense + RRF":
+            bm25_retriever = bm25_cache.setdefault(chunk_key, BM25Retriever(chunks))
+            hybrid_retriever = HybridRRFRetriever(
+                dense=dense_retriever,
+                bm25=bm25_retriever,
+                rrf_k=int(exp.get("rrf_k", 60)),
+            )
+        elif retrieval_method not in {"Cosine Similarity", "GTE Dense Cosine"}:
+            raise ValueError(f"Unsupported retrieval method: {retrieval_method}")
         reranker_cls = registry.get("reranker", reranker_cfg["adapter"])
         reranker = reranker_cls(name=row["reranker"], **reranker_cfg)
         evaluator_cls = registry.get("evaluator", row["evaluator"])
@@ -122,14 +246,30 @@ def run_experiment(
         category_stats: Dict[str, List[float]] = {}
         examples_missed = []
         examples_hit = []
+        reranker_response_metadata = []
 
         print(f"  queries start: {len(queries)} using {row['reranker']}", flush=True)
         for query_idx, (q, qv) in enumerate(zip(queries, query_vectors), 1):
             if query_idx == 1 or query_idx % 5 == 0 or query_idx == len(queries):
                 print(f"    query {query_idx}/{len(queries)}: {q.id}", flush=True)
             search_start = time.perf_counter()
-            base_hits = store.search(qv, top_k=max(top_k, 20))
+            if hybrid_retriever is not None:
+                base_hits = hybrid_retriever.search(
+                    q.query,
+                    qv,
+                    top_k=fusion_depth,
+                    candidate_depth=candidate_depth,
+                )
+            else:
+                base_hits = dense_retriever.search(qv, top_k=candidate_depth)[:fusion_depth]
+            reranker_metadata_start = len(response_metadata_history(reranker))
             reranked = reranker.rerank(q.query, base_hits, top_k=top_k)
+            query_reranker_metadata = response_metadata_since(reranker, reranker_metadata_start)
+            if query_reranker_metadata:
+                reranker_response_metadata.extend(
+                    {"query_id": q.id, **metadata}
+                    for metadata in query_reranker_metadata
+                )
             latency = time.perf_counter() - search_start
             flags = evaluator.flags(q, reranked)
             first_relevant = next((rank for rank, relevant in enumerate(flags, 1) if relevant), None)
@@ -162,6 +302,12 @@ def run_experiment(
                 "category": q.category,
                 "top_ids": "|".join(str(h.chunk.id) for h in reranked),
                 "top_scores": "|".join(f"{h.score:.4f}" for h in reranked),
+                "retrieval_provenance": json.dumps([h.provenance or {} for h in reranked], ensure_ascii=False),
+                "provider_response_metadata": json.dumps(
+                    {"embedding": embedding_response_metadata, "reranker": query_reranker_metadata},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 **values,
                 "latency_ms": round(latency * 1000, 4),
             })
@@ -174,6 +320,8 @@ def run_experiment(
             "chunk_count": len(chunks),
             "embedding_dimension": getattr(embedder, "dimensions", 0),
             "embedding_latency_s": round(embedding_latency_s, 6),
+            "embedding_response_metadata": json.dumps(embedding_response_metadata, ensure_ascii=False, sort_keys=True),
+            "reranker_response_metadata": json.dumps(reranker_response_metadata, ensure_ascii=False, sort_keys=True),
             "upsert_latency_s": round(float(upsert_metrics.get("upsert_latency_s", 0)), 6),
             "avg_latency_ms": round(mean(latencies) * 1000, 6),
             "avg_latency_seconds": round(mean(latencies), 6),
@@ -240,10 +388,7 @@ def build_manifest(
 ) -> Dict[str, Any]:
     dataset = root / cfg["experiment"]["dataset"]
     corpus = root / cfg["experiment"].get("corpus_workbook", "")
-    try:
-        git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        git_sha = "unknown"
+    provenance = source_provenance(root)
     selected_hash = config_hash(cfg)
     contract_hash = config_hash(official_config if official_config is not None else cfg)
     return {
@@ -256,7 +401,8 @@ def build_manifest(
         "dataset_hash": dataset_hash([dataset, corpus]),
         "query_count": query_count,
         "matrix_count": matrix_count,
-        "git_sha": git_sha,
+        "git_sha": provenance["base_git_commit"][:12],
+        "source_provenance": provenance,
         "python": platform.python_version(),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "provider_readiness": provider_readiness(),
@@ -278,6 +424,8 @@ def provider_readiness() -> Dict[str, bool]:
         "AWS_DEFAULT_REGION",
         "QWEN_RERANK_URL",
         "BGE_RERANK_URL",
+        "NEMOTRON_RERANK_URL",
+        "GTE_MODERNBERT_RERANK_URL",
     ]
     return {k: bool(os.environ.get(k)) for k in keys}
 
