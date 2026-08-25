@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "allowed_host": "127.0.0.1",
+  "allowed_port_min": 5000,
+  "allowed_port_max": 5019,
+  "slots": [
+    {"service_id":"jina_embedding","port":5000,"label":"Jina embedding","role":"embedding","manage_mode":"python_adapter","launch_profile":"jina","health":{"kind":"http","path":"/health","expected_profile":"jina"},"endpoint_env":{"JINA_EMBEDDING_URL":"/embed/jina"}},
+    {"service_id":"gte_embedding","port":5001,"label":"GTE embedding","role":"embedding","manage_mode":"python_adapter","launch_profile":"gte","health":{"kind":"http","path":"/health","expected_profile":"gte"},"endpoint_env":{"GTE_EMBEDDING_URL":"/embed/gte"}},
+    {"service_id":"bge_reranker","port":5002,"label":"BGE reranker","role":"reranker","manage_mode":"python_adapter","launch_profile":"bge","health":{"kind":"http","path":"/health","expected_profile":"bge"},"endpoint_env":{"BGE_RERANK_URL":"/rerank/bge"}},
+    {"service_id":"pgvector","port":5003,"label":"PGVector","role":"vector_store","manage_mode":"docker_compose","launch_profile":"postgres-pgvector","health":{"kind":"tcp"},"endpoint_env":{"PGVECTOR_DSN":"postgresql://wns:${WNS_POSTGRES_PASSWORD}@127.0.0.1:5003/wns_benchmark"}},
+    {"service_id":"weaviate_http","port":5004,"label":"Weaviate HTTP","role":"vector_store","manage_mode":"docker_compose","launch_profile":"weaviate","health":{"kind":"http","path":"/v1/.well-known/ready"},"endpoint_env":{"WEAVIATE_URL":""}},
+    {"service_id":"weaviate_grpc","port":5005,"label":"Weaviate gRPC","role":"vector_store_companion","manage_mode":"companion","launch_profile":"weaviate_http","health":{"kind":"tcp"},"endpoint_env":{"WEAVIATE_GRPC_URL":""}},
+    {"service_id":"qwen_reranker","port":5006,"label":"Qwen3 4B reranker","role":"reranker","manage_mode":"python_adapter","launch_profile":"qwen","health":{"kind":"http","path":"/health","expected_profile":"qwen"},"endpoint_env":{"QWEN_RERANK_URL":"/rerank/qwen"}},
+    {"service_id":"nemotron_reranker","port":5007,"label":"Nemotron reranker","role":"reranker","manage_mode":"python_adapter","launch_profile":"nemotron-rerank","health":{"kind":"http","path":"/health","expected_profile":"nemotron-rerank"},"endpoint_env":{"NEMOTRON_RERANK_URL":"/rerank/nemotron"}},
+    {"service_id":"gte_modernbert_reranker","port":5008,"label":"GTE ModernBERT reranker","role":"reranker","manage_mode":"python_adapter","launch_profile":"gte-modernbert","health":{"kind":"http","path":"/health","expected_profile":"gte-modernbert"},"endpoint_env":{"GTE_MODERNBERT_RERANK_URL":"/rerank/gte-modernbert"}},
+    {"service_id":"jupyter_reserved","port":5009,"label":"Jupyter upload bridge","role":"reserved","manage_mode":"reserved","health":{"kind":"tcp"},"endpoint_env":{}},
+    {"service_id":"nemotron_embed_1b_bf16","port":5010,"label":"Nemotron Embed 1B BF16","role":"embedding","manage_mode":"vllm","launch_profile":"nemotron-embed-1b-bf16","health":{"kind":"http","path":"/v1/models","expected_model":"nvidia/Nemotron-3-Embed-1B-BF16"},"endpoint_env":{"NEMOTRON_3_EMBED_1B_BF16_URL":"/v1/embeddings"}},
+    {"service_id":"dashboard","port":5011,"label":"Benchmark dashboard","role":"dashboard","manage_mode":"external","health":{"kind":"http","path":"/api/adapters"},"endpoint_env":{}},
+    {"service_id":"nemotron_embed_1b_nvfp4","port":5012,"label":"Nemotron Embed 1B NVFP4","role":"embedding","manage_mode":"vllm","launch_profile":"nemotron-embed-1b-nvfp4","health":{"kind":"http","path":"/v1/models","expected_model":"nvidia/Nemotron-3-Embed-1B-NVFP4"},"endpoint_env":{"NEMOTRON_3_EMBED_1B_NVFP4_URL":"/v1/embeddings"}},
+    {"service_id":"nemotron_embed_8b_bf16","port":5013,"label":"Nemotron Embed 8B BF16","role":"embedding","manage_mode":"vllm","launch_profile":"nemotron-embed-8b-bf16","health":{"kind":"http","path":"/v1/models","expected_model":"nvidia/Nemotron-3-Embed-8B-BF16"},"endpoint_env":{"NEMOTRON_3_EMBED_8B_BF16_URL":"/v1/embeddings"}},
+    {"service_id":"spare_reserved","port":5014,"label":"Reserved spare","role":"reserved","manage_mode":"reserved","health":{"kind":"tcp"},"endpoint_env":{}},
+    {"service_id":"qdrant_grpc","port":5015,"label":"Qdrant gRPC","role":"vector_store_companion","manage_mode":"companion","launch_profile":"qdrant_http","health":{"kind":"tcp"},"endpoint_env":{"QDRANT_GRPC_URL":""}},
+    {"service_id":"nvidia_rag","port":5016,"label":"NVIDIA RAG server","role":"nvidia","manage_mode":"external","health":{"kind":"http","path":"/v1/health?check_dependencies=true"},"endpoint_env":{"NVIDIA_RAG_SERVER_URL":""}},
+    {"service_id":"nvidia_ingestor","port":5017,"label":"NVIDIA ingestor","role":"nvidia","manage_mode":"external","health":{"kind":"http","path":"/v1/health?check_dependencies=true"},"endpoint_env":{"NVIDIA_INGESTOR_URL":""}},
+    {"service_id":"nvidia_frontend","port":5018,"label":"NVIDIA frontend","role":"nvidia","manage_mode":"external","health":{"kind":"http","path":"/"},"endpoint_env":{"NVIDIA_RAG_FRONTEND_URL":""}},
+    {"service_id":"qdrant_http","port":5019,"label":"Qdrant HTTP","role":"vector_store","manage_mode":"docker_compose","launch_profile":"qdrant","health":{"kind":"http","path":"/healthz"},"endpoint_env":{"QDRANT_URL":""}}
+  ]
+}

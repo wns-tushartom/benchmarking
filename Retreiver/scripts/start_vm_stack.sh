@@ -4,47 +4,44 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/.venv-vm/bin/python"
 DATA="$ROOT/data"
-COMPOSE_FILE="$ROOT/docker-compose.benchmark.yml"
+MANAGER="$ROOT/scripts/vm_adapter_manager.py"
+
 MODEL_ADAPTER_URL="http://127.0.0.1:5000"
 JINA_EMBEDDING_URL="http://127.0.0.1:5000/embed/jina"
-GTE_EMBEDDING_URL="http://127.0.0.1:5000/embed/gte"
-BGE_RERANK_URL="http://127.0.0.1:5001/rerank/bge"
-QWEN_RERANK_URL="http://127.0.0.1:5002/rerank/qwen"
+GTE_EMBEDDING_URL="http://127.0.0.1:5001/embed/gte"
+BGE_RERANK_URL="http://127.0.0.1:5002/rerank/bge"
+QWEN_RERANK_URL="http://127.0.0.1:5006/rerank/qwen"
+NEMOTRON_RERANK_URL="http://127.0.0.1:5007/rerank/nemotron"
+GTE_MODERNBERT_RERANK_URL="http://127.0.0.1:5008/rerank/gte-modernbert"
+NEMOTRON_3_EMBED_1B_BF16_URL="http://127.0.0.1:5010/v1/embeddings"
+NEMOTRON_3_EMBED_1B_NVFP4_URL="http://127.0.0.1:5012/v1/embeddings"
+NEMOTRON_3_EMBED_8B_BF16_URL="http://127.0.0.1:5013/v1/embeddings"
 QDRANT_URL="http://127.0.0.1:5019"
-QDRANT_GRPC_URL="http://127.0.0.1:5020"
+QDRANT_GRPC_URL="http://127.0.0.1:5015"
 WEAVIATE_URL="http://127.0.0.1:5004"
 WEAVIATE_GRPC_URL="127.0.0.1:5005"
+NVIDIA_RAG_SERVER_URL="http://127.0.0.1:5016"
+NVIDIA_INGESTOR_URL="http://127.0.0.1:5017"
+NVIDIA_RAG_FRONTEND_URL="http://127.0.0.1:5018"
+
 export MODEL_ADAPTER_URL JINA_EMBEDDING_URL GTE_EMBEDDING_URL
-export BGE_RERANK_URL QWEN_RERANK_URL QDRANT_URL QDRANT_GRPC_URL
-export WEAVIATE_URL WEAVIATE_GRPC_URL
+export BGE_RERANK_URL QWEN_RERANK_URL NEMOTRON_RERANK_URL GTE_MODERNBERT_RERANK_URL
+export NEMOTRON_3_EMBED_1B_BF16_URL NEMOTRON_3_EMBED_1B_NVFP4_URL NEMOTRON_3_EMBED_8B_BF16_URL
+export QDRANT_URL QDRANT_GRPC_URL WEAVIATE_URL WEAVIATE_GRPC_URL
+export NVIDIA_RAG_SERVER_URL NVIDIA_INGESTOR_URL NVIDIA_RAG_FRONTEND_URL
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
-fail_logs() {
-  local rc=$?
-  echo "VM stack startup failed (exit $rc). Recent logs:" >&2
-  for file in "$DATA"/model_adapter_500{0,1,2}.log "$DATA/dashboard_5011.log"; do
-    if [[ -f "$file" ]]; then
-      echo "--- $file ---" >&2
-      tail -n 40 "$file" >&2 || true
-    fi
-  done
-  exit "$rc"
-}
-trap fail_logs ERR
-
 if [[ ! -x "$PY" ]]; then
   echo "Missing $PY. Run VM dependency setup first." >&2
   exit 1
 fi
-if [[ ! -f "$COMPOSE_FILE" ]]; then
-  echo "Missing $COMPOSE_FILE" >&2
+if [[ ! -f "$MANAGER" ]]; then
+  echo "Missing $MANAGER" >&2
   exit 1
 fi
-command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
-
 mkdir -p "$DATA"
 
 write_runtime_endpoints() {
@@ -54,37 +51,37 @@ from pathlib import Path
 
 root = Path(os.environ["ROOT"])
 path = root / ".env.vm.generated"
-values = {
-    key: os.environ[key]
-    for key in (
-        "MODEL_ADAPTER_URL",
-        "JINA_EMBEDDING_URL",
-        "GTE_EMBEDDING_URL",
-        "BGE_RERANK_URL",
-        "QWEN_RERANK_URL",
-        "QDRANT_URL",
-        "QDRANT_GRPC_URL",
-        "WEAVIATE_URL",
-        "WEAVIATE_GRPC_URL",
-    )
-}
+if path.is_symlink():
+    raise SystemExit("Refusing symlinked .env.vm.generated")
+keys = (
+    "MODEL_ADAPTER_URL",
+    "JINA_EMBEDDING_URL",
+    "GTE_EMBEDDING_URL",
+    "BGE_RERANK_URL",
+    "QWEN_RERANK_URL",
+    "NEMOTRON_RERANK_URL",
+    "GTE_MODERNBERT_RERANK_URL",
+    "NEMOTRON_3_EMBED_1B_BF16_URL",
+    "NEMOTRON_3_EMBED_1B_NVFP4_URL",
+    "NEMOTRON_3_EMBED_8B_BF16_URL",
+    "QDRANT_URL",
+    "QDRANT_GRPC_URL",
+    "WEAVIATE_URL",
+    "WEAVIATE_GRPC_URL",
+    "NVIDIA_RAG_SERVER_URL",
+    "NVIDIA_INGESTOR_URL",
+    "NVIDIA_RAG_FRONTEND_URL",
+)
+values = {key: os.environ[key] for key in keys}
 lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 lines = [line for line in lines if line.split("=", 1)[0].strip() not in values]
 lines.extend(f"{key}={value}" for key, value in values.items())
-path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+temporary = path.with_suffix(".tmp")
+temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+temporary.chmod(0o600)
+temporary.replace(path)
 print(f"Updated endpoint routing: {path}")
 PY
-}
-
-stop_pidfile() {
-  local file="$1"
-  [[ -f "$file" ]] || return 0
-  local pid
-  pid="$(cat "$file" 2>/dev/null || true)"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-  fi
-  rm -f "$file"
 }
 
 wait_http() {
@@ -93,7 +90,7 @@ wait_http() {
   local attempts="${3:-90}"
   local i
   for ((i = 1; i <= attempts; i++)); do
-    if curl -fsS --max-time 30 "$url" >/dev/null 2>&1; then
+    if curl -fsS --max-time 10 "$url" >/dev/null 2>&1; then
       log "READY $name ($url)"
       return 0
     fi
@@ -120,61 +117,55 @@ wait_tcp() {
   return 1
 }
 
-start_adapter() {
-  local gpu="$1"
-  local port="$2"
-  local log_file="$DATA/model_adapter_${port}.log"
-  local pid_file="$DATA/model_adapter_${port}.pid"
+port_open() {
+  "$PY" -c 'import socket,sys; s=socket.socket(); s.settimeout(.4); raise SystemExit(0 if s.connect_ex(("127.0.0.1",int(sys.argv[1]))) == 0 else 1)' "$1"
+}
 
-  nohup env \
-    CUDA_VISIBLE_DEVICES="$gpu" \
-    WNS_MODEL_DEVICE=cuda \
-    QWEN_RERANK_BATCH_SIZE=8 \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    "$PY" -u -m uvicorn scripts.wns_vm_adapter_service:app \
-      --app-dir "$ROOT" --host 127.0.0.1 --port "$port" \
-      >"$log_file" 2>&1 &
-  echo $! >"$pid_file"
-  log "STARTED adapter GPU=$gpu port=$port PID=$(cat "$pid_file")"
+start_service() {
+  local service_id="$1"
+  log "Starting allowlisted service: $service_id"
+  "$PY" "$MANAGER" start "$service_id" --root "$ROOT"
+}
+
+start_dashboard() {
+  if curl -fsS --max-time 5 http://127.0.0.1:5011/api/results >/dev/null 2>&1; then
+    log "READY dashboard already running"
+    return 0
+  fi
+  if port_open 5011; then
+    echo "Port 5011 is occupied by an unknown or unhealthy process; refusing to kill or replace it." >&2
+    return 1
+  fi
+  nohup "$PY" -u "$ROOT/scripts/serve_benchmark_dashboard.py" 5011 0.0.0.0 \
+    >"$DATA/dashboard_5011.log" 2>&1 &
+  echo $! >"$DATA/dashboard_5011.pid"
+  log "STARTED dashboard port=5011 PID=$(<"$DATA/dashboard_5011.pid")"
 }
 
 log "Starting WNS VM stack from $ROOT"
 write_runtime_endpoints
 
-stop_pidfile "$DATA/model_adapter_5000.pid"
-stop_pidfile "$DATA/model_adapter_5001.pid"
-stop_pidfile "$DATA/model_adapter_5002.pid"
-stop_pidfile "$DATA/dashboard_5011.pid"
-if command -v fuser >/dev/null 2>&1; then
-  for port in 5000 5001 5002 5011; do
-    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
-  done
-fi
-sleep 2
+start_service "pgvector"
+start_service "weaviate_http"
+start_service "qdrant_http"
+start_service "jina_embedding"
+start_service "gte_embedding"
+start_service "bge_reranker"
+start_service "qwen_reranker"
+start_dashboard
 
-log "Starting Qdrant, PGVector, and Weaviate"
-docker compose -f "$ROOT/docker-compose.benchmark.yml" up -d qdrant postgres-pgvector weaviate
-
-start_adapter 0 5000
-start_adapter 1 5001
-start_adapter 2 5002
-
-nohup "$PY" -u "$ROOT/scripts/serve_benchmark_dashboard.py" 5011 0.0.0.0 \
-  >"$DATA/dashboard_5011.log" 2>&1 &
-echo $! >"$DATA/dashboard_5011.pid"
-log "STARTED dashboard port=5011 PID=$(cat "$DATA/dashboard_5011.pid")"
-
-wait_http "http://127.0.0.1:5000/health" "embedding adapter"
-wait_http "http://127.0.0.1:5001/health" "BGE adapter"
-wait_http "http://127.0.0.1:5002/health" "Qwen adapter"
-wait_http "http://127.0.0.1:5019/healthz" "Qdrant"
-wait_tcp 127.0.0.1 5020 "Qdrant gRPC"
+wait_http "http://127.0.0.1:5000/health" "Jina embedding adapter"
+wait_http "http://127.0.0.1:5001/health" "GTE embedding adapter"
+wait_http "http://127.0.0.1:5002/health" "BGE reranker adapter"
+wait_http "http://127.0.0.1:5006/health" "Qwen reranker adapter"
+wait_http "http://127.0.0.1:5019/healthz" "Qdrant HTTP"
+wait_tcp 127.0.0.1 5015 "Qdrant gRPC"
 wait_tcp 127.0.0.1 5003 "PGVector"
-wait_http "http://127.0.0.1:5004/v1/.well-known/ready" "Weaviate"
+wait_http "http://127.0.0.1:5004/v1/.well-known/ready" "Weaviate HTTP"
 wait_tcp 127.0.0.1 5005 "Weaviate gRPC"
 wait_http "http://127.0.0.1:5011/api/results" "dashboard/frontend" 120
 
-VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-log "ALL SERVICES READY"
+VM_IP="$(hostname -I 2>/dev/null | cut -d' ' -f1)"
+log "ALL CORE SERVICES READY"
 echo "Frontend: http://${VM_IP:-127.0.0.1}:5011"
-echo "Logs: $DATA/model_adapter_5000.log, $DATA/model_adapter_5001.log, $DATA/model_adapter_5002.log, $DATA/dashboard_5011.log"
+echo "Use the homepage adapter controls for candidate-only services on ports 5007, 5008, 5010, 5012, and 5013."

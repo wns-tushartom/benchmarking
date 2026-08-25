@@ -5,10 +5,11 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 from benchmarking.adapters.local import load_query_cases
 from benchmarking.core.config import config_hash, dataset_hash, generate_matrix, load_benchmark_config, selected_config, technique
@@ -23,24 +24,100 @@ def load_env_file(root: Path) -> None:
 
 
 def validate_output_directory(config: Dict[str, Any], root: Path, output_dir: Path) -> Path:
-    """Keep candidate artifacts in their dedicated direct-child run namespace."""
+    """Keep candidate artifacts inside the exact configured candidate namespace."""
     lane = str(config.get("experiment", {}).get("output_lane", "")).strip()
-    resolved_output = output_dir.resolve()
     if not lane:
-        return resolved_output
+        return output_dir.resolve()
 
-    lane_root = (root / "data" / "modular_runs" / lane).resolve()
-    try:
-        relative = resolved_output.relative_to(lane_root)
-    except ValueError as exc:
-        raise ValueError(
-            f"candidate output directory must be a direct run directory under {lane_root}; got {resolved_output}"
-        ) from exc
-    if len(relative.parts) != 1 or relative.name in {"", ".", ".."}:
-        raise ValueError(
-            f"candidate output directory must be a direct run directory under {lane_root}; got {resolved_output}"
-        )
-    return resolved_output
+    lane_path = Path(lane)
+    modular_runs_root = root.resolve() / "data" / "modular_runs"
+    lane_root = modular_runs_root / lane
+    lexical_output = Path(os.path.abspath(output_dir))
+    if len(lane_path.parts) != 1 or lane_path.name in {"", ".", ".."}:
+        raise ValueError(f"candidate output lane must be one directory under {modular_runs_root}; got {lane!r}")
+    if modular_runs_root.is_symlink() or lane_root.is_symlink() or lexical_output.is_symlink():
+        raise ValueError("candidate output directory must not contain symlinks")
+
+    if isinstance(config.get("portfolio"), dict):
+        try:
+            relative = lexical_output.relative_to(lane_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"portfolio output directory must be under {lane_root}; got {lexical_output}"
+            ) from exc
+        if len(relative.parts) != 2:
+            raise ValueError(
+                f"portfolio output directory must be portfolio_id/batch_id under {lane_root}; got {lexical_output}"
+            )
+        portfolio_name, batch_name = relative.parts
+        if not re.fullmatch(r"portfolio_[0-9a-f]{64}", portfolio_name) or not re.fullmatch(
+            r"batch_[0-9a-f]{64}", batch_name
+        ):
+            raise ValueError("portfolio output directory has invalid portfolio or batch identity")
+        portfolio_root = lane_root / portfolio_name
+        if portfolio_root.is_symlink():
+            raise ValueError("candidate output directory must not contain symlinks")
+    else:
+        if lexical_output.parent != lane_root or lexical_output.name in {"", ".", "..", "latest"}:
+            raise ValueError(
+                f"candidate output directory must be a direct run directory under {lane_root}; got {lexical_output}"
+            )
+
+    resolved_lane_root = lane_root.resolve()
+    resolved_output = lexical_output.resolve()
+    if resolved_lane_root != lane_root or resolved_output != lexical_output:
+        raise ValueError("candidate output directory must not contain symlinks")
+    return lexical_output
+
+
+def select_declared_combinations(
+    matrix: List[Dict[str, str]],
+    combination_ids: Tuple[str, ...] | List[str],
+    *,
+    maximum: int = 250,
+) -> List[Dict[str, str]]:
+    """Select an exact declared batch without truncation, guessing, or reordering."""
+    requested = list(combination_ids)
+    if not requested:
+        raise ValueError("declared combination IDs must not be empty")
+    if len(requested) > maximum:
+        raise ValueError(f"declared batch exceeds maximum of {maximum} combinations")
+    if len(requested) != len(set(requested)):
+        raise ValueError("declared batch contains duplicate combination IDs")
+    by_id = {
+        str(row.get("combination_id")): row
+        for row in matrix
+        if isinstance(row.get("combination_id"), str)
+    }
+    unknown = [combination_id for combination_id in requested if combination_id not in by_id]
+    if unknown:
+        raise ValueError(f"declared batch contains unknown combination IDs: {unknown[:3]}")
+    return [by_id[combination_id] for combination_id in requested]
+
+
+def vector_store_parameters(
+    vector_cfg: Dict[str, Any], row: Dict[str, str], output_dir: Path
+) -> Dict[str, Any]:
+    """Build adapter parameters and isolate embedded TurboVec persistence."""
+    params = {
+        key: value
+        for key, value in vector_cfg.items()
+        if key not in {"adapter", "index_type"}
+    }
+    params["index_type"] = row.get(
+        "index_type", str(vector_cfg.get("index_type", "HNSW"))
+    )
+    if vector_cfg.get("adapter") == "turbovec":
+        identity = {
+            "chunker": row["chunker"],
+            "embedding": row["embedding"],
+            "vector_store": row["vector_store"],
+            "index_type": params["index_type"],
+        }
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        params["index_dir"] = os.fspath(output_dir / "vector_indexes" / f"index_{digest}")
+    return params
 
 
 def response_metadata(adapter: Any) -> Dict[str, str]:
@@ -73,6 +150,14 @@ def response_metadata_history(adapter: Any) -> List[Dict[str, str]]:
 
 def response_metadata_since(adapter: Any, start: int) -> List[Dict[str, str]]:
     return response_metadata_history(adapter)[max(0, int(start)):]
+
+
+def embed_many_for_role(adapter: Any, texts: List[str], role: str) -> List[List[float]]:
+    """Use model-defined query/document formatting when an embedding adapter exposes it."""
+    role_aware = getattr(adapter, "embed_many_with_role", None)
+    if callable(role_aware):
+        return cast(List[List[float]], role_aware(texts, role=role))
+    return adapter.embed_many(texts)
 
 
 def source_provenance(root: Path) -> Dict[str, Any]:
@@ -124,9 +209,49 @@ def run_experiment(
     max_runs: int = 0,
     limit_queries: int = 0,
     selections: Dict[str, str] | None = None,
+    combination_ids: Tuple[str, ...] | List[str] | None = None,
+    portfolio_context: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     official_cfg = load_benchmark_config(config_path)
     output_dir = validate_output_directory(official_cfg, root, output_dir)
+    is_portfolio = isinstance(official_cfg.get("portfolio"), dict)
+    if is_portfolio and combination_ids is None:
+        raise ValueError("portfolio runs require one declared portfolio batch")
+    if combination_ids is not None and max_runs:
+        raise ValueError("max_runs is forbidden for a declared portfolio batch")
+    if combination_ids is not None and selections:
+        selected_values = [value for value in selections.values() if value and value != "all"]
+        if selected_values:
+            raise ValueError("matrix selections are forbidden for a declared portfolio batch")
+    if combination_ids is not None:
+        from benchmarking.core.portfolio import build_portfolio_plan
+
+        plan = build_portfolio_plan(official_cfg)
+        declared = tuple(combination_ids)
+        matching_batch = next(
+            (batch for batch in plan.batches if batch.combination_ids == declared),
+            None,
+        )
+        if matching_batch is None:
+            raise ValueError("declared combination IDs do not match one immutable portfolio batch")
+        expected_context = {
+            "portfolio_id": plan.portfolio_id,
+            "portfolio_hash": plan.portfolio_hash,
+            "batch_id": matching_batch.batch_id,
+            "promotion_status": "not_accepted",
+        }
+        if portfolio_context != expected_context:
+            raise ValueError("portfolio context does not match the immutable portfolio plan")
+        expected_output = (
+            root.resolve()
+            / "data"
+            / "modular_runs"
+            / str(official_cfg["experiment"]["output_lane"])
+            / plan.portfolio_id
+            / matching_batch.batch_id
+        )
+        if output_dir != expected_output:
+            raise ValueError("output directory does not match the immutable portfolio batch")
     load_env_file(root)
     cfg = official_cfg
     run_selection: Dict[str, str] = {}
@@ -136,7 +261,9 @@ def run_experiment(
         cfg.setdefault("experiment", {})["selection"] = run_selection
     registry = default_registry()
     matrix = generate_matrix(cfg)
-    if max_runs:
+    if combination_ids is not None:
+        matrix = select_declared_combinations(matrix, combination_ids)
+    elif max_runs:
         matrix = matrix[:max_runs]
     exp = cfg["experiment"]
     queries = load_query_cases(root, exp["dataset"])
@@ -159,6 +286,29 @@ def run_experiment(
         "dataset_id": "dataset:wns-default",
         "groundtruth_id": "groundtruth:repository:qa_text_test.csv",
     })
+    if portfolio_context is not None:
+        manifest["portfolio"] = dict(portfolio_context)
+        manifest["promotion_status"] = "not_accepted"
+        write_json_atomic(output_dir / "config_snapshot.json", official_cfg)
+        write_json_atomic(
+            output_dir / "combination_manifest.json",
+            {
+                "schema_version": 1,
+                **portfolio_context,
+                "combination_count": len(matrix),
+                "combination_ids": [row["combination_id"] for row in matrix],
+                "combinations": matrix,
+            },
+        )
+        write_json_atomic(
+            output_dir / "provider_readiness_receipt.json",
+            {
+                "schema_version": 1,
+                **portfolio_context,
+                "provider_readiness": manifest["provider_readiness"],
+                "state": "checked",
+            },
+        )
     write_json_atomic(output_dir / "manifest.json", manifest)
 
     detail_rows: List[Dict[str, Any]] = []
@@ -195,10 +345,10 @@ def run_experiment(
             embedder = embed_cls(model_name=row["embedding"], **embedding_cfg)
             embed_start = time.perf_counter()
             metadata_start = len(response_metadata_history(embedder))
-            chunk_vectors = embedder.embed_many([c.paragraph for c in chunks])
+            chunk_vectors = embed_many_for_role(embedder, [c.paragraph for c in chunks], role="document")
             chunk_response_metadata = response_metadata_history(embedder)[metadata_start:]
             query_metadata_start = metadata_start + len(chunk_response_metadata)
-            query_vectors = embedder.embed_many([q.query for q in queries])
+            query_vectors = embed_many_for_role(embedder, [q.query for q in queries], role="query")
             query_response_metadata = response_metadata_history(embedder)[query_metadata_start:]
             embedding_cache[embed_key] = (
                 embedder,
@@ -217,7 +367,8 @@ def run_experiment(
 
         print(f"  upsert start: {row['vector_store']} vectors={len(chunk_vectors)}", flush=True)
         vector_cls = registry.get("vector_store", vector_cfg["adapter"])
-        store = vector_cls(name=row["vector_store"], **vector_cfg)
+        vector_params = vector_store_parameters(vector_cfg, row, output_dir)
+        store = vector_cls(name=row["vector_store"], **vector_params)
         upsert_metrics = store.upsert(chunks, chunk_vectors)
         print(f"  upsert done: {row['vector_store']} seconds={float(upsert_metrics.get('upsert_latency_s', 0)):.2f}", flush=True)
         dense_retriever = DenseCosineRetriever(store)
@@ -225,14 +376,14 @@ def run_experiment(
         candidate_depth = int(exp.get("candidate_depth", max(top_k, 20)))
         fusion_depth = int(exp.get("fusion_depth", max(top_k, 20)))
         hybrid_retriever: HybridRRFRetriever | None = None
-        if retrieval_method == "BM25 + GTE Dense + RRF":
+        if retrieval_method == "BM25 + Dense + RRF":
             bm25_retriever = bm25_cache.setdefault(chunk_key, BM25Retriever(chunks))
             hybrid_retriever = HybridRRFRetriever(
                 dense=dense_retriever,
                 bm25=bm25_retriever,
                 rrf_k=int(exp.get("rrf_k", 60)),
             )
-        elif retrieval_method not in {"Cosine Similarity", "GTE Dense Cosine"}:
+        elif retrieval_method not in {"Cosine Similarity", "Dense Cosine"}:
             raise ValueError(f"Unsupported retrieval method: {retrieval_method}")
         reranker_cls = registry.get("reranker", reranker_cfg["adapter"])
         reranker = reranker_cls(name=row["reranker"], **reranker_cfg)
@@ -358,7 +509,26 @@ def run_experiment(
             "MODULAR_REPORT.md",
         )
     }
+    if portfolio_context is not None:
+        for name in (
+            "config_snapshot.json",
+            "combination_manifest.json",
+            "provider_readiness_receipt.json",
+        ):
+            manifest["artifact_sha256"][name] = sha256_file(output_dir / name)
     write_json_atomic(output_dir / "manifest.json", manifest)
+    if portfolio_context is not None:
+        write_json_atomic(
+            output_dir / "completion_receipt.json",
+            {
+                "schema_version": 1,
+                **portfolio_context,
+                "state": "completed",
+                "combination_count": len(matrix),
+                "manifest_sha256": sha256_file(output_dir / "manifest.json"),
+                "artifact_sha256": dict(manifest["artifact_sha256"]),
+            },
+        )
     return analysis
 
 
@@ -415,6 +585,9 @@ def provider_readiness() -> Dict[str, bool]:
         "JINA_EMBEDDING_URL",
         "JINA_API_KEY",
         "GTE_EMBEDDING_URL",
+        "NEMOTRON_3_EMBED_1B_BF16_URL",
+        "NEMOTRON_3_EMBED_1B_NVFP4_URL",
+        "NEMOTRON_3_EMBED_8B_BF16_URL",
         "HF_TOKEN",
         "QDRANT_URL",
         "PGVECTOR_DSN",

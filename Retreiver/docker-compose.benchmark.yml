@@ -4,7 +4,7 @@ services:
     container_name: wns-qdrant
     ports:
       - "5019:6333"
-      - "5020:6334"
+      - "5015:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
     ulimits:

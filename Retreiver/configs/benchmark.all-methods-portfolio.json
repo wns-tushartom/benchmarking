@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "name": "wns-all-methods-portfolio",
+    "description": "Compatibility-filtered candidate portfolio; planned only, not accepted official evidence",
+    "mode": "vm_remote_required",
+    "output_lane": "all-methods-portfolio",
+    "promotion_status": "not_accepted",
+    "dataset": "data/qa_text_test.csv",
+    "corpus_workbook": "data/chunking_methods_output_v2.xlsx",
+    "top_k": 10,
+    "random_seed": 42,
+    "repetitions": 1,
+    "candidate_depth": 50,
+    "fusion_depth": 20,
+    "rrf_k": 60
+  },
+  "matrix": {
+    "chunkers": [
+      "entity_heuristic_w6",
+      "entity_heuristic_w5",
+      "entity_heuristic_w4",
+      "Heading_sections_l2",
+      "fixed_tok1200_ov150",
+      "semantic_split"
+    ],
+    "embeddings": [
+      "jina_v3",
+      "gte_multilingual_base",
+      "openai_text-embedding-3-large",
+      "nemotron_3_embed_1b_bf16",
+      "nemotron_3_embed_1b_nvfp4",
+      "nemotron_3_embed_8b_bf16"
+    ],
+    "vector_stores": [
+      "Qdrant",
+      "PGVector",
+      "Weaviate",
+      "FAISS",
+      "TurboVec"
+    ],
+    "index_types": [
+      "HNSW",
+      "TurboQuant4bit"
+    ],
+    "retrieval_methods": [
+      "Dense Cosine",
+      "BM25 + Dense + RRF"
+    ],
+    "rerankers": [
+      "none",
+      "Amazon Rerank v1",
+      "bge-reranker-base",
+      "Qwen3:4B Rerank",
+      "nemotron_rerank_1b",
+      "gte_modernbert_base"
+    ],
+    "evaluators": [
+      "overlap_relevance"
+    ]
+  },
+  "compatibility": {
+    "schema_version": 1,
+    "vector_store_index_types": {
+      "Qdrant": [
+        "HNSW"
+      ],
+      "PGVector": [
+        "HNSW"
+      ],
+      "Weaviate": [
+        "HNSW"
+      ],
+      "FAISS": [
+        "HNSW"
+      ],
+      "TurboVec": [
+        "TurboQuant4bit"
+      ]
+    },
+    "exclusion_reason_code": "incompatible_vector_store_index"
+  },
+  "portfolio": {
+    "schema_version": 1,
+    "max_combinations_per_batch": 250,
+    "reranker_groups": {
+      "A": [
+        "none",
+        "bge-reranker-base",
+        "Qwen3:4B Rerank"
+      ],
+      "B": [
+        "Amazon Rerank v1",
+        "nemotron_rerank_1b",
+        "gte_modernbert_base"
+      ]
+    }
+  },
+  "techniques": {
+    "chunkers": {
+      "entity_heuristic_w6": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w6",
+        "source_type": "provided"
+      },
+      "entity_heuristic_w5": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w5",
+        "source_type": "provided"
+      },
+      "entity_heuristic_w4": {
+        "adapter": "local_workbook",
+        "sheet_name": "entity_heuristic_w4",
+        "source_type": "provided"
+      },
+      "Heading_sections_l2": {
+        "adapter": "local_workbook",
+        "sheet_name": "Heading_sections_l2",
+        "source_type": "provided"
+      },
+      "semantic_split": {
+        "adapter": "local_workbook",
+        "sheet_name": "semantic_split",
+        "source_type": "candidate_optional"
+      },
+      "fixed_tok1200_ov150": {
+        "adapter": "local_workbook",
+        "sheet_name": "fixed_tok1200_ov150",
+        "source_type": "provided"
+      }
+    },
+    "embeddings": {
+      "jina_v3": {
+        "adapter": "remote_http",
+        "dimensions": 1024,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "JINA_EMBEDDING_URL",
+        "api_key_env": "JINA_API_KEY",
+        "batch_size": 32
+      },
+      "gte_multilingual_base": {
+        "adapter": "remote_http",
+        "dimensions": 768,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "GTE_EMBEDDING_URL",
+        "api_key_env": "HF_TOKEN",
+        "batch_size": 32,
+        "require_response_model": true,
+        "expected_response_model": "Alibaba-NLP/gte-multilingual-base"
+      },
+      "openai_text-embedding-3-large": {
+        "adapter": "openai",
+        "dimensions": 3072,
+        "license": "commercial",
+        "api_key_env": "OPENAI_API_KEY",
+        "batch_size": 32
+      },
+      "nemotron_3_embed_1b_bf16": {
+        "adapter": "remote_http",
+        "dimensions": 2048,
+        "max_input_tokens": 32768,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "serving_contract": "vllm_openai_compatible",
+        "endpoint_env": "NEMOTRON_3_EMBED_1B_BF16_URL",
+        "api_key_env": "HF_TOKEN",
+        "batch_size": 1,
+        "request_model": "nvidia/Nemotron-3-Embed-1B-BF16",
+        "require_response_model": true,
+        "expected_response_model": "nvidia/Nemotron-3-Embed-1B-BF16",
+        "query_prefix": "query: ",
+        "document_prefix": "passage: "
+      },
+      "nemotron_3_embed_1b_nvfp4": {
+        "adapter": "remote_http",
+        "dimensions": 2048,
+        "max_input_tokens": 32768,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "serving_contract": "vllm_openai_compatible",
+        "endpoint_env": "NEMOTRON_3_EMBED_1B_NVFP4_URL",
+        "api_key_env": "HF_TOKEN",
+        "batch_size": 1,
+        "request_model": "nvidia/Nemotron-3-Embed-1B-NVFP4",
+        "require_response_model": true,
+        "expected_response_model": "nvidia/Nemotron-3-Embed-1B-NVFP4",
+        "query_prefix": "query: ",
+        "document_prefix": "passage: "
+      },
+      "nemotron_3_embed_8b_bf16": {
+        "adapter": "remote_http",
+        "dimensions": 4096,
+        "max_input_tokens": 32768,
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "serving_contract": "vllm_openai_compatible",
+        "endpoint_env": "NEMOTRON_3_EMBED_8B_BF16_URL",
+        "api_key_env": "HF_TOKEN",
+        "batch_size": 1,
+        "request_model": "nvidia/Nemotron-3-Embed-8B-BF16",
+        "require_response_model": true,
+        "expected_response_model": "nvidia/Nemotron-3-Embed-8B-BF16",
+        "query_prefix": "query: ",
+        "document_prefix": "passage: "
+      }
+    },
+    "vector_stores": {
+      "Qdrant": {
+        "adapter": "qdrant",
+        "provider_ready_env": "QDRANT_URL",
+        "url_env": "QDRANT_URL",
+        "api_key_env": "QDRANT_API_KEY"
+      },
+      "PGVector": {
+        "adapter": "pgvector",
+        "provider_ready_env": "PGVECTOR_DSN",
+        "dsn_env": "PGVECTOR_DSN"
+      },
+      "Weaviate": {
+        "adapter": "weaviate",
+        "provider_ready_env": "WEAVIATE_URL",
+        "url_env": "WEAVIATE_URL"
+      },
+      "FAISS": {
+        "adapter": "faiss",
+        "execution_location": "in_process",
+        "index_type": "HNSW",
+        "hnsw_m": 16,
+        "ef_construction": 100,
+        "ef_search": 64
+      },
+      "TurboVec": {
+        "adapter": "turbovec",
+        "execution_location": "in_process",
+        "index_type": "TurboQuant4bit",
+        "bits": 4
+      }
+    },
+    "index_types": {
+      "HNSW": {
+        "adapter": "metadata_only",
+        "provider_notes": "Real provider mode must create HNSW index or equivalent."
+      },
+      "TurboQuant4bit": {
+        "adapter": "metadata_only",
+        "bits": 4,
+        "provider_notes": "Embedded TurboVec TurboQuantIndex with stable IDs through IdMapIndex."
+      }
+    },
+    "retrieval_methods": {
+      "Dense Cosine": {
+        "adapter": "local_cosine",
+        "provider_notes": "All stores receive normalized embeddings and queries for cosine retrieval."
+      },
+      "BM25 + Dense + RRF": {
+        "adapter": "local_hybrid_rrf",
+        "rrf_k": 60,
+        "provider_notes": "Fuse BM25 and dense ranks with deterministic reciprocal-rank fusion."
+      }
+    },
+    "rerankers": {
+      "Amazon Rerank v1": {
+        "adapter": "amazon_bedrock",
+        "license": "commercial",
+        "provider_ready_env": "AWS_REGION",
+        "model_id_env": "AMAZON_RERANK_MODEL_ID"
+      },
+      "Qwen3:4B Rerank": {
+        "adapter": "remote_http",
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "QWEN_RERANK_URL",
+        "api_key_env": "QWEN_API_KEY",
+        "model": "tomaarsen/Qwen3-Reranker-4B-seq-cls",
+        "require_response_model": true
+      },
+      "bge-reranker-base": {
+        "adapter": "remote_http",
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "BGE_RERANK_URL",
+        "api_key_env": "HF_TOKEN",
+        "model": "BAAI/bge-reranker-base",
+        "require_response_model": true
+      },
+      "none": {
+        "adapter": "identity",
+        "license": "open_source",
+        "execution_location": "in_process",
+        "model": "identity"
+      },
+      "nemotron_rerank_1b": {
+        "adapter": "remote_http",
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "NEMOTRON_RERANK_URL",
+        "api_key_env": "HF_TOKEN",
+        "model": "nvidia/llama-nemotron-rerank-1b-v2",
+        "require_response_model": true
+      },
+      "gte_modernbert_base": {
+        "adapter": "remote_http",
+        "license": "open_source",
+        "execution_location": "vm_only",
+        "endpoint_env": "GTE_MODERNBERT_RERANK_URL",
+        "api_key_env": "HF_TOKEN",
+        "model": "Alibaba-NLP/gte-reranker-modernbert-base",
+        "require_response_model": true
+      }
+    }
+  },
+  "evaluation": {
+    "overlap_threshold": 0.22,
+    "metrics": [
+      "recall_at_1",
+      "recall_at_3",
+      "recall_at_5",
+      "recall_at_10",
+      "mrr",
+      "ndcg_at_10",
+      "precision_at_5"
+    ],
+    "bootstrap_iterations": 200
+  }
+}

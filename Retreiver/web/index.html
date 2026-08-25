@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260724-canonical-dashboard-v5.5" />
+  <link rel="stylesheet" href="/styles.css?v=20260820-candidate-portfolio-v1" />
 </head>
 <body>
   <main class="shell">
@@ -106,6 +106,64 @@
           <div id="serviceCards" class="service-cards"></div>
         </article>
       </section>
+
+      <section id="candidateOperations" class="panel candidate-operations" aria-labelledby="candidateOperationsTitle">
+        <div class="section-head candidate-operations-head">
+          <div>
+            <span class="candidate-kicker">Candidate only</span>
+            <h2 id="candidateOperationsTitle">Portfolio operations</h2>
+            <p>Plan and operate the isolated 2,160-combination evaluation. Nothing here changes accepted benchmark evidence.</p>
+          </div>
+          <span id="portfolioPromotionStatus" class="candidate-state">Promotion: not accepted</span>
+        </div>
+
+        <div class="operator-rail">
+          <label class="operator-token-field">Operator token
+            <input id="portfolioOperatorToken" type="password" autocomplete="off" spellcheck="false" placeholder="Required for start and run actions" />
+            <small>Held only in this field. It is never stored by the dashboard.</small>
+          </label>
+          <button id="candidateOperationsRefresh" type="button">Refresh status</button>
+          <span id="candidateOperationsStatus" class="status-pill muted-pill" role="status" aria-live="polite">Loading candidate state</span>
+        </div>
+
+        <dl class="portfolio-ledger" aria-label="Candidate portfolio counts">
+          <div><dt>Configured</dt><dd id="portfolioConfiguredCount">—</dd></div>
+          <div><dt>Excluded</dt><dd id="portfolioExcludedCount">—</dd></div>
+          <div><dt>Batches</dt><dd id="portfolioBatchCount">—</dd></div>
+          <div><dt>Completed</dt><dd id="portfolioCompletedCount">—</dd></div>
+        </dl>
+
+        <div class="candidate-workspace">
+          <section class="portfolio-console" aria-labelledby="portfolioBatchTitle">
+            <div class="candidate-subhead">
+              <div><h3 id="portfolioBatchTitle">Immutable batch plan</h3><p id="portfolioIdentity">Loading server-owned plan…</p></div>
+              <div class="candidate-actions">
+                <button id="portfolioStartRequired" type="button" disabled>Start required adapters</button>
+                <button id="portfolioRunNext" type="button" disabled>Run selected batch</button>
+              </div>
+            </div>
+            <div id="portfolioBatchList" class="portfolio-batch-list" aria-live="polite"></div>
+            <details id="portfolioCombinationDetails" class="combination-details">
+              <summary>Inspect all configured and excluded combinations</summary>
+              <div class="combination-toolbar">
+                <label>Filter rows<input id="portfolioCombinationFilter" type="search" placeholder="Chunker, embedding, store, reranker or state" /></label>
+                <span id="portfolioCombinationHint">Details load on demand</span>
+              </div>
+              <div id="portfolioCombinationRows" class="combination-rows"></div>
+            </details>
+          </section>
+
+          <section class="adapter-console" aria-labelledby="adapterSlotTitle">
+            <div class="candidate-subhead">
+              <div><h3 id="adapterSlotTitle">VM adapter slots</h3><p><span id="adapterSlotCount">—</span> fixed services on ports 5000–5019</p></div>
+              <span id="adapterControlMode" class="candidate-state">Checking control gate</span>
+            </div>
+            <div class="adapter-list-head" aria-hidden="true"><span>Service</span><span>Port</span><span>Status</span><span>Action</span></div>
+            <div id="adapterSlotList" class="adapter-slot-list" aria-live="polite"></div>
+          </section>
+        </div>
+        <p id="candidateActionMessage" class="candidate-action-message" role="status" aria-live="polite"></p>
+      </section>
     </section>
 
     <section class="page" data-page-panel="quality">
@@ -167,42 +225,17 @@
         <div class="table-wrap"><table id="recommendationTable"></table></div>
       </section>
 
-      <section class="panel metric-explorer-panel" aria-labelledby="metricExplorerTitle">
-        <div class="section-head">
-          <div><h2 id="metricExplorerTitle">Accuracy, cost, and latency trade-offs</h2><p>Only complete evaluations from the selected dataset and linked ground truth are plotted. Left is faster; higher is better for quality.</p></div>
-          <span id="metricExplorerHint" class="mini-stat">Waiting for evaluation</span>
-        </div>
-        <div class="metric-control-strip">
-          <label>X axis<select id="metricXAxis"></select></label>
-          <label>Y axis<select id="metricYAxis"></select></label>
-          <label>Color by<select id="metricColorBy"></select></label>
-          <label>Bubble size<select id="metricBubbleBy"></select></label>
-          <label>Show<select id="metricQuickView"><option value="all">All combinations</option><option value="top10">Top 10</option><option value="bottom10">Bottom 10</option><option value="pareto">Pareto frontier</option></select></label>
-        </div>
-        <div id="metricExplorerKpis" class="metric-explorer-kpis"></div>
-        <div id="tradeoffChart" class="svg-chart metric-tradeoff-chart"></div>
-        <div id="metricChartTooltip" class="metric-chart-tooltip" hidden></div>
-        <div id="metricPointDetails" class="metric-point-details" aria-live="polite">Select a point to inspect exact metrics.</div>
-        <p id="metricInterpretation" class="metric-interpretation"></p>
-      </section>
-
-      <section class="panel metric-heatmap-panel" aria-labelledby="heatmapTitle">
-        <div class="section-head">
-          <div><h2 id="heatmapTitle">Configuration heatmap</h2><p>Chunker × vector database for the selected metric, embedding, and reranker. Missing never means zero.</p></div>
-          <div id="metricHeatmapLegend" class="metric-heatmap-legend"></div>
-        </div>
-        <div class="metric-control-strip heatmap-controls">
-          <label>Metric<select id="heatmapMetric"></select></label>
-          <label>Embedding<select id="heatmapEmbedding"></select></label>
-          <label>Reranker<select id="heatmapReranker"></select></label>
-        </div>
-        <div id="metricHeatmap" class="metric-heatmap" role="region" aria-label="Configuration metric heatmap"></div>
-      </section>
-
       <section class="panel pricing-panel">
         <div class="section-head"><div><h2>Commercial pricing basis</h2><p>Published API rates and measured usage scope. VM infrastructure is excluded.</p></div></div>
         <div id="pricingLedger" class="pricing-ledger"></div>
       </section>
+
+      <details id="tradeoffDetails" class="panel tradeoff-details">
+        <summary>Explore trade-offs</summary>
+        <div class="viz-grid"><div id="top10ScoreChart" class="svg-chart"></div><div id="qualityLatencyChart" class="svg-chart"></div></div>
+        <div id="comparisonGrid" class="comparison-grid"></div>
+        <section class="grid two"><article><h3>Reranker lift</h3><div id="rerankerLiftChart" class="bar-list"></div></article><article><h3>Best by component</h3><div id="stageComparisonChart" class="bar-list"></div></article></section>
+      </details>
 
       <dialog id="projectEvidenceDialog" class="evidence-dialog" aria-labelledby="projectEvidenceTitle" aria-describedby="projectEvidenceStatus">
         <form method="dialog"><button type="submit" aria-label="Close evidence">Close</button></form>
@@ -224,16 +257,18 @@
           <label>Chunkers<select id="runSheet" multiple size="5"></select><small>Select one or more chunking methods</small></label>
           <label>Embeddings<select id="runEmbedding" multiple size="4"></select><small>Turn embedding adapters on/off from frontend</small></label>
           <label>Vector DBs<select id="runStore" multiple size="4"></select><small>Run against selected stores</small></label>
+          <label>Retrieval method<select id="runRetrievalMethod"></select><small>Dense Cosine is the protected baseline. Candidate methods run in a separate lane.</small></label>
           <label>Rerankers<select id="runRerankerMain" multiple size="4"></select><small>Choose BGE/Qwen/Amazon/none</small></label>
           <label hidden data-source-mirror><select id="runDataset"></select><small id="runDatasetHint">Choose the corpus to ingest and retrieve</small></label>
           <label hidden data-source-mirror><select id="runGroundtruth"></select><small>Choose a validated file or None for evidence-only</small></label>
           <label>Retrieval Top K<input id="runRetrievalTopK" type="number" min="1" max="100" value="10" /><small>Candidate chunks retrieved per query before reranking</small></label>
           <label>Reranked Output K<input id="runRerankedOutputK" type="number" min="1" max="100" value="5" /><small>Final chunks retained after reranking; cannot exceed Retrieval Top K</small></label>
+          <label>Query limit<input id="runQueryLimit" value="0" /><small>0 means all GT queries</small></label>
           <label class="check-row"><input id="runFresh" type="checkbox" checked /> Fresh run, archive previous artifacts</label>
           <label class="check-row"><input id="runAllowPartialExtraction" type="checkbox" /> Allow audited text-only documents <small>Explicitly permits PyPDF2 fallback/review rows while preserving the extraction warning.</small></label>
-          <label id="runQueryField" class="query-field">Typed query evidence smoke<textarea id="runQueries">What to do when flights have been cancelled
+          <label id="runQueryField" class="query-field" hidden>Evidence-only queries<textarea id="runQueries">What to do when flights have been cancelled
 How to add infant manually
-Passenger wants return refund due to illness</textarea><span class="inline-upload"><input id="runQueryFile" type="file" accept=".txt,.csv,.xlsx" /><button id="runQueryUploadBtn" type="button">Load query file</button></span><small id="runQueryUploadStatus">Always available. Use <strong>Test typed query evidence</strong> for ad-hoc evidence without changing the evaluated ground-truth run. Evaluated runs always use the full linked ground truth (query limit fixed at 0).</small></label>
+Passenger wants return refund due to illness</textarea><span class="inline-upload"><input id="runQueryFile" type="file" accept=".txt,.csv,.xlsx" /><button id="runQueryUploadBtn" type="button">Load query file</button></span><small id="runQueryUploadStatus">Required in evidence-only mode. Type one query per line or load a validated TXT, CSV, or XLSX file.</small></label>
         </div>
         <p id="runModeHint" class="status-note">Evaluated mode — retrieval metrics will use the selected ground truth.</p>
         <div class="run-actions primary-run-actions">
@@ -461,7 +496,6 @@ Passenger wants return refund due to illness</textarea><span class="inline-uploa
   </main>
   <script src="/source-state.js?v=20260716-metrics-integrity"></script>
   <script src="/recommendations.js?v=20260716-extraction-override"></script>
-  <script src="/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.5"></script>
-  <script src="/app.js?v=20260724-canonical-dashboard-v5.5"></script>
+  <script src="/app.js?v=20260820-candidate-portfolio-v1"></script>
 </body>
 </html>

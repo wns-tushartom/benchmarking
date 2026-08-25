@@ -26,17 +26,15 @@ from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.core.config import config_hash, generate_matrix, load_benchmark_config, selected_config
+from benchmarking.core.portfolio import build_portfolio_plan
 from source.benchmark_pipeline import load_chunks_from_workbook
 from scripts.dashboard_source_catalog import (
     DEFAULT_DATASET_ID,
     NONE_GROUNDTRUTH_ID,
-    OFFICIAL_GROUNDTRUTH_ID,
-    OFFICIAL_GROUNDTRUTH_IDS,
     build_source_catalog,
     register_groundtruth_upload,
     resolve_dataset,
     resolve_groundtruth,
-    resolve_source_pair,
 )
 from source.services.project_documents import (
     ProjectDocumentStorageError,
@@ -72,7 +70,19 @@ from source.services.project_workspace import (
     UploadValidationError,
 )
 from scripts.dashboard_snapshot_state import publish_document_readiness
+from scripts.dashboard_portfolio_api import portfolio_dashboard_payload
+from scripts.dashboard_control_api import (
+    DashboardControlError,
+    adapter_control_action,
+    adapter_control_enabled,
+    adapter_status_payload,
+    create_adapter_manager,
+    require_operator_control as _require_operator_control,
+)
 from scripts.pipeline_run_contract import parse_query_upload
+from scripts.benchmark_cli import load_verified_portfolio_plan
+from scripts.publish_portfolio_results import portfolio_status as inspect_portfolio_status
+from scripts.vm_adapter_manager import AdapterControlError, PortManifestError, verify_operator_token
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +102,252 @@ PDF_DIR = ROOT / "data" / "pdfs"
 USER_PROJECTS_DIR = ROOT / "data" / "user_projects"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
+CANDIDATE_CONFIG_PATH = ROOT / "configs" / "benchmark.retrieval-reranker-candidates.json"
+PORTFOLIO_CONFIG_PATH = ROOT / "configs" / "benchmark.all-methods-portfolio.json"
+JOB_DIR = ROOT / "data" / "dashboard_jobs"
+JOBS: dict[str, dict[str, Any]] = {}
+load_env_files(ROOT)
+CHUNK_LOOKUP_CACHE: dict[str, dict[int, Any]] = {}
+
+
+def require_operator_control(headers: Any, *, environ: dict[str, str] | None = None) -> None:
+    _require_operator_control(
+        headers,
+        environ=environ,
+        verifier=verify_operator_token,
+    )
+
+
+def _dashboard_portfolio_plan_path(config: dict[str, Any], plan: Any) -> Path:
+    lane = config.get("experiment", {}).get("output_lane")
+    if not isinstance(lane, str) or not lane or len(Path(lane).parts) != 1:
+        raise DashboardControlError("invalid_plan", "Portfolio lane is invalid", 500)
+    return ROOT / "data" / "modular_runs" / lane / plan.portfolio_id / "portfolio_plan.json"
+
+
+def load_dashboard_portfolio_plan() -> Any:
+    config = load_benchmark_config(PORTFOLIO_CONFIG_PATH)
+    plan = build_portfolio_plan(config)
+    plan_path = _dashboard_portfolio_plan_path(config, plan)
+    try:
+        return load_verified_portfolio_plan(ROOT, PORTFOLIO_CONFIG_PATH, plan_path)
+    except ValueError as exc:
+        raise DashboardControlError(
+            "invalid_plan", "Immutable portfolio plan is unavailable", 409
+        ) from exc
+
+
+def dashboard_portfolio_status(plan: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = load_benchmark_config(PORTFOLIO_CONFIG_PATH)
+    plan_path = _dashboard_portfolio_plan_path(config, plan)
+    try:
+        return config, inspect_portfolio_status(plan_path)
+    except (OSError, ValueError) as exc:
+        raise DashboardControlError(
+            "portfolio_status_unavailable", "Portfolio status is unavailable", 409
+        ) from exc
+
+
+def _read_adapter_control_json(request: Any) -> dict[str, Any]:
+    content_type = str(request.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise DashboardControlError("invalid_request", "JSON request required", 415)
+    raw_length = request.headers.get("Content-Length")
+    try:
+        content_length = int(raw_length)
+    except (TypeError, ValueError) as exc:
+        raise DashboardControlError("invalid_request", "Valid Content-Length required", 400) from exc
+    if content_length <= 0 or content_length > 16_384:
+        raise DashboardControlError("invalid_request", "Invalid request size", 400)
+    body = request.rfile.read(content_length)
+    if len(body) != content_length:
+        request.close_connection = True
+        raise DashboardControlError("invalid_request", "Truncated JSON request", 400)
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DashboardControlError("invalid_request", "Malformed JSON request", 400) from exc
+    if not isinstance(payload, dict):
+        raise DashboardControlError("invalid_request", "JSON object required", 400)
+    return payload
+
+
+def _control_error_payload(exc: DashboardControlError) -> dict[str, Any]:
+    return {"error": {"code": exc.code, "message": exc.public_message}}
+
+
+def benchmark_options() -> dict:
+    cfg = load_benchmark_config(CONFIG_PATH)
+    matrix = cfg.get("matrix", {})
+    candidate_cfg = load_benchmark_config(CANDIDATE_CONFIG_PATH)
+    candidate_matrix = candidate_cfg.get("matrix", {})
+    return {
+        "chunkers": matrix.get("chunkers", []),
+        "embeddings": matrix.get("embeddings", []),
+        "vector_stores": matrix.get("vector_stores", []),
+        "index_types": matrix.get("index_types", ["HNSW"]),
+        "retrieval_methods": matrix.get("retrieval_methods") or matrix.get("retrievers", ["Cosine Similarity"]),
+        "rerankers": matrix.get("rerankers", []),
+        "matrix_count": len(generate_matrix(cfg)),
+        "mode": cfg.get("experiment", {}).get("mode", "vm_remote_required"),
+        "candidate_lane": {
+            "id": candidate_cfg.get("experiment", {}).get("output_lane"),
+            "matrix_count": len(generate_matrix(candidate_cfg)),
+            "chunkers": candidate_matrix.get("chunkers", []),
+            "embeddings": candidate_matrix.get("embeddings", []),
+            "vector_stores": candidate_matrix.get("vector_stores", []),
+            "index_types": candidate_matrix.get("index_types", ["HNSW"]),
+            "retrieval_methods": candidate_matrix.get("retrieval_methods", []),
+            "rerankers": candidate_matrix.get("rerankers", []),
+        },
+    }
+
+
+def selected_cli_args(qs: dict[str, list[str]]) -> list[str]:
+    arg_map = {
+        "chunker": "--chunker",
+        "embedding": "--embedding",
+        "store": "--vector-store",
+        "index_type": "--index-type",
+        "retrieval_method": "--retrieval-method",
+        "reranker": "--reranker",
+    }
+    args: list[str] = []
+    for key, flag in arg_map.items():
+        value = qs.get(key, ["all"])[0]
+        if value and value != "all":
+            args += [flag, value]
+    return args
+
+
+def candidate_output_lanes() -> set[str]:
+    """Return the canonical candidate artifact lane plus the pre-release legacy spelling."""
+    canonical = load_benchmark_config(CANDIDATE_CONFIG_PATH).get("experiment", {}).get(
+        "output_lane", "retrieval-reranker-candidates"
+    )
+    return {canonical, "retrieval_reranker_candidates"}
+
+
+def candidate_output_lane() -> str:
+    return load_benchmark_config(CANDIDATE_CONFIG_PATH).get("experiment", {}).get(
+        "output_lane", "retrieval-reranker-candidates"
+    )
+
+
+def candidate_selection_args(qs: dict[str, list[str]]) -> list[str]:
+    """Reject multi-selects the CLI cannot represent instead of silently dropping choices."""
+    normalized = dict(qs)
+    # The dashboard control is named `sheet`; benchmark_cli calls the same axis `chunker`.
+    if "sheet" in normalized:
+        normalized["chunker"] = normalized["sheet"]
+    for key, label in (
+        ("chunker", "chunker"),
+        ("embedding", "embedding"),
+        ("reranker", "reranker"),
+    ):
+        values = list(dict.fromkeys(value for value in normalized.get(key, ["all"]) if value))
+        if not values or "all" in values:
+            normalized[key] = ["all"]
+        elif len(values) == 1:
+            normalized[key] = values
+        else:
+            raise ValueError(
+                f"Candidate runs accept one {label} or All {label}s; "
+                "run another selected combination separately."
+            )
+    return selected_cli_args(normalized)
+
+
+def validate_candidate_request(qs: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Allow only values present in the isolated candidate matrix."""
+    normalized = dict(qs)
+    if "sheet" in normalized:
+        normalized["chunker"] = normalized["sheet"]
+    matrix = load_benchmark_config(CANDIDATE_CONFIG_PATH).get("matrix", {})
+    allowed = {
+        "chunker": matrix.get("chunkers", []),
+        "embedding": matrix.get("embeddings", []),
+        "store": matrix.get("vector_stores", []),
+        "index_type": matrix.get("index_types", []),
+        "retrieval_method": matrix.get("retrieval_methods", []),
+        "reranker": matrix.get("rerankers", []),
+    }
+    for key, values in allowed.items():
+        requested = {value for value in normalized.get(key, ["all"]) if value and value != "all"}
+        unexpected = requested.difference(values)
+        if unexpected:
+            raise ValueError(f"Candidate {key} is not allowed: {', '.join(sorted(unexpected))}")
+    return normalized
+
+
+def validate_modular_lane_request(
+    qs: dict[str, list[str]], *, candidate_lane: bool
+) -> dict[str, list[str]]:
+    """Keep candidate methods out of official artifact paths regardless of query flags."""
+    candidate_methods = set(
+        load_benchmark_config(CANDIDATE_CONFIG_PATH).get("matrix", {}).get("retrieval_methods", [])
+    )
+    requested = set(qs.get("retrieval_method", [])) - {"", "all"}
+    has_candidate_method = bool(requested & candidate_methods)
+    if candidate_lane and not has_candidate_method:
+        raise ValueError("Candidate lane requires a candidate retrieval method")
+    if not candidate_lane and has_candidate_method:
+        raise ValueError("Candidate retrieval methods must use the candidate lane")
+    return validate_candidate_request(qs) if candidate_lane else dict(qs)
+
+
+def candidate_benchmark_command(
+    qs: dict[str, list[str]], *, limit_queries: str, max_runs: str, run_id: str
+) -> list[str]:
+    """Build a candidate-lane command whose outputs cannot overwrite official artifacts."""
+    validated_qs = validate_candidate_request(qs)
+    return [
+        sys.executable,
+        "scripts/benchmark_cli.py",
+        "run",
+        "configs/benchmark.retrieval-reranker-candidates.json",
+        "--limit-queries",
+        limit_queries,
+        "--max-runs",
+        max_runs,
+        "--output-dir",
+        f"data/modular_runs/{candidate_output_lane()}/{run_id}",
+        *candidate_selection_args(validated_qs),
+    ]
+
+
+def candidate_preflight_command() -> list[str]:
+    """Validate only the isolated candidate configuration; never touch official outputs."""
+    return [
+        sys.executable,
+        "scripts/benchmark_cli.py",
+        "validate",
+        "configs/benchmark.retrieval-reranker-candidates.json",
+    ]
+
+
+def candidate_combo_count(qs: dict[str, list[str]]) -> int:
+    """Count the exact candidate selection after rejecting unsupported partial multi-selects."""
+    validated_qs = validate_candidate_request(qs)
+    candidate_selection_args(validated_qs)
+    matrix = generate_matrix(load_benchmark_config(CANDIDATE_CONFIG_PATH))
+    filters = {
+        "chunker": validated_qs.get("chunker", ["all"]),
+        "embedding": validated_qs.get("embedding", ["all"]),
+        "retrieval_method": validated_qs.get("retrieval_method", ["all"]),
+        "reranker": validated_qs.get("reranker", ["all"]),
+    }
+    return sum(
+        all("all" in values or row[key] in values for key, values in filters.items())
+        for row in matrix
+    )
+
+
+def candidate_query_limit(qs: dict[str, list[str]]) -> str:
+    """Candidate UI sends query_limit; retain legacy limit only as a fallback."""
+    return qs.get("query_limit", qs.get("limit", ["50"]))[0]
+
+
 JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
 load_env_files(ROOT)
@@ -194,6 +450,8 @@ def _parse_content_length(headers: Any) -> int | None:
 def benchmark_options() -> dict:
     cfg = load_benchmark_config(CONFIG_PATH)
     matrix = cfg.get("matrix", {})
+    candidate_cfg = load_benchmark_config(CANDIDATE_CONFIG_PATH)
+    candidate_matrix = candidate_cfg.get("matrix", {})
     return {
         "chunkers": matrix.get("chunkers", []),
         "embeddings": matrix.get("embeddings", []),
@@ -203,6 +461,16 @@ def benchmark_options() -> dict:
         "rerankers": matrix.get("rerankers", []),
         "matrix_count": len(generate_matrix(cfg)),
         "mode": cfg.get("experiment", {}).get("mode", "vm_remote_required"),
+        "candidate_lane": {
+            "id": candidate_cfg.get("experiment", {}).get("output_lane"),
+            "matrix_count": len(generate_matrix(candidate_cfg)),
+            "chunkers": candidate_matrix.get("chunkers", []),
+            "embeddings": candidate_matrix.get("embeddings", []),
+            "vector_stores": candidate_matrix.get("vector_stores", []),
+            "index_types": candidate_matrix.get("index_types", ["HNSW"]),
+            "retrieval_methods": candidate_matrix.get("retrieval_methods", []),
+            "rerankers": candidate_matrix.get("rerankers", []),
+        },
     }
 
 
@@ -210,7 +478,7 @@ def selected_cli_args(qs: dict[str, list[str]]) -> list[str]:
     arg_map = {
         "chunker": "--chunker",
         "embedding": "--embedding",
-        "vector_store": "--vector-store",
+        "store": "--vector-store",
         "index_type": "--index-type",
         "retrieval_method": "--retrieval-method",
         "reranker": "--reranker",
@@ -442,12 +710,10 @@ def read_evaluation_dir(path: Path) -> dict:
     return {"summary": summary, "details": details[:500], "report": report}
 
 
-def read_evaluation(
-    pipeline_snapshot: tuple[list[dict[str, Any]], int, list[dict[str, Any]]] | None = None,
-) -> dict:
+def read_evaluation() -> dict:
     base = read_evaluation_dir(EVAL_DIR)
     base["reranked"] = read_evaluation_dir(ROOT / "data" / "evaluation_reranked")
-    base["benchmark_reference"] = read_benchmark_reference(pipeline_snapshot)
+    base["benchmark_reference"] = read_benchmark_reference()
     gt_files = sorted([str(p.relative_to(ROOT)) for p in GROUNDTRUTH_DIR.glob("*")]) if GROUNDTRUTH_DIR.exists() else []
     base["groundtruth_files"] = gt_files
     return base
@@ -644,6 +910,8 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
         )
         for path in modular_paths:
             run_path = path.parent.relative_to(modular_runs_dir)
+            if set(run_path.parts) & candidate_output_lanes():
+                continue
             run_id = path.parent.name
             if run_id != "latest" and "smoke" in str(run_path).lower():
                 continue
@@ -655,12 +923,32 @@ def benchmark_reference_sources() -> list[tuple[str, Path]]:
     return sources
 
 
+def official_metric_sources() -> list[tuple[str, Path]]:
+    """Return only source files eligible to support official metrics."""
+    sources = [
+        ("groundtruth_evaluation", EVAL_DIR / "groundtruth_eval_summary.csv"),
+        ("groundtruth_evaluation_reranked", EVAL_DIR.parent / "evaluation_reranked" / "groundtruth_eval_summary.csv"),
+        *benchmark_reference_sources(),
+    ]
+    unique: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for source_name, source_path in sources:
+        resolved = source_path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append((source_name, source_path))
+    return unique
+
+
 def official_matrix_keys() -> set[tuple[str, str, str, str]]:
     cfg = load_benchmark_config(CONFIG_PATH)
     return {
         (row["chunker"], row["embedding"], row["vector_store"], canonical_reranker_name(row["reranker"]))
         for row in generate_matrix(cfg)
     }
+
+
+OFFICIAL_GROUNDTRUTH_ID = "groundtruth:repository:qa_text_test.csv"
 
 
 def sha256_file(path: Path) -> str:
@@ -765,7 +1053,7 @@ def official_artifact_provenance(path: Path) -> tuple[bool, str, dict[str, Any]]
         (manifest.get("status") == "completed", "manifest_status_not_completed"),
         (manifest.get("run_id") == path.parent.name, "manifest_run_id_mismatch"),
         (manifest.get("dataset_id") == DEFAULT_DATASET_ID, "manifest_dataset_mismatch"),
-        (manifest.get("groundtruth_id") in OFFICIAL_GROUNDTRUTH_IDS, "manifest_groundtruth_mismatch"),
+        (manifest.get("groundtruth_id") == OFFICIAL_GROUNDTRUTH_ID, "manifest_groundtruth_mismatch"),
     )
     for valid, reason in checks:
         if not valid:
@@ -779,51 +1067,11 @@ def official_artifact_provenance(path: Path) -> tuple[bool, str, dict[str, Any]]
     return True, "trusted", manifest
 
 
-def pipeline_key(parts: tuple[str, str, str, str]) -> str:
-    return "|".join(parts)
-
-
-def _artifact_mtime_ns(path: Path) -> int:
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return 0
-
-
-def _pipeline_number(value: Any) -> int | float | str:
-    if isinstance(value, bool):
-        return ""
-    try:
-        number = float(str(value))
-    except (TypeError, ValueError):
-        return ""
-    if not math.isfinite(number) or number < 0:
-        return ""
-    return int(number) if number.is_integer() else number
-
-
-def _candidate_run_at(row: dict[str, Any], path: Path, mtime_ns: int) -> str:
-    for field in ("run_at", "created_at", "completed_at", "timestamp"):
-        value = str(row.get(field) or "").strip()
-        if value:
-            return value
-    return datetime.fromtimestamp(mtime_ns / 1_000_000_000).isoformat(timespec="microseconds")
-
-
-def _pipeline_candidate_state(row: dict[str, Any]) -> str:
-    status = str(row.get("status") or "").strip().lower()
-    if status in {"failed", "error", "cancelled"} or row.get("error_code"):
-        return "failed"
-    if status in {"queued", "pending", "running", "in_progress"}:
-        return "running"
-    return "incomplete"
-
-
-def _resolve_pipeline_state() -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+def read_benchmark_reference() -> dict[str, Any]:
+    selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
     official_keys = official_matrix_keys()
     skipped_non_official = 0
-    diagnostics: list[dict[str, Any]] = []
-    candidates: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     sources = benchmark_reference_sources()
     provenance_by_path = {
         path: official_artifact_provenance(path)
@@ -837,158 +1085,56 @@ def _resolve_pipeline_state() -> tuple[list[dict[str, Any]], int, list[dict[str,
     duplicate_run_ids = {
         run_id for run_id, roots in trusted_run_roots.items() if len(roots) > 1
     }
-
     for source, path in sources:
         trusted, provenance_reason, manifest = provenance_by_path[path]
-        mtime_ns = _artifact_mtime_ns(path)
-        selected_keys = manifest_selected_matrix_keys(manifest) if trusted else None
-        for raw in read_csv(path):
-            normalized = normalized_benchmark_row(raw, source)
+        for row in sort_summary(read_csv(path)):
+            normalized = normalized_benchmark_row(row, source)
             normalized["official_provenance"] = "trusted" if trusted else "untrusted"
             normalized["run_id"] = manifest.get("run_id", "")
-            key = (
-                normalized["sheet"],
-                normalized["embedding"],
-                normalized["store"],
-                normalized["reranker"],
-            )
-            candidate = {
-                **normalized,
-                "key": pipeline_key(key),
-                "artifact": display_path(path),
-                "run_at": _candidate_run_at(raw, path, mtime_ns),
-                "artifact_mtime_ns": mtime_ns,
-                "missing_metrics": benchmark_missing_metrics(normalized),
-            }
-            admission_reason = ""
+            key = (normalized["sheet"], normalized["embedding"], normalized["store"], normalized["reranker"])
             if normalized["run_id"] in duplicate_run_ids:
-                admission_reason = "duplicate_run_id"
-            elif key not in official_keys:
+                diagnostics.append({**normalized, "admission_reason": "duplicate_run_id"})
+                continue
+            if key not in official_keys:
                 skipped_non_official += 1
-                admission_reason = "not_in_official_matrix"
-            elif not trusted:
-                admission_reason = provenance_reason
-            else:
-                if selected_keys is not None and key not in selected_keys:
-                    admission_reason = "not_in_manifest_selection"
-                elif not benchmark_row_is_evaluated(normalized):
-                    admission_reason = (
-                        "status_not_completed"
-                        if normalized["status"] != "completed"
-                        else "metrics_incomplete"
-                    )
-            if admission_reason:
-                diagnostics.append({**candidate, "admission_reason": admission_reason})
-            if key in official_keys:
-                candidate["_quality_complete"] = not admission_reason and benchmark_row_is_evaluated(normalized)
-                candidates.setdefault(key, []).append(candidate)
-
-    state_rows: list[dict[str, Any]] = []
-    for key in sorted(official_keys):
-        sheet, embedding, store, reranker = key
-        rows = candidates.get(key, [])
-        base = {
-            "key": pipeline_key(key),
-            "sheet": sheet,
-            "embedding": embedding,
-            "store": store,
-            "reranker": reranker,
-            "artifact": "",
-            "source": "",
-            "run_at": "",
-            "artifact_mtime_ns": 0,
-            "evaluated_queries": "",
-            "candidate_count": len(rows),
-        }
-        if not rows:
-            state_rows.append({**base, "state": "not_run"})
-            continue
-        complete_rows = [row for row in rows if row["_quality_complete"]]
-        selected = max(
-            complete_rows or rows,
-            key=lambda row: (
-                row["artifact_mtime_ns"],
-                row["run_at"],
-                row["artifact"],
-                row["source"],
-            ),
-        )
-        public = {key: value for key, value in selected.items() if not key.startswith("_")}
-        for field in ("evaluated_queries", *BENCHMARK_COMPLETE_METRICS):
-            public[field] = _pipeline_number(public.get(field))
-        public["candidate_count"] = len(rows)
-        public["state"] = "complete" if complete_rows else _pipeline_candidate_state(selected)
-        state_rows.append({**base, **public})
-    return state_rows, skipped_non_official, diagnostics
-
-
-def pipeline_state_snapshot(
-    resolved: tuple[list[dict[str, Any]], int, list[dict[str, Any]]] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
-    state_rows, skipped_non_official, _diagnostics = resolved or _resolve_pipeline_state()
-    return state_rows, skipped_non_official
-
-
-def pipeline_state_rows(
-    resolved: tuple[list[dict[str, Any]], int, list[dict[str, Any]]] | None = None,
-) -> list[dict[str, Any]]:
-    return pipeline_state_snapshot(resolved)[0]
-
-
-def _has_positive_evaluated_queries(row: dict[str, Any]) -> bool:
-    value = _pipeline_number(row.get("evaluated_queries"))
-    return isinstance(value, (int, float)) and value > 0
-
-
-def complete_pipeline_metric_rows(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    return [
-        row
-        for row in (rows if rows is not None else pipeline_state_rows())
-        if row.get("state") == "complete"
-        and _has_positive_evaluated_queries(row)
-    ]
-
-
-def read_benchmark_reference(
-    pipeline_snapshot: tuple[list[dict[str, Any]], int, list[dict[str, Any]]] | None = None,
-) -> dict[str, Any]:
-    state_rows, skipped_non_official, diagnostics = pipeline_snapshot or _resolve_pipeline_state()
-    complete_rows = complete_pipeline_metric_rows(state_rows)
-    rows: list[dict[str, Any]] = []
-    for state_row in complete_rows:
-        row = dict(state_row)
-        for field in ("evaluated_queries", *BENCHMARK_COMPLETE_METRICS):
-            if field != "avg_latency_seconds" and row.get(field) != "":
-                row[field] = str(row[field])
-        rows.append(row)
-    official_keys = official_matrix_keys()
-    complete_keys = {
-        (row["sheet"], row["embedding"], row["store"], row["reranker"])
-        for row in complete_rows
-    }
+                diagnostics.append({**normalized, "admission_reason": "not_in_official_matrix"})
+                continue
+            if not trusted:
+                diagnostics.append({**normalized, "admission_reason": provenance_reason})
+                continue
+            selected_keys = manifest_selected_matrix_keys(manifest)
+            if selected_keys is not None and key not in selected_keys:
+                diagnostics.append({**normalized, "admission_reason": "not_in_manifest_selection"})
+                continue
+            if not benchmark_row_is_evaluated(normalized):
+                reason = "status_not_completed" if normalized["status"] != "completed" else "metrics_incomplete"
+                diagnostics.append({**normalized, "admission_reason": reason})
+                continue
+            current = selected.get(key)
+            if current is None or len(benchmark_missing_metrics(normalized)) < len(benchmark_missing_metrics(current)):
+                selected[key] = normalized
+    rows = list(selected.values())
+    complete_rows = sum(1 for row in rows if not benchmark_missing_metrics(row))
     return {
         "summary": sort_summary(rows),
         "diagnostics": diagnostics,
         "report": {
             "source": "manifest-verified official benchmark artifacts",
             "config_rows": len(rows),
-            "complete_metric_rows": len(rows),
-            "incomplete_metric_rows": sum(1 for row in state_rows if row["state"] == "incomplete"),
-            "failed_rows": sum(1 for row in state_rows if row["state"] == "failed"),
-            "running_rows": sum(1 for row in state_rows if row["state"] == "running"),
-            "not_run_rows": sum(1 for row in state_rows if row["state"] == "not_run"),
+            "complete_metric_rows": complete_rows,
+            "incomplete_metric_rows": len(rows) - complete_rows,
             "official_matrix_rows": len(official_keys),
             "expected_keys": ["|".join(key) for key in sorted(official_keys)],
             "baseline_expected_keys": [
                 "|".join(key)
                 for key in sorted({(chunker, embedding, store, "none") for chunker, embedding, store, _ in official_keys})
             ],
-            "matrix_complete": complete_keys == official_keys,
+            "matrix_complete": set(selected) == official_keys,
             "diagnostic_rows": len(diagnostics),
             "skipped_non_official_rows": skipped_non_official,
-            "openai_rows": sum(1 for row in rows if "openai" in str(row.get("embedding", "")).lower()),
-            "faiss_rows": sum(1 for row in rows if str(row.get("store", "")).lower() == "faiss"),
-            "query_count": next((row.get("evaluated_queries") for row in rows if row.get("evaluated_queries")), ""),
+            "openai_rows": sum(1 for r in rows if "openai" in str(r.get("embedding", "")).lower()),
+            "faiss_rows": sum(1 for r in rows if str(r.get("store", "")).lower() == "faiss"),
+            "query_count": next((r.get("evaluated_queries") for r in rows if r.get("evaluated_queries")), ""),
         },
     }
 
@@ -1004,6 +1150,8 @@ def benchmark_detail_sources() -> list[tuple[str, Path]]:
         return (path.parent.name != "latest", "archive" in parts, len(parts), str(rel))
     for path in sorted(modular_runs_dir.rglob("modular_details.csv"), key=source_sort_key):
         run_path = path.parent.relative_to(modular_runs_dir)
+        if set(run_path.parts) & candidate_output_lanes():
+            continue
         run_id = path.parent.name
         if run_id != "latest" and "smoke" in str(run_path).lower():
             continue
@@ -1502,8 +1650,90 @@ def nvidia_benchmark_cmd(qs: dict[str, list[str]], *, root: Path = ROOT) -> list
     return cmd
 
 
+def launch_portfolio_action(action: str, payload: Any) -> dict[str, Any]:
+    if action == "run-batch":
+        if not isinstance(payload, dict) or set(payload) != {"batch_id"}:
+            raise DashboardControlError(
+                "invalid_request", "Invalid portfolio request fields", 400
+            )
+        requested_batch_id = payload.get("batch_id")
+        if not isinstance(requested_batch_id, str) or not requested_batch_id:
+            raise DashboardControlError("invalid_request", "Invalid batch ID", 400)
+    elif action == "run-next":
+        if not isinstance(payload, dict) or payload:
+            raise DashboardControlError(
+                "invalid_request", "Invalid portfolio request fields", 400
+            )
+        requested_batch_id = None
+    else:
+        raise DashboardControlError("unknown_action", "Unknown portfolio action", 404)
+
+    plan = load_dashboard_portfolio_plan()
+    config, status = dashboard_portfolio_status(plan)
+    if action == "run-next":
+        requested_batch_id = status.get("selected_batch_id")
+        if requested_batch_id is None:
+            return {
+                "ok": True,
+                "portfolio_id": plan.portfolio_id,
+                "promotion_status": "not_accepted",
+                "state": "completed",
+                "message": "all portfolio batches are already completed",
+            }
+    batch = next(
+        (item for item in plan.batches if item.batch_id == requested_batch_id),
+        None,
+    )
+    if batch is None:
+        raise DashboardControlError("unknown_batch", "Unknown immutable batch ID", 404)
+    if len(batch.combination_ids) > plan.max_combinations_per_batch or len(batch.combination_ids) > 250:
+        raise DashboardControlError("batch_too_large", "Immutable batch exceeds execution maximum", 409)
+    observation = next(
+        (item for item in status.get("batches", []) if item.get("batch_id") == batch.batch_id),
+        None,
+    )
+    if not isinstance(observation, dict):
+        raise DashboardControlError("invalid_plan", "Batch status is unavailable", 409)
+    if observation.get("state") == "completed":
+        raise DashboardControlError("batch_completed", "Batch already has a valid completion receipt", 409)
+
+    for job in JOBS.values():
+        command = job.get("cmd")
+        process = job.get("process")
+        if (
+            isinstance(command, list)
+            and "--batch-id" in command
+            and command[command.index("--batch-id") + 1] == batch.batch_id
+            and process is not None
+            and process.poll() is None
+        ):
+            raise DashboardControlError("batch_running", "Batch is already running", 409)
+
+    plan_path = _dashboard_portfolio_plan_path(config, plan)
+    command = [
+        sys.executable,
+        "scripts/benchmark_cli.py",
+        "portfolio-run-batch",
+        str(PORTFOLIO_CONFIG_PATH.relative_to(ROOT)),
+        "--plan",
+        str(plan_path),
+        "--batch-id",
+        batch.batch_id,
+    ]
+    job = launch_job(command)
+    return {
+        **job,
+        "ok": True,
+        "portfolio_id": plan.portfolio_id,
+        "batch_id": batch.batch_id,
+        "combination_count": len(batch.combination_ids),
+        "promotion_status": "not_accepted",
+        "resumed_from_state": observation.get("state"),
+    }
+
+
 def public_command(cmd: list[str]) -> list[str]:
-    private_value_flags = {"--workbook", "--groundtruth", "--pdf-audit", "--benchmark-input", "--path"}
+    private_value_flags = {"--workbook", "--groundtruth", "--pdf-audit", "--benchmark-input", "--path", "--plan"}
     public: list[str] = []
     redact_next = False
     for index, value in enumerate(cmd):
@@ -2115,45 +2345,30 @@ def _project_matrix_internal_request(
             "invalid_project_matrix_request", "A project dataset is required", 400
         )
 
-    browser_request = set(payload) == _PROJECT_MATRIX_BROWSER_KEYS
-    if browser_request:
-        groundtruth_id = payload.get("groundtruth_id")
-        if not isinstance(groundtruth_id, str):
-            raise ProjectMatrixBridgeError(
-                "invalid_project_matrix_request", "Invalid project matrix request", 400
-            )
+    # Resolve through the dashboard catalog when available. Canonical new uploads do not
+    # require the legacy workbook/search-index compatibility files, so securely fall back
+    # to the same project workspace only when the canonical project itself exists.
+    try:
+        source = resolve_dataset(root, dataset_id)
+        if source.kind != "uploaded_project":
+            raise ValueError("not an uploaded project")
+    except ValueError:
         try:
-            source, _groundtruth = resolve_source_pair(root, dataset_id, groundtruth_id)
-            if source.kind != "uploaded_project":
-                raise ValueError("not an uploaded project")
+            project_root_path = workspace.project_root(project_id)
         except ValueError:
             raise ProjectMatrixBridgeError(
-                "invalid_project_matrix_request", "Invalid project matrix request", 400
+                "invalid_project_matrix_request", "Invalid project dataset", 400
             ) from None
-    else:
-        # Advanced request envelopes bind a project-owned immutable question set instead
-        # of a catalog ground-truth ID, but retain the same hardened project boundary.
-        try:
-            source = resolve_dataset(root, dataset_id)
-            if source.kind != "uploaded_project":
-                raise ValueError("not an uploaded project")
-        except ValueError:
-            try:
-                project_root_path = workspace.project_root(project_id)
-            except ValueError:
-                raise ProjectMatrixBridgeError(
-                    "invalid_project_matrix_request", "Invalid project dataset", 400
-                ) from None
-            if not project_root_path.is_dir() or project_root_path.is_symlink():
-                raise ProjectMatrixBridgeError(
-                    "project_not_found", "Project was not found", 404
-                ) from None
+        if not project_root_path.is_dir() or project_root_path.is_symlink():
+            raise ProjectMatrixBridgeError(
+                "project_not_found", "Project was not found", 404
+            ) from None
 
     internal = dict(payload)
     internal.pop("dataset_id")
     internal["project_id"] = project_id
     prepared = None
-    if browser_request:
+    if set(payload) == _PROJECT_MATRIX_BROWSER_KEYS:
         prepared = _prepare_browser_project_questions(
             payload, root=root, project_id=project_id
         )
@@ -2311,38 +2526,6 @@ def _project_matrix_stages(
     }
 
 
-def _project_matrix_adapter_missing(request: Any) -> list[str]:
-    """Fail closed on missing commercial credentials or known-stale local endpoints."""
-    missing: list[str] = []
-    embeddings = list(getattr(request, "embeddings", ()) or ())
-    rerankers = list(getattr(request, "rerankers", ()) or ())
-
-    if "openai_text-embedding-3-large" in embeddings and not (
-        os.getenv("OPENAI_API_KEY") or ""
-    ).strip():
-        missing.append("OPENAI_API_KEY is required for openai_text-embedding-3-large")
-
-    bge_url = (os.getenv("BGE_RERANK_URL") or "").strip()
-    qwen_url = (os.getenv("QWEN_RERANK_URL") or "").strip()
-    if "bge-reranker-base" in rerankers and re.search(r":5001(?:/|$)", bge_url):
-        missing.append(
-            "BGE_RERANK_URL points to stale port 5001; use the unified adapter on port 5000"
-        )
-    if any(name in rerankers for name in ("qwen3_4b_rerank", "Qwen3:4B Rerank")) and re.search(
-        r":5001(?:/|$)", qwen_url
-    ):
-        missing.append(
-            "QWEN_RERANK_URL points to stale port 5001; use the unified adapter on port 5000"
-        )
-    if "Amazon Rerank v1" in rerankers and not (
-        os.getenv("AWS_ACCESS_KEY_ID")
-        or os.getenv("AWS_PROFILE")
-        or os.getenv("AWS_WEB_IDENTITY_TOKEN_FILE")
-    ):
-        missing.append("Amazon Rerank v1 requires AWS credentials or an AWS profile")
-    return missing
-
-
 def preflight_project_matrix(
     payload: Any,
     *,
@@ -2360,9 +2543,8 @@ def preflight_project_matrix(
             persist_prepared_questions=False,
         )
     )
-    missing = _project_matrix_adapter_missing(validated.request)
     response = {
-        "ok": not missing,
+        "ok": True,
         "dataset_id": dataset_id,
         "project_id": project_id,
         "combination_count": validated.combination_count,
@@ -2371,8 +2553,6 @@ def preflight_project_matrix(
         "confirmation_required": validated.confirmation_required,
         "confirmation_verified": validated.confirmation_verified,
         "confirmation_token": confirmation_token,
-        "missing": missing,
-        "query_limit": 0,
         "stages": _project_matrix_stages(
             project_id,
             workspace,
@@ -2425,13 +2605,6 @@ def launch_project_matrix(
             persist_prepared_questions=True,
         )
     )
-    missing = _project_matrix_adapter_missing(validated.request)
-    if missing:
-        raise ProjectMatrixBridgeError(
-            "project_matrix_not_ready",
-            "; ".join(missing[:3]),
-            400,
-        )
     run_id = workspace.new_run_id()
     run_root: Path | None = None
     try:
@@ -2530,6 +2703,41 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {"/api/portfolio", "/api/portfolio/batches"}:
+            try:
+                plan = load_dashboard_portfolio_plan()
+                config, status = dashboard_portfolio_status(plan)
+                payload = portfolio_dashboard_payload(
+                    config,
+                    plan,
+                    status,
+                    include_combinations=parsed.path.endswith("/batches"),
+                )
+            except DashboardControlError as exc:
+                self.send_json(_control_error_payload(exc), exc.status)
+            except (OSError, ValueError):
+                self.send_json(
+                    {"error": {"code": "portfolio_unavailable", "message": "Portfolio status is unavailable"}},
+                    409,
+                )
+            else:
+                self.send_json(payload)
+            return
+        if parsed.path == "/api/adapters":
+            try:
+                manager = create_adapter_manager(ROOT)
+                payload = adapter_status_payload(
+                    manager,
+                    control_enabled=adapter_control_enabled(),
+                )
+            except (AdapterControlError, PortManifestError, OSError):
+                self.send_json(
+                    {"error": {"code": "adapter_status_unavailable", "message": "Adapter status is unavailable"}},
+                    503,
+                )
+            else:
+                self.send_json(payload)
+            return
         if parsed.path in {
             "/api/result-sources",
             "/api/project-runs",
@@ -2693,8 +2901,7 @@ class Handler(SimpleHTTPRequestHandler):
             benchmark_evidence = benchmark_detail_evidence(limit_per_combo=detail_evidence_per_combo, max_rows=detail_evidence_limit)
             retrieval_total = retrieval_smoke_count()
             reranker_total = reranker_smoke_count()
-            pipeline_snapshot = _resolve_pipeline_state()
-            evaluation = read_evaluation(pipeline_snapshot)
+            evaluation = read_evaluation()
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
             document_repository = publish_document_readiness(ROOT, read_document_repository())
@@ -2723,7 +2930,6 @@ class Handler(SimpleHTTPRequestHandler):
                     "retrieval_smokes": retrieval_smokes,
                     "retrieval_smoke_total": retrieval_total,
                     "retrieval_smoke_loaded": len(retrieval_smokes),
-                    "pipeline_state": pipeline_state_rows(pipeline_snapshot),
                     "evaluation": evaluation,
                     "hallucination": hallucination,
                     "nvidia_rag": nvidia_rag,
@@ -2752,6 +2958,57 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        portfolio_routes = {
+            "/api/portfolio/run-batch": "run-batch",
+            "/api/portfolio/run-next": "run-next",
+        }
+        if parsed.path in portfolio_routes:
+            try:
+                require_operator_control(self.headers)
+                payload = _read_adapter_control_json(self)
+                result = launch_portfolio_action(portfolio_routes[parsed.path], payload)
+            except DashboardControlError as exc:
+                self.send_json(_control_error_payload(exc), exc.status)
+            except (OSError, ValueError):
+                self.send_json(
+                    {"error": {"code": "portfolio_action_blocked", "message": "Portfolio action was blocked"}},
+                    409,
+                )
+            else:
+                self.send_json(result)
+            return
+        adapter_routes = {
+            "/api/adapters/start": "start",
+            "/api/adapters/retry": "retry",
+            "/api/adapters/stop": "stop",
+            "/api/adapters/start-required": "start-required",
+        }
+        if parsed.path in adapter_routes:
+            try:
+                require_operator_control(self.headers)
+                payload = _read_adapter_control_json(self)
+                manager = create_adapter_manager(ROOT)
+                plan = (
+                    load_dashboard_portfolio_plan()
+                    if adapter_routes[parsed.path] == "start-required"
+                    else None
+                )
+                result = adapter_control_action(
+                    adapter_routes[parsed.path],
+                    payload,
+                    manager=manager,
+                    plan=plan,
+                )
+            except DashboardControlError as exc:
+                self.send_json(_control_error_payload(exc), exc.status)
+            except (AdapterControlError, PortManifestError, OSError):
+                self.send_json(
+                    {"error": {"code": "adapter_action_blocked", "message": "Adapter action was blocked"}},
+                    409,
+                )
+            else:
+                self.send_json(result)
+            return
         if parsed.path in {
             "/api/run/preflight-project-matrix",
             "/api/run/project-matrix",
@@ -3081,6 +3338,41 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(result)
             return
         qs = parse_qs(parsed.query)
+        if parsed.path == "/api/run/preflight-candidate":
+            try:
+                if qs.get("project_id", [""])[0]:
+                    raise ValueError(
+                        "Candidate retrieval runs currently support the default WNS corpus only"
+                    )
+                cmd = candidate_preflight_command()
+                proc = subprocess.run(
+                    cmd, cwd=ROOT, text=True, capture_output=True, timeout=120
+                )
+                try:
+                    payload = json.loads(proc.stdout or "{}")
+                except (TypeError, ValueError):
+                    payload = {
+                        "ok": False,
+                        "missing": ["Could not parse candidate preflight output"],
+                    }
+                payload.update({
+                    "candidate_lane": benchmark_options()["candidate_lane"]["id"],
+                    "combo_count": candidate_combo_count(qs),
+                    "query_limit": candidate_query_limit(qs),
+                    "warnings": [
+                        *(payload.get("warnings") or []),
+                        "Candidate config is valid. VM adapter/model endpoint readiness is verified during the VM release preflight.",
+                    ],
+                    "cmd": cmd,
+                    "exit_code": proc.returncode,
+                    "output": (proc.stdout or "") + (proc.stderr or ""),
+                })
+                self.send_json(payload, 200 if proc.returncode == 0 else 500)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            except Exception:
+                self.send_json({"error": "Candidate preflight is unavailable"}, 500)
+            return
         limit = qs.get("limit", ["50"])[0]
         max_runs = qs.get("max_runs", ["0"])[0]
         try:
@@ -3113,7 +3405,18 @@ class Handler(SimpleHTTPRequestHandler):
             elif parsed.path == "/api/run/chunking":
                 cmd = [sys.executable, "scripts/compare_chunking_recall.py", "--limit", limit]
             elif parsed.path in {"/api/run/modular", "/api/run/selected"}:
-                cmd = [sys.executable, "scripts/benchmark_cli.py", "run", "--limit-queries", limit, "--max-runs", max_runs, "--output-dir", "data/modular_runs/latest"] + selected_cli_args(qs)
+                candidate_lane = qs.get("candidate_lane", ["0"])[0] == "1"
+                qs = validate_modular_lane_request(qs, candidate_lane=candidate_lane)
+                if candidate_lane:
+                    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    cmd = candidate_benchmark_command(
+                        qs,
+                        limit_queries=candidate_query_limit(qs),
+                        max_runs=max_runs,
+                        run_id=run_stamp,
+                    )
+                else:
+                    cmd = [sys.executable, "scripts/benchmark_cli.py", "run", "--limit-queries", limit, "--max-runs", max_runs, "--output-dir", "data/modular_runs/latest"] + selected_cli_args(qs)
             elif parsed.path == "/api/run/nvidia-health":
                 cmd = [sys.executable, "scripts/check_nvidia_rag_pipeline.py", "--out", "data/nvidia_rag/health.json"]
             elif parsed.path == "/api/run/nvidia-smoke":

@@ -3,6 +3,7 @@ const setText = (id, value) => { const el = $(id); if (el) el.textContent = valu
 let state = { operational: {}, files: [], options: {}, sourceCatalog: {datasets: [], groundtruth: []} };
 let benchmarkOptions = {};
 let globalSourceContextState = {officialGroundtruthId: ''};
+let candidateOperationsState = {adapters: null, portfolio: null, details: null, busy: false};
 
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const num = (v) => Number.parseFloat(v || 0) || 0;
@@ -56,8 +57,8 @@ function amazonStatusBlocksRun() {
   return /pending|block|denied|credential|permission|expired|not configured/.test(status);
 }
 
-function missingCoverageBlocked(reranker) {
-  return canonicalRerankerName(reranker) === 'Amazon Rerank v1' && amazonStatusBlocksRun();
+function missingCoverageBlocked(reranker, store) {
+  return canonicalRerankerName(reranker) === 'Amazon Rerank v1' && String(store || '').toLowerCase() === 'faiss' && amazonStatusBlocksRun();
 }
 
 function positivePageNumber(value) {
@@ -120,7 +121,7 @@ function table(el, rows, cols) {
     return;
   }
   el.innerHTML = `<thead><tr>${cols.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>` +
-    rows.map((r, i) => `<tr>${cols.map(c => `<td>${c.render ? c.render(r, i) : esc(r[c.key] ?? '')}</td>`).join('')}</tr>`).join('') + '</tbody>';
+    rows.map((r, i) => `<tr>${cols.map(c => `<td data-label="${esc(c.label)}">${c.render ? c.render(r, i) : esc(r[c.key] ?? '')}</td>`).join('')}</tr>`).join('') + '</tbody>';
 }
 
 function fillSelect(id, values, label) {
@@ -168,9 +169,29 @@ function activeDatasetSheets() {
   return benchmarkOptions.chunkers || [];
 }
 
+function candidateLane() {
+  return benchmarkOptions?.candidate_lane || {};
+}
+
+function selectedRetrievalMethod() {
+  return $('runRetrievalMethod')?.value || 'Cosine Similarity';
+}
+
+function isCandidateRetrievalMethod() {
+  return (candidateLane().retrieval_methods || []).includes(selectedRetrievalMethod());
+}
+
 function selectedMatrixComboCount() {
   const opts = benchmarkOptions || {};
   const chunkers = expandedSelection('runSheet', activeDatasetSheets());
+  if (isCandidateRetrievalMethod()) {
+    const candidateEmbeddings = candidateLane().embeddings || [];
+    const embeddings = expandedSelection('runEmbedding', candidateEmbeddings);
+    const candidateRerankers = candidateLane().rerankers || [];
+    const picked = selectedValues('runRerankerMain');
+    const rerankers = picked.includes('all') ? candidateRerankers : picked;
+    return Math.max(chunkers.length, 0) * Math.max(embeddings.length, 0) * Math.max(rerankers.length, 0);
+  }
   const embeddings = expandedSelection('runEmbedding', opts.embeddings || []);
   const stores = expandedSelection('runStore', opts.vector_stores || []);
   const officialRerankers = [...new Set((opts.rerankers || []).map(canonicalRerankerName))];
@@ -311,9 +332,8 @@ function renderCoverage(rows) {
         const timing = v.operational_seconds ? ` <code title="Vector-store ingestion time">ingest ${fmt(v.operational_seconds, 2)}s</code>` : '';
         return `<span class="coverage-ok">ingested</span>${timing}`;
       }
-      if (missingCoverageBlocked(r.reranker)) {
-        const reason = state.operational?.amazon_status || 'AWS Bedrock rerank permissions are unavailable';
-        return `<span class="badge warn" title="${esc(`Amazon Rerank unavailable: ${reason}`)}">Amazon Rerank unavailable</span>`;
+      if (missingCoverageBlocked(r.reranker, st)) {
+        return `<span class="badge warn" title="${esc(state.operational?.amazon_status || 'AWS Bedrock rerank blocked')}">blocked</span>`;
       }
       return `<button class="mini-run-btn" data-sheet="${esc(r.sheet)}" data-embedding="${esc(r.embedding)}" data-store="${esc(st)}" data-reranker="${esc(r.reranker)}">Run</button>`;
     }})),
@@ -389,11 +409,6 @@ function filteredRetrieval(rows) {
 }
 
 function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
-  const active = recommendationState.active;
-  if (active?.source_type === 'uploaded_project') {
-    renderProjectEvidenceBrowser(active);
-    return;
-  }
   const evidence = buildEvidenceRows(retrievalSmokes, rerankerSmokes);
   const opts = matrixOptions();
   fillSelect('retrievalChunkerFilter', opts.chunkers.length ? opts.chunkers : uniq(evidence, 'sheet'), 'All chunkers');
@@ -413,43 +428,6 @@ function renderRetrieval(retrievalSmokes, rerankerSmokes = []) {
     {key:'evidence_snippet', label:'Retrieved evidence excerpts', render:r=>`<details class="snippet"><summary>${esc(shortEvidenceLabel(r))}</summary>${renderEvidenceDetails(r)}</details>`},
     {key:'retrieval_seconds', label:'Retrieval sec', render:r=>r.retrieval_seconds !== undefined ? `${fmt(r.retrieval_seconds, 3)}s` : '—'},
     {key:'rerank_seconds', label:'Rerank sec', render:r=>r.rerank_seconds !== undefined ? `${fmt(r.rerank_seconds, 3)}s` : '—'},
-  ]);
-}
-
-function renderProjectEvidenceBrowser(payload) {
-  const rows = recommendationResultRows(payload).map(row => ({
-    ...row,
-    sheet: row.sheet || row.chunker_id || '',
-    embedding: row.embedding || row.embedding_id || '',
-    store: row.store || row.vector_store_id || '',
-    reranker: row.reranker || row.reranker_id || 'none',
-  }));
-  fillSelect('retrievalChunkerFilter', uniq(rows, 'sheet'), 'All chunkers');
-  fillSelect('retrievalEmbeddingFilter', uniq(rows, 'embedding'), 'All embeddings');
-  fillSelect('retrievalDbFilter', uniq(rows, 'store'), 'All DBs');
-  fillSelect('retrievalRerankerFilter', uniq(rows, 'reranker'), 'All rerankers');
-  const filtered = filterBySelect(rows, {
-    retrievalChunkerFilter: 'sheet',
-    retrievalEmbeddingFilter: 'embedding',
-    retrievalDbFilter: 'store',
-    retrievalRerankerFilter: 'reranker',
-  });
-  const hint = $('retrievalHint');
-  if (hint) {
-    hint.textContent = filtered.length
-      ? `${fmtInt(filtered.length)} project combination${filtered.length === 1 ? '' : 's'} · open evidence per combo`
-      : 'No project combinations in the selected run';
-  }
-  table($('retrievalTable'), filtered, [
-    {key:'combo', label:'Pipeline', render:r=>esc(pipelineLabel(r))},
-    {key:'status', label:'Status', render:r=>esc(r.status || '—')},
-    {key:'sheet', label:'Chunker'},
-    {key:'embedding', label:'Embedding'},
-    {key:'store', label:'Vector DB'},
-    {key:'reranker', label:'Reranker'},
-    {key:'query_count', label:'Queries', render:r=>esc(fmtInt(r.query_count || r.evaluated_queries || 0))},
-    {key:'evidence_count', label:'Evidence', render:r=>recommendationEvidenceCell(payload, r, String(r.status || '').toLowerCase() === 'failed')},
-    {key:'avg_latency_seconds', label:'Avg sec/query', render:r=>fmt(r.avg_latency_seconds ?? r.avg_query_latency_s, 3)},
   ]);
 }
 
@@ -650,81 +628,19 @@ function renderNvidiaRag(nvidia) {
   ]);
 }
 
-function parseSemanticRunPayload(output) {
-  const text = String(output || '').trim();
-  if (!text) return null;
-  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!(line.startsWith('{') && line.endsWith('}'))) continue;
-    try {
-      const payload = JSON.parse(line);
-      if (payload && typeof payload === 'object') return payload;
-    } catch (_) {
-      // keep scanning earlier lines
-    }
-  }
-  return null;
-}
-
-function semanticRunStatus(payload = {}) {
-  if (payload.running) {
-    return {ok: null, label: 'Running', detail: 'job still running', state: 'running'};
-  }
-  const semantic = parseSemanticRunPayload(payload.output || payload.raw_output || '');
-  const state = String(semantic?.state || '').toLowerCase();
-  const succeeded = Number(semantic?.succeeded);
-  const failed = Number(semantic?.failed);
-  if (state === 'completed' || (Number.isFinite(succeeded) && succeeded > 0 && failed === 0 && state !== 'partial' && state !== 'failed')) {
-    return {
-      ok: true,
-      label: 'Passed',
-      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
-      state: state || 'completed',
-      semantic,
-    };
-  }
-  if (state === 'partial') {
-    return {
-      ok: false,
-      label: 'Partial',
-      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
-      state,
-      semantic,
-    };
-  }
-  if (state === 'failed' || (Number.isFinite(failed) && failed > 0 && (!Number.isFinite(succeeded) || succeeded === 0))) {
-    return {
-      ok: false,
-      label: 'Failed',
-      detail: `${Number.isFinite(succeeded) ? succeeded : 0} succeeded · ${Number.isFinite(failed) ? failed : 0} failed`,
-      state: state || 'failed',
-      semantic,
-    };
-  }
-  if (payload.exit_code === 0) {
-    return {ok: true, label: 'Passed', detail: `exit code ${payload.exit_code}`, state: 'completed', semantic};
-  }
-  if (payload.exit_code == null) {
-    return {ok: null, label: 'Running', detail: 'awaiting exit code', state: 'running', semantic};
-  }
-  return {ok: false, label: 'Needs attention', detail: `exit code ${payload.exit_code}`, state: 'failed', semantic};
-}
-
 function renderRunResult(kind, payload) {
   const cards = $('runResultCards');
   const tbl = $('runResultTable');
   const output = payload.output || '';
   if (!cards || !tbl) return;
-  const status = semanticRunStatus(payload);
-  const ok = status.ok === true;
+  const ok = payload.exit_code === 0;
   const lines = output.split('\n').filter(Boolean);
   const retrievalLines = lines.filter(l => l.includes('query=') && l.includes('hits='));
   const extracted = retrievalLines.map(line => {
     const get = (rx) => (line.match(rx) || [,''])[1];
     return {combo:get(/^([^q]+?)\s+query=/), query:get(/query="([^"]+)"/), hits:get(/hits=(\d+)/), seconds:get(/seconds=([0-9.]+)/), raw:line};
   });
-  cards.innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Status</span><strong>${esc(status.label)}</strong><small>${esc(kind)} · ${esc(status.detail)} · exit code ${esc(payload.exit_code ?? '—')}</small></article>
+  cards.innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Status</span><strong>${ok ? 'Passed' : 'Needs attention'}</strong><small>${esc(kind)} · exit code ${esc(payload.exit_code ?? '—')}</small></article>
     <article class="run-result-card"><span>Result rows</span><strong>${extracted.length || lines.length}</strong><small>${extracted.length ? 'retrieval checks parsed' : 'output lines'}</small></article>
     <article class="run-result-card"><span>Next useful view</span><strong>${kind.includes('hallucination') ? 'Grounding audit' : kind.includes('eval') ? 'Quality decision' : 'Retrieval evidence'}</strong><small>Refresh already completed</small></article>`;
   if (extracted.length) {
@@ -744,7 +660,7 @@ function renderRunResult(kind, payload) {
 }
 
 function pipelineLabel(r) {
-  return `${r.sheet || r.chunker_id || '—'} · ${r.embedding || r.embedding_id || '—'} · ${r.store || r.vector_store_id || '—'} · ${r.reranker || r.reranker_id || 'none'}`;
+  return `${r.sheet || '—'} · ${r.embedding || '—'} · ${r.store || '—'} · ${r.reranker || 'none'}`;
 }
 
 function filterBySelect(rows, mapping) {
@@ -765,13 +681,13 @@ function displayScore(r) {
   return fmt(metricScore(r), 3);
 }
 
-function renderEvaluation(evaluation, syncRecommendations = true, pipelineState = state.operational?.pipeline_state) {
+function renderEvaluation(evaluation, syncRecommendations = true) {
   const rows = evaluation?.summary || [];
   const section = $('qualitySection');
   if (!section) return;
   const report = evaluation?.report || {};
   const reference = evaluation?.benchmark_reference || {};
-  const displayRows = evaluatedRows(evaluation, pipelineState);
+  const displayRows = evaluatedRows(evaluation);
   fillSelect('qualityComboFilter', [...new Set(displayRows.map(pipelineLabel))].sort(), 'All pipeline combinations');
   fillSelect('qualityChunkerFilter', uniq(displayRows, 'sheet'), 'All chunkers');
   fillSelect('qualityEmbeddingFilter', uniq(displayRows, 'embedding'), 'All embeddings');
@@ -855,25 +771,12 @@ function renderMetricsSource(payload) {
   }
   renderEvaluation({
     summary: Array.isArray(payload?.rows) ? payload.rows : [],
-    report: {
-      groundtruth_rows: payload?.evaluated_queries
-        || payload?.query_count
-        || payload?.rows?.[0]?.labelled_queries
-        || payload?.rows?.[0]?.query_count
-        || '—',
-    },
-  }, false, null);
+    report: {groundtruth_rows: payload?.evaluated_queries || payload?.query_count || '—'},
+  }, false);
   if (payload?.source_type === 'official' && payload?.result_set === 'official') {
     setText(
       'qualityHint',
       `${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} ranked · ${fmtInt(incomplete.length)} incomplete/unranked · ${fmtInt(payload.configured ?? 180)} configured`,
-    );
-  } else if (payload?.source_type === 'uploaded_project') {
-    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-    const completed = rows.filter(row => String(row.status || '').toLowerCase() === 'completed').length;
-    setText(
-      'qualityHint',
-      `${fmtInt(completed)} completed · ${fmtInt(rows.length)} combinations · project run ${payload.run_id || ''}`.trim(),
     );
   }
 }
@@ -918,43 +821,12 @@ function renderBestMethods(rows) {
   $('bestMethodGrid').innerHTML = cards.map(c => `<article class="best-method-card ${c.accent}"><span>${esc(c.step)}</span><strong>${esc(c.value)}</strong><small>${esc(c.note)}</small></article>`).join('');
 }
 
-function officialPipelineResultPayload(evaluation, pipelineState) {
-  const sourceState = sourceStateModule();
-  if (!sourceState) throw new Error('Dashboard source-state module is unavailable');
-  const descriptor = recommendationState.official || {};
-  const benchmarkReference = evaluation?.benchmark_reference || {};
-  const publicRows = pipelineState.map(row => Object.fromEntries(
-    Object.entries(row || {}).filter(([key]) => !key.startsWith('_')),
-  ));
-  return sourceState.officialResultPayload(
-    {
-      ...evaluation,
-      benchmark_reference: {
-        ...benchmarkReference,
-        summary: publicRows,
-        diagnostics: [],
-      },
-    },
-    {
-      configured: descriptor.configured ?? pipelineState.length,
-      evaluated: descriptor.evaluated,
-      expected_keys: benchmarkReference?.report?.expected_keys
-        || publicRows.map(row => sourceState.metricRowKey(row)),
-    },
-    state.operational?.benchmark_detail_evidence || [],
-  );
-}
-
-function evaluatedRows(evaluation, pipelineState = state.operational?.pipeline_state) {
-  if (Array.isArray(pipelineState)) {
-    return officialPipelineResultPayload(evaluation, pipelineState).rows;
-  }
-  const rows = [
+function evaluatedRows(evaluation) {
+  return dedupeMetricRows([
     ...(evaluation?.summary || []),
     ...(evaluation?.reranked?.summary || []),
     ...(evaluation?.benchmark_reference?.summary || []),
-  ];
-  return dedupeMetricRows(rows)
+  ])
     .map(r => canonicalMetricRow(r, {source: r.source || 'groundtruth_eval'}))
     .sort((a,b)=>metricScore(b)-metricScore(a) || num(b.recall_at_5)-num(a.recall_at_5));
 }
@@ -1090,17 +962,7 @@ const recommendationState = {
   tablePage: 0,
   tablePayload: null,
   tableResult: null,
-  visualSelectedFamily: '',
-  visualSelectedCombo: '',
-  visualHiddenCategories: new Set(),
-  visualPointData: new Map(),
 };
-
-function recommendationVisualModule() {
-  const module = globalThis.RecommendationVisuals;
-  if (!module || typeof module.categoryColorMap !== 'function') throw new Error('Recommendation visualization rules are unavailable');
-  return module;
-}
 
 function recommendationModule() {
   const module = globalThis.PipelineRecommendations;
@@ -1122,7 +984,6 @@ function closeRecommendationEvidence() {
 }
 
 function clearRecommendationView(message) {
-  recommendationState.analyticsResult = null;
   setText('recommendationStatus', message || 'No result source selected');
   setText('recommendationContext', message || 'Choose a result source');
   if ($('recommendationStrip')) $('recommendationStrip').innerHTML = '<div class="empty-state">No recommendations loaded.</div>';
@@ -1133,12 +994,6 @@ function clearRecommendationView(message) {
   ['top10ScoreChart','qualityLatencyChart','comparisonGrid','rerankerLiftChart','stageComparisonChart'].forEach(id => {
     if ($(id)) $(id).innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
   });
-  if ($('tradeoffChart')) $('tradeoffChart').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
-  if ($('metricHeatmap')) $('metricHeatmap').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
-  if ($('metricExplorerKpis')) $('metricExplorerKpis').innerHTML = '';
-  setText('metricExplorerHint', 'Waiting for evaluation');
-  setText('metricHeatmapLegend', 'No active result source');
-  setText('metricInterpretation', '');
   closeRecommendationEvidence();
 }
 
@@ -1258,12 +1113,9 @@ function recommendationEvidenceCell(payload, row, failed) {
     ? null
     : Number(rawCount);
   if (!Number.isFinite(count) || count < 0) return 'Not recorded';
-  const comboId = String(row.combo_id || pipelineLabel(row) || '');
-  if (payload.source_type === 'uploaded_project' && comboId && count > 0 && row.combo_id) {
-    return `<button class="mini-run-btn view-project-evidence" type="button" data-combo-id="${esc(row.combo_id)}">View ${esc(fmtInt(count))} evidence rows</button>`;
-  }
-  if (payload.source_type === 'uploaded_project' && count > 0) {
-    return esc(`${fmtInt(count)} rows`);
+  const comboId = String(row.combo_id || '');
+  if (payload.source_type === 'uploaded_project' && comboId && count > 0) {
+    return `<button class="mini-run-btn view-project-evidence" type="button" data-combo-id="${esc(comboId)}">View ${esc(fmtInt(count))} evidence rows</button>`;
   }
   return esc(fmtInt(count));
 }
@@ -1367,453 +1219,9 @@ function clearUploadedTradeoffs() {
   });
 }
 
-const recommendationMetricKeys = ['recall_at_5', 'mrr', 'ndcg_at_5', 'avg_latency_seconds'];
-const recommendationComponentKeys = ['sheet', 'embedding', 'store', 'reranker'];
-
-function recommendationMetricLabel(key) {
-  return {
-    recall_at_5: 'Recall@5',
-    mrr: 'MRR',
-    ndcg_at_5: 'nDCG@5',
-    avg_latency_seconds: 'Average latency/query',
-  }[key] || key;
-}
-
-function recommendationComponentLabel(key) {
-  return {sheet: 'Chunker', embedding: 'Embedding', store: 'Vector DB', reranker: 'Reranker'}[key] || key;
-}
-
-function recommendationMetricValue(row, key) {
-  const aliases = {
-    recall_at_5: ['recall_at_5', 'recall_at_k'],
-    mrr: ['mrr', 'mrr_at_k'],
-    ndcg_at_5: ['ndcg_at_5', 'ndcg_at_k'],
-    avg_latency_seconds: ['avg_latency_seconds', 'avg_query_latency_s'],
-  }[key] || [key];
-  for (const alias of aliases) {
-    const raw = row?.[alias];
-    if (raw === null || raw === undefined || raw === '') continue;
-    const value = Number(raw);
-    if (Number.isFinite(value)) return value;
-  }
-  return NaN;
-}
-
-function fillRecommendationMetricControl(id, values, labels = {}, fallback = '') {
-  const control = $(id);
-  if (!control) return fallback || values[0] || '';
-  const current = control.value;
-  control.innerHTML = values.map(value => `<option value="${esc(value)}">${esc(labels[value] || value)}</option>`).join('');
-  control.value = values.includes(current) ? current : (values.includes(fallback) ? fallback : (values[0] || ''));
-  return control.value;
-}
-
-function recommendationRowState(row) {
-  const stateName = String(row?.state || row?.status || 'not_run').toLowerCase();
-  if (['complete', 'completed'].includes(stateName)) return 'complete';
-  if (['running', 'failed', 'incomplete', 'not_run'].includes(stateName)) return stateName;
-  return 'incomplete';
-}
-
-function recommendationEvaluatedQueries(row) {
-  return Number(row?.evaluated_queries ?? row?.query_count ?? row?.labelled_queries ?? 0) || 0;
-}
-
-function completeRecommendationRows(payload = {}) {
-  if (payload.scoring_mode !== 'retrieval_labels' && payload.mode !== 'labelled') return [];
-  return (Array.isArray(payload.rows) ? payload.rows : [])
-    .filter(row => recommendationRowState(row) === 'complete' && recommendationEvaluatedQueries(row) > 0)
-    .map(row => canonicalMetricRow(row, {state: 'complete'}));
-}
-
-function recommendationStateRows(payload = {}) {
-  if (
-    payload.source_type === 'official'
-    && payload.result_set !== 'baseline'
-    && Array.isArray(state.operational?.pipeline_state)
-  ) {
-    return state.operational.pipeline_state.map(row => canonicalMetricRow(row));
-  }
-  return (Array.isArray(payload.rows) ? payload.rows : []).map(row => canonicalMetricRow(row));
-}
-
-function recommendationAnalyticsOptions(payload, rows) {
-  if (payload?.source_type === 'official' && payload?.result_set !== 'baseline') {
-    const configured = Object.keys(benchmarkOptions || {}).length ? benchmarkOptions : (state.options || {});
-    return {
-      chunkers: configured.chunkers || uniq(rows, 'sheet'),
-      embeddings: configured.embeddings || uniq(rows, 'embedding'),
-      vector_stores: configured.vector_stores || configured.stores || uniq(rows, 'store'),
-      rerankers: (configured.rerankers || uniq(rows, 'reranker')).map(canonicalRerankerName),
-    };
-  }
-  return {
-    chunkers: uniq(rows, 'sheet'),
-    embeddings: uniq(rows, 'embedding'),
-    vector_stores: uniq(rows, 'store'),
-    rerankers: uniq(rows, 'reranker').map(canonicalRerankerName),
-  };
-}
-
-function recommendationWinnerLabels(payload, result) {
-  const roles = result?.roles || payload?.recommendations?.roles || payload?.roles || {};
-  const labels = new Map();
-  [
-    ['Quality', roles.quality],
-    ['Speed', roles.speed || roles.fastest],
-    ['Value', roles.value],
-  ].forEach(([label, role]) => {
-    const row = roleRow(role);
-    const comboId = String(row?.combo_id || role?.combo_id || '');
-    if (!comboId) return;
-    labels.set(comboId, [...(labels.get(comboId) || []), label]);
-  });
-  return labels;
-}
-
-function recommendationMetricDirection(key) {
-  return key === 'avg_latency_seconds' ? 'lower' : 'higher';
-}
-
-function recommendationMarkerSvg(shape, x, y, radius, color, rankClass) {
-  const common = `class="metric-tradeoff-dot metric-shape-${shape} ${rankClass}" style="--point-color:${color}"`;
-  if (shape === 'diamond') {
-    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="1.5" transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})" ${common} />`;
-  }
-  if (shape === 'triangle') {
-    const top = `${x.toFixed(1)},${(y - radius).toFixed(1)}`;
-    const right = `${(x + radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
-    const left = `${(x - radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
-    return `<path d="M ${top} L ${right} L ${left} Z" ${common} />`;
-  }
-  if (shape === 'square') {
-    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="2" ${common} />`;
-  }
-  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" ${common} />`;
-}
-
-// Rich detail markup is safe because every row-derived string is escaped and every metric is numerically formatted.
-function recommendationPointDetailHtml(meta) {
-  if (!meta) return 'Select a point to inspect exact metrics.';
-  const row = meta.row;
-  const badges = meta.badges.length ? `<span class="metric-detail-badges">${meta.badges.map(badge => `<b>${esc(badge)}</b>`).join('')}</span>` : '';
-  return `<strong>#${fmtInt(meta.rank)} · ${esc(pipelineLabel(row))}</strong>${badges}<span>${esc(recommendationMetricLabel(meta.xKey))}: ${fmt(meta.xValue, 3)} · ${esc(recommendationMetricLabel(meta.yKey))}: ${fmt(meta.yValue, 3)}</span><small>Recall@5 ${fmt(recommendationMetricValue(row, 'recall_at_5'), 3)} · MRR ${fmt(recommendationMetricValue(row, 'mrr'), 3)} · nDCG@5 ${fmt(recommendationMetricValue(row, 'ndcg_at_5'), 3)} · latency ${fmt(recommendationMetricValue(row, 'avg_latency_seconds'), 3)}s · ${fmtInt(recommendationEvaluatedQueries(row))} evaluated queries</small>`;
-}
-
-function applyRecommendationFamilyState(chart, familyKey = '') {
-  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
-  const points = [...chart.querySelectorAll('.metric-point')];
-  const related = points.filter(point => point.dataset.familyKey === familyKey);
-  points.forEach(point => {
-    point.classList.toggle('is-related', Boolean(familyKey) && point.dataset.familyKey === familyKey);
-    point.classList.toggle('is-muted', Boolean(familyKey) && point.dataset.familyKey !== familyKey);
-    point.classList.toggle('is-selected', point.dataset.comboId === recommendationState.visualSelectedCombo);
-  });
-  const overlay = chart.querySelector('.metric-family-overlay');
-  if (!overlay) return;
-  const ordered = related.map(point => ({
-    x: Number(point.dataset.pointX),
-    y: Number(point.dataset.pointY),
-    color: point.dataset.color,
-  })).sort((a, b) => a.x - b.x || a.y - b.y);
-  overlay.innerHTML = ordered.slice(1).map((point, index) => {
-    const previous = ordered[index];
-    return `<line x1="${previous.x}" y1="${previous.y}" x2="${point.x}" y2="${point.y}" class="metric-family-link" style="--family-color:${point.color}" />`;
-  }).join('');
-}
-
-function bindRecommendationChartInteractions(chart, payload) {
-  const details = $('metricPointDetails');
-  const tooltip = $('metricChartTooltip');
-  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
-  const showPoint = (point, event, lock = false) => {
-    const meta = recommendationState.visualPointData.get(point.dataset.comboId);
-    if (!meta) return;
-    if (lock) {
-      recommendationState.visualSelectedFamily = point.dataset.familyKey;
-      recommendationState.visualSelectedCombo = point.dataset.comboId;
-    }
-    if (details) details.innerHTML = recommendationPointDetailHtml(meta);
-    if (tooltip) {
-      tooltip.innerHTML = recommendationPointDetailHtml(meta);
-      tooltip.hidden = false;
-      const bounds = chart.getBoundingClientRect?.();
-      if (bounds && Number.isFinite(event?.clientX)) {
-        tooltip.style.left = `${Math.max(8, event.clientX - bounds.left + 14)}px`;
-        tooltip.style.top = `${Math.max(8, event.clientY - bounds.top + 14)}px`;
-      }
-    }
-    applyRecommendationFamilyState(chart, point.dataset.familyKey);
-  };
-  const clearTransient = () => {
-    if (tooltip) tooltip.hidden = true;
-    applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
-  };
-  chart.querySelectorAll('.metric-point').forEach(point => {
-    point.addEventListener('pointerenter', event => showPoint(point, event));
-    point.addEventListener('pointerleave', clearTransient);
-    point.addEventListener('focus', event => showPoint(point, event));
-    point.addEventListener('blur', clearTransient);
-    point.addEventListener('click', event => {
-      event.stopPropagation();
-      showPoint(point, event, true);
-    });
-    point.addEventListener('keydown', event => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        showPoint(point, event, true);
-        return;
-      }
-      if (event.key !== 'Escape') return;
-      recommendationState.visualSelectedFamily = '';
-      recommendationState.visualSelectedCombo = '';
-      if (details) details.textContent = 'Select a point to inspect exact metrics.';
-      clearTransient();
-    });
-  });
-  chart.querySelectorAll('.metric-legend-filter').forEach(button => {
-    button.addEventListener('click', () => {
-      const category = button.dataset.category;
-      if (recommendationState.visualHiddenCategories.has(category)) recommendationState.visualHiddenCategories.delete(category);
-      else recommendationState.visualHiddenCategories.add(category);
-      renderRecommendationAnalytics(recommendationState.active || payload);
-    });
-  });
-  chart.addEventListener('click', event => {
-    if (event.target.closest?.('.metric-point') || event.target.closest?.('.metric-legend-filter')) return;
-    recommendationState.visualSelectedFamily = '';
-    recommendationState.visualSelectedCombo = '';
-    if (details) details.textContent = 'Select a point to inspect exact metrics.';
-    clearTransient();
-  });
-  applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
-}
-
-function renderRecommendationExplorer(payload, complete, result) {
-  const chart = $('tradeoffChart');
-  const kpis = $('metricExplorerKpis');
-  const hint = $('metricExplorerHint');
-  const interpretation = $('metricInterpretation');
-  if (!chart || !kpis || !hint || !interpretation) return;
-  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
-  const xKey = fillRecommendationMetricControl('metricXAxis', recommendationMetricKeys, labels, 'avg_latency_seconds');
-  const yKey = fillRecommendationMetricControl('metricYAxis', recommendationMetricKeys, labels, 'recall_at_5');
-  const colorKey = fillRecommendationMetricControl(
-    'metricColorBy',
-    recommendationComponentKeys,
-    Object.fromEntries(recommendationComponentKeys.map(key => [key, recommendationComponentLabel(key)])),
-    'store',
-  );
-  const bubbleKey = fillRecommendationMetricControl(
-    'metricBubbleBy',
-    ['none', 'evaluated_queries'],
-    {none: 'Fixed size', evaluated_queries: 'Evaluated queries'},
-    'none',
-  );
-  const quickView = fillRecommendationMetricControl(
-    'metricQuickView',
-    ['all', 'top10', 'bottom10', 'pareto'],
-    {all: 'All combinations', top10: 'Top 10', bottom10: 'Bottom 10', pareto: 'Pareto frontier'},
-    'all',
-  );
-  const visual = recommendationVisualModule();
-  const completeByKey = new Map(complete.map(row => [metricRowKey(row), row]));
-  const rankedRows = (Array.isArray(result?.completed) ? result.completed : complete)
-    .map(row => completeByKey.get(metricRowKey(canonicalMetricRow(row))) || canonicalMetricRow(row))
-    .filter(row => completeByKey.has(metricRowKey(row)));
-  const rankByKey = new Map(rankedRows.map((row, index) => [metricRowKey(row), index + 1]));
-  const eligible = complete
-    .filter(row => Number.isFinite(recommendationMetricValue(row, xKey)) && Number.isFinite(recommendationMetricValue(row, yKey)))
-    .map(row => ({...row, recommendation_rank: rankByKey.get(metricRowKey(row)) || null}))
-    .sort((a, b) => (a.recommendation_rank || Infinity) - (b.recommendation_rank || Infinity) || metricRowKey(a).localeCompare(metricRowKey(b)));
-  const categoryValues = [...new Set(eligible.map(row => String(row[colorKey] || 'none')))];
-  const categoryColors = visual.categoryColorMap(categoryValues);
-  let plotted = eligible.filter(row => !recommendationState.visualHiddenCategories.has(String(row[colorKey] || 'none')));
-  if (quickView === 'pareto') {
-    plotted = visual.paretoRows(
-      plotted,
-      row => recommendationMetricValue(row, xKey),
-      row => recommendationMetricValue(row, yKey),
-      recommendationMetricDirection(xKey),
-      recommendationMetricDirection(yKey),
-    ).sort((a, b) => a.recommendation_rank - b.recommendation_rank);
-  } else {
-    plotted = visual.applyQuickView(plotted, quickView);
-  }
-  if (!plotted.length) {
-    const unavailable = 'Metrics unavailable until ground truth evaluation completes';
-    hint.textContent = '0 complete evaluations';
-    kpis.innerHTML = `<div class="metric-unavailable">${unavailable}</div>`;
-    chart.innerHTML = `<div class="empty-state">${unavailable}</div>`;
-    interpretation.textContent = unavailable;
-    return;
-  }
-  hint.textContent = `${plotted.length} shown · ${eligible.length} complete evaluation${eligible.length === 1 ? '' : 's'}`;
-  const best = [...plotted].sort((a, b) => recommendationMetricValue(b, yKey) - recommendationMetricValue(a, yKey) || metricScore(b) - metricScore(a))[0];
-  const fastest = [...plotted].sort((a, b) => recommendationMetricValue(a, 'avg_latency_seconds') - recommendationMetricValue(b, 'avg_latency_seconds'))[0];
-  const mean = plotted.reduce((sum, row) => sum + recommendationMetricValue(row, yKey), 0) / plotted.length;
-  kpis.innerHTML = [
-    ['Complete runs', String(plotted.length), 'Selected source only'],
-    [`Best ${recommendationMetricLabel(yKey)}`, fmt(recommendationMetricValue(best, yKey), 3), pipelineLabel(best)],
-    ['Fastest avg/query', `${fmt(recommendationMetricValue(fastest, 'avg_latency_seconds'), 3)}s`, pipelineLabel(fastest)],
-    [`Mean ${recommendationMetricLabel(yKey)}`, fmt(mean, 3), 'Across complete runs'],
-  ].map(([label, value, note]) => `<article class="metric-explorer-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></article>`).join('');
-
-  const box = {left: 76, top: 58, width: 610, height: 230};
-  const xValues = eligible.map(row => recommendationMetricValue(row, xKey));
-  const yValues = eligible.map(row => recommendationMetricValue(row, yKey));
-  const minX = Math.min(...xValues), maxX = Math.max(...xValues);
-  const minY = Math.min(...yValues), maxY = Math.max(...yValues);
-  const xRange = maxX - minX || 1, yRange = maxY - minY || 1;
-  const queries = plotted.map(recommendationEvaluatedQueries);
-  const minQueries = Math.min(...queries), maxQueries = Math.max(...queries), queryRange = maxQueries - minQueries || 1;
-  const sourceLabel = payload.source_type === 'uploaded_project'
-    ? (payload.project_label || payload.project_id || 'Uploaded project')
-    : 'Official WNS benchmark';
-  const offsets = visual.collisionOffsets(
-    plotted,
-    row => recommendationMetricValue(row, xKey),
-    row => recommendationMetricValue(row, yKey),
-  );
-  recommendationState.visualPointData.clear();
-  const points = plotted.map(row => {
-    const offset = offsets.get(row) || {dx: 0, dy: 0};
-    const x = box.left + ((recommendationMetricValue(row, xKey) - minX) / xRange) * box.width + offset.dx;
-    const y = box.top + box.height - ((recommendationMetricValue(row, yKey) - minY) / yRange) * box.height + offset.dy;
-    const category = String(row[colorKey] || 'none');
-    const color = categoryColors[category] || visual.palette[0];
-    const radius = bubbleKey === 'evaluated_queries'
-      ? 7 + ((recommendationEvaluatedQueries(row) - minQueries) / queryRange) * 10
-      : 8;
-    const comboId = String(row.combo_id || metricRowKey(row));
-    const rank = row.recommendation_rank || eligible.length;
-    const rankClass = rank <= 5 ? 'metric-rank-top' : rank > Math.max(0, eligible.length - 5) ? 'metric-rank-bottom' : 'metric-rank-middle';
-    const familyKey = visual.familyKey(row);
-    const shape = visual.rerankerShape(row.reranker);
-    const badges = recommendationModule().rowBadges(row, result?.roles || {});
-    const title = `Rank ${rank} · ${pipelineLabel(row)} · ${recommendationMetricLabel(xKey)} ${fmt(recommendationMetricValue(row, xKey), 3)} · ${recommendationMetricLabel(yKey)} ${fmt(recommendationMetricValue(row, yKey), 3)} · ${sourceLabel} · complete`;
-    recommendationState.visualPointData.set(comboId, {
-      row, rank, badges, xKey, yKey,
-      xValue: recommendationMetricValue(row, xKey),
-      yValue: recommendationMetricValue(row, yKey),
-    });
-    const halo = rankClass === 'metric-rank-top'
-      ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 4).toFixed(1)}" class="metric-rank-top-halo" />`
-      : rankClass === 'metric-rank-bottom'
-        ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 3).toFixed(1)}" class="metric-rank-bottom-halo" />`
-        : '';
-    const rankNumber = rankClass === 'metric-rank-top'
-      ? `<text x="${x.toFixed(1)}" y="${(y + 3).toFixed(1)}" class="metric-rank-number">${rank}</text>`
-      : '';
-    return `<g class="metric-point ${rankClass}" data-combo-id="${esc(comboId)}" data-family-key="${esc(familyKey)}" data-category="${esc(category)}" data-rank="${rank}" data-point-x="${x.toFixed(1)}" data-point-y="${y.toFixed(1)}" data-color="${esc(color)}" tabindex="0"><title>${esc(title)}</title>${halo}${recommendationMarkerSvg(shape, x, y, radius, color, rankClass)}${rankNumber}</g>`;
-  }).join('');
-  const legend = categoryValues.map(value => {
-    const hidden = recommendationState.visualHiddenCategories.has(value);
-    return `<li><button type="button" class="metric-legend-filter${hidden ? ' is-hidden' : ''}" data-category="${esc(value)}" aria-pressed="${hidden ? 'false' : 'true'}"><span class="metric-legend-dot" style="--point-color:${esc(categoryColors[value])}"></span><strong>${esc(value)}</strong></button></li>`;
-  }).join('');
-  const idealZone = recommendationMetricDirection(xKey) === 'lower' && recommendationMetricDirection(yKey) === 'higher'
-    ? `<rect x="${box.left}" y="${box.top}" width="${(box.width * .34).toFixed(1)}" height="${(box.height * .34).toFixed(1)}" rx="12" class="metric-ideal-zone" /><text x="${box.left + 10}" y="${(box.top + box.height * .34 - 10).toFixed(1)}" class="metric-ideal-label">Ideal zone</text>`
-    : '';
-  chart.innerHTML = `<svg viewBox="0 0 760 350" role="img" aria-label="${esc(recommendationMetricLabel(yKey))} versus ${esc(recommendationMetricLabel(xKey))} complete evaluation trade-off chart"><text x="14" y="24" class="svg-title">Complete-run trade-off</text>${idealZone}<line x1="${box.left}" y1="${box.top + box.height}" x2="${box.left + box.width}" y2="${box.top + box.height}" class="svg-axis" /><line x1="${box.left}" y1="${box.top}" x2="${box.left}" y2="${box.top + box.height}" class="svg-axis" /><text x="${box.left}" y="${box.top + box.height + 24}" class="svg-value">${fmt(minX, 3)}</text><text x="${box.left + box.width - 34}" y="${box.top + box.height + 24}" class="svg-value">${fmt(maxX, 3)}</text><text x="${box.left - 54}" y="${box.top + box.height}" class="svg-value">${fmt(minY, 3)}</text><text x="${box.left - 54}" y="${box.top + 5}" class="svg-value">${fmt(maxY, 3)}</text><text x="${box.left + box.width - 120}" y="${box.top + box.height + 48}" class="svg-guidance">${xKey === 'avg_latency_seconds' ? 'Faster ←' : 'Lower ←'}</text><text x="14" y="${box.top - 16}" class="svg-guidance">Better ↑</text><g class="metric-family-overlay" aria-hidden="true"></g>${points}</svg><ul class="metric-tradeoff-legend" aria-label="Color grouping legend">${legend}</ul>`;
-  const details = $('metricPointDetails');
-  if (details && !recommendationState.visualSelectedCombo) details.textContent = 'Select a point to inspect exact metrics.';
-  bindRecommendationChartInteractions(chart, payload);
-  interpretation.textContent = `${recommendationMetricLabel(xKey)} is horizontal${xKey === 'avg_latency_seconds' ? '; lower is faster' : ''}. ${recommendationMetricLabel(yKey)} is vertical; color groups by ${recommendationComponentLabel(colorKey).toLowerCase()}. Mint rings identify the top five; select a point for exact metrics.`;
-}
-
-function bindRecommendationHeatmapInteractions(target) {
-  if (!target || typeof target.querySelectorAll !== 'function') return;
-  const cells = [...target.querySelectorAll('.metric-heatmap-cell')];
-  const clear = () => cells.forEach(cell => cell.classList.remove('is-axis-related'));
-  const highlight = active => {
-    const row = active.dataset.heatmapRow;
-    const column = active.dataset.heatmapColumn;
-    cells.forEach(cell => cell.classList.toggle(
-      'is-axis-related',
-      cell.dataset.heatmapRow === row || cell.dataset.heatmapColumn === column,
-    ));
-  };
-  cells.forEach(cell => {
-    cell.tabIndex = 0;
-    cell.addEventListener('pointerenter', () => highlight(cell));
-    cell.addEventListener('pointerleave', clear);
-    cell.addEventListener('focus', () => highlight(cell));
-    cell.addEventListener('blur', clear);
-  });
-}
-
-function renderRecommendationHeatmap(payload, stateRows) {
-  const target = $('metricHeatmap');
-  const legend = $('metricHeatmapLegend');
-  if (!target || !legend) return;
-  const options = recommendationAnalyticsOptions(payload, stateRows);
-  const chunkers = options.chunkers || [];
-  const stores = options.vector_stores || [];
-  const embeddings = options.embeddings || [];
-  const rerankers = (options.rerankers || []).map(canonicalRerankerName);
-  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
-  const metric = fillRecommendationMetricControl('heatmapMetric', recommendationMetricKeys, labels, 'recall_at_5');
-  const embedding = fillRecommendationMetricControl('heatmapEmbedding', embeddings, {}, embeddings[0] || '');
-  const reranker = fillRecommendationMetricControl('heatmapReranker', rerankers.length ? rerankers : ['none'], {}, rerankers[0] || 'none');
-  if (!chunkers.length || !stores.length) {
-    legend.textContent = 'No configured matrix';
-    target.innerHTML = '<div class="empty-state">No configured chunker × vector DB combinations are available.</div>';
-    return;
-  }
-  const rowsByKey = new Map(stateRows.map(row => [metricRowKey(row), row]));
-  const visibleRows = chunkers.flatMap(sheet => stores.map(store => (
-    rowsByKey.get(`${sheet}|${embedding}|${store}|${canonicalRerankerName(reranker)}`)
-  ))).filter(Boolean);
-  const measuredValues = visibleRows
-    .filter(row => recommendationRowState(row) === 'complete' && recommendationEvaluatedQueries(row) > 0)
-    .map(row => recommendationMetricValue(row, metric))
-    .filter(Number.isFinite);
-  const minValue = measuredValues.length ? Math.min(...measuredValues) : 0;
-  const maxValue = measuredValues.length ? Math.max(...measuredValues) : 0;
-  const range = maxValue - minValue || 1;
-  const lowerIsBetter = recommendationMetricDirection(metric) === 'lower';
-  const bestValue = measuredValues.length ? (lowerIsBetter ? minValue : maxValue) : null;
-  const worstValue = measuredValues.length ? (lowerIsBetter ? maxValue : minValue) : null;
-  const stateSwatches = ['not_run', 'running', 'incomplete', 'failed']
-    .map(value => `<span class="metric-state-swatch" data-state="${value}">${esc(value.replace('_', ' '))}</span>`)
-    .join('');
-  // Heatmap markup is safe: state names are allowlisted, identifiers are escaped, and metrics are numerically formatted.
-  legend.innerHTML = measuredValues.length
-    ? `<span class="metric-scale-label">Low ${fmt(minValue, 3)}</span><span class="metric-scale-ramp" aria-hidden="true"></span><span class="metric-scale-label">High ${fmt(maxValue, 3)}</span>${stateSwatches}`
-    : `<span>No complete measured values</span>${stateSwatches}`;
-  const cells = chunkers.flatMap(sheet => stores.map(store => {
-    const row = rowsByKey.get(`${sheet}|${embedding}|${store}|${canonicalRerankerName(reranker)}`);
-    const rowState = recommendationRowState(row);
-    const metricValue = recommendationMetricValue(row, metric);
-    const measured = rowState === 'complete' && recommendationEvaluatedQueries(row) > 0 && Number.isFinite(metricValue);
-    const normalized = measured ? (metricValue - minValue) / range : 0;
-    const performance = lowerIsBetter ? 1 - normalized : normalized;
-    const bucket = measured ? Math.max(0, Math.min(4, Math.round(performance * 4))) : 0;
-    const extrema = measured && metricValue === bestValue
-      ? ' is-best'
-      : measured && metricValue === worstValue
-        ? ' is-worst'
-        : '';
-    const stateLabel = rowState.replace('_', ' ');
-    const display = measured ? fmt(metricValue, 3) : stateLabel;
-    return `<div class="metric-heatmap-cell ${measured ? `metric-quality-${bucket}` : ''}${extrema}" data-state="${esc(rowState)}" data-heatmap-row="${esc(sheet)}" data-heatmap-column="${esc(store)}" role="gridcell" aria-label="${esc(`${sheet}, ${store}: ${measured ? `${recommendationMetricLabel(metric)} ${display}` : stateLabel}`)}"><strong>${esc(display)}</strong><small>${measured ? esc(recommendationMetricLabel(metric)) : 'No complete metric'}</small></div>`;
-  }));
-  target.innerHTML = `<div class="metric-heatmap-scroll-note">Scroll horizontally to view all configured vector DB columns.</div><div class="metric-heatmap-grid" role="grid" aria-label="${esc(recommendationMetricLabel(metric))} by chunker and vector DB" style="grid-template-columns:minmax(180px,1.2fr) repeat(${stores.length},minmax(132px,1fr))"><div class="metric-heatmap-head">Chunker / vector DB</div>${stores.map(store => `<div class="metric-heatmap-head">${esc(store)}</div>`).join('')}${chunkers.map((sheet, index) => `<div class="metric-heatmap-row-label">${esc(sheet)}</div>${cells.slice(index * stores.length, (index + 1) * stores.length).join('')}`).join('')}</div>`;
-  bindRecommendationHeatmapInteractions(target);
-}
-
-function renderRecommendationAnalytics(payload = recommendationState.active || {}) {
-  const complete = completeRecommendationRows(payload);
-  const stateRows = recommendationStateRows(payload);
-  const result = recommendationState.analyticsResult;
-  renderRecommendationExplorer(payload, complete, result);
-  renderRecommendationHeatmap(payload, stateRows);
-}
-
 function renderRecommendationSource(payload) {
   const result = recommendationModule().recommendationsForSource(payload);
   recommendationState.active = payload;
-  recommendationState.analyticsResult = result;
   const uploaded = payload.source_type === 'uploaded_project';
   const baseline = !uploaded && payload.result_set === 'baseline';
   recommendationState.sourceType = uploaded ? 'uploaded_project' : 'official';
@@ -1827,7 +1235,6 @@ function renderRecommendationSource(payload) {
   setText('recommendationModeNote', result.mode === 'labelled' ? 'Quality, speed, and honest cost posture for the active source.' : 'Operational speed, run health, and evidence coverage. Quality is not claimed without labels.');
   renderRecommendationStrip(result);
   renderRecommendationTable(payload, result);
-  renderRecommendationAnalytics(payload);
   renderPricingLedger(payload);
   if (uploaded) clearUploadedTradeoffs();
   return result;
@@ -1840,10 +1247,6 @@ function officialRecommendationPayload(resultSet = 'official') {
   if (!sourceState) throw new Error('Dashboard source-state module is unavailable');
   if (resultSet === 'baseline') {
     return sourceState.baselineResultPayload(evaluation, state.operational?.benchmark_detail_evidence || []);
-  }
-  const pipelineState = state.operational?.pipeline_state;
-  if (Array.isArray(pipelineState)) {
-    return officialPipelineResultPayload(evaluation, pipelineState);
   }
   return sourceState.officialResultPayload(
     evaluation,
@@ -1878,21 +1281,17 @@ function renderCanonicalResultPayload(payload) {
   const scored = payload?.scoring_mode === 'retrieval_labels';
   const officialMatrix = payload?.source_type === 'official' && payload?.result_set === 'official';
   const stable = !officialMatrix || payload?.matrix_complete === true;
-  const latencyOf = row => num(row.avg_latency_seconds ?? row.avg_query_latency_s);
-  const recallOf = row => num(row.recall_at_5 ?? row.recall_at_k);
-  const best = scored && stable
-    ? [...rows].sort((a, b) => (metricScore(b) ?? -1) - (metricScore(a) ?? -1) || recallOf(b) - recallOf(a))[0] || null
-    : null;
+  const best = scored && stable ? rows[0] || null : null;
   const fastest = scored && stable
-    ? rows.filter(row => latencyOf(row) > 0).sort((a, b) => latencyOf(a) - latencyOf(b))[0] || null
+    ? rows.filter(row => num(row.avg_latency_seconds) > 0).sort((a, b) => num(a.avg_latency_seconds) - num(b.avg_latency_seconds))[0] || null
     : null;
-  setText('bestR5Status', best ? `${(recallOf(best) * 100).toFixed(1)}%` : '—');
+  setText('bestR5Status', best ? `${(num(best.recall_at_5) * 100).toFixed(1)}%` : '—');
   setText('bestConfigNote', best
     ? pipelineLabel(best)
     : (officialMatrix && !stable
       ? `Final winner pending · ${fmtInt(payload.evaluated ?? rows.length)}/${fmtInt(payload.configured ?? 180)} fully scored`
       : (scored ? 'best accuracy score' : 'quality unavailable without labels')));
-  setText('bestLatencyStatus', fastest ? `${fmt(latencyOf(fastest), 3)}s` : '—');
+  setText('bestLatencyStatus', fastest ? `${fmt(fastest.avg_latency_seconds, 3)}s` : '—');
   setText('bestLatencyNote', fastest
     ? `${pipelineLabel(fastest)} · avg/query`
     : (officialMatrix && !stable ? 'Final latency winner pending full matrix' : 'average query latency'));
@@ -1910,19 +1309,6 @@ function renderCanonicalResultPayload(payload) {
   renderMetricsSource(payload);
   syncSourceSelectorControls();
   if (scored) renderPipelineComparison(state.operational?.evaluation || {}, stable ? rows : []);
-  // Keep Overview + Evidence browser locked to the active source after dataset/run changes.
-  renderDatasetStatusSummary();
-  const projectOverview = activeProjectOverviewCounts();
-  if (projectOverview) {
-    setText('comboStatus', String(projectOverview.comboCount));
-    setText('comboNote', projectOverview.comboNote);
-    setText('retrievalStatus', String(projectOverview.evidenceCount));
-    setText('retrievalNote', projectOverview.evidenceNote);
-    syncStatusDialog();
-  }
-  if (payload?.source_type === 'uploaded_project') {
-    renderProjectEvidenceBrowser(payload);
-  }
 }
 
 function populateRecommendationProjects() {
@@ -1953,14 +1339,6 @@ function populateRecommendationGroundtruths() {
   }
   const current = select.value;
   const unique = new Map();
-  const linkedId = linkedGroundtruthId();
-  const linked = (state.sourceCatalog?.groundtruth || []).find(row => row.id === linkedId);
-  if (linkedId) {
-    unique.set(
-      linkedId,
-      linked?.label || (linkedId === 'groundtruth:none' ? 'None (evidence-only)' : linkedId),
-    );
-  }
   recommendationState.runs.forEach(run => unique.set(
     run.groundtruth_id || 'groundtruth:none',
     run.groundtruth_label || 'None (evidence-only)',
@@ -1969,52 +1347,20 @@ function populateRecommendationGroundtruths() {
     ? [...unique].map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join('')
     : '<option value="">No ground truth with completed runs</option>';
   if (Array.from(select.options || []).some(option => option.value === current)) select.value = current;
-  else if (linkedId && unique.has(linkedId)) select.value = linkedId;
 }
 
 function matchingRecommendationRuns() {
   const groundtruthId = $('recommendationGroundtruth')?.value;
-  return recommendationState.runs.filter(run => {
-    const runGt = run.groundtruth_id || 'groundtruth:none';
-    if (!groundtruthId || runGt === groundtruthId) return true;
-    // Tolerate legacy question-set identity against the locked project-owned GT.
-    if (
-      groundtruthId.startsWith('groundtruth:project:')
-      && String(runGt).startsWith('groundtruth:question-set:')
-      && run.project_id
-      && groundtruthId === `groundtruth:project:${run.project_id}`
-    ) {
-      return true;
-    }
-    return false;
-  });
+  return recommendationState.runs.filter(run => !groundtruthId || run.groundtruth_id === groundtruthId);
 }
 
 function populateRecommendationRuns() {
   const select = $('recommendationRun');
   if (!select) return;
-  const rank = stateName => {
-    const value = String(stateName || '').toLowerCase();
-    if (value === 'completed') return 0;
-    if (value === 'partial') return 1;
-    if (value === 'failed') return 2;
-    return 3;
-  };
-  const runs = matchingRecommendationRuns().slice().sort((a, b) => {
-    const byState = rank(a.state) - rank(b.state);
-    if (byState) return byState;
-    return String(b.completed_at || b.created_at || '').localeCompare(String(a.completed_at || a.created_at || ''));
-  });
-  const previous = select.value;
+  const runs = matchingRecommendationRuns();
   select.innerHTML = runs.length
-    ? runs.map(run => {
-      const stamp = run.timestamp_label || run.completed_at || run.created_at || run.run_id;
-      const comboNote = Number(run.combination_count || 0) ? ` · ${fmtInt(run.combination_count)} combo` : '';
-      return `<option value="${esc(run.run_id)}">${esc(`${stamp} · ${run.state || 'unknown'}${comboNote}`)}</option>`;
-    }).join('')
+    ? runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.timestamp_label || run.completed_at || run.created_at || run.run_id)}</option>`).join('')
     : '<option value="">No completed run for this dataset and ground truth</option>';
-  if (runs.some(run => run.run_id === previous)) select.value = previous;
-  else if (runs[0]) select.value = runs[0].run_id;
   syncSourceSelectorControls();
 }
 
@@ -2042,7 +1388,6 @@ function syncSourceSelectorControls() {
 }
 
 async function loadResultSources() {
-  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   try {
     const payload = await api('/api/result-sources', {signal});
@@ -2062,7 +1407,6 @@ async function loadResultSources() {
 }
 
 async function loadProjectRuns(projectId) {
-  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   try {
     const payload = await api(`/api/project-runs?project_id=${encodeURIComponent(projectId)}`, {signal});
@@ -2082,56 +1426,29 @@ async function loadProjectRuns(projectId) {
 }
 
 async function loadProjectRun(projectId, runId) {
-  syncLinkedGroundtruth();
   const {generation, signal} = beginRecommendationRequest();
   const path = `/api/project-run-results?project_id=${encodeURIComponent(projectId)}&run_id=${encodeURIComponent(runId)}`;
   try {
     const payload = await api(path, {signal});
     if (!requestIsCurrent(generation)) return;
-    const expectedDataset = `project:${projectId}`;
-    const selectedDataset = $('recommendationDataset')?.value || expectedDataset;
-    const selectedGroundtruth = $('recommendationGroundtruth')?.value || linkedGroundtruthId();
-    const payloadGt = payload?.groundtruth_id || '';
-    const datasetMatches = !selectedDataset
-      || selectedDataset === 'official'
-      || selectedDataset === expectedDataset
-      || selectedDataset === payload?.dataset_id;
-    const groundtruthMatches = !selectedGroundtruth
-      || payloadGt === selectedGroundtruth
-      || (
-        String(selectedGroundtruth).startsWith('groundtruth:project:')
-        && (
-          String(payloadGt).startsWith('groundtruth:question-set:')
-          || payloadGt === selectedGroundtruth
-        )
-        && selectedGroundtruth === `groundtruth:project:${projectId}`
-      );
+    const selectedDataset = $('recommendationDataset')?.value;
+    const selectedGroundtruth = $('recommendationGroundtruth')?.value;
     if (
       payload?.source_type !== 'uploaded_project'
       || payload?.project_id !== projectId
       || payload?.run_id !== runId
-      || !datasetMatches
-      || !groundtruthMatches
+      || (selectedDataset && payload?.dataset_id !== selectedDataset)
+      || (selectedGroundtruth && payload?.groundtruth_id !== selectedGroundtruth)
     ) {
       throw new Error('Project run response identity mismatch');
     }
-    // Keep selectors aligned with the admitted project source before paint.
-    if ($('recommendationDataset')) $('recommendationDataset').value = expectedDataset;
-    if ($('recommendationSource')) $('recommendationSource').value = 'uploaded_project';
-    if ($('recommendationProject')) $('recommendationProject').value = projectId;
-    if ($('recommendationRun')) $('recommendationRun').value = runId;
-    if (selectedGroundtruth && $('recommendationGroundtruth')) {
-      setSourceMirrorValue('recommendationGroundtruth', selectedGroundtruth)
-        || ($('recommendationGroundtruth').value = payloadGt || selectedGroundtruth);
-    }
     const normalizedPayload = sourceStateModule()?.normalizeResultPayload(payload) || payload;
-    recommendationState.sourceType = 'uploaded_project';
     renderCanonicalResultPayload(normalizedPayload);
     syncSourceSelectorControls();
   } catch (error) {
     if (error?.name === 'AbortError' || !requestIsCurrent(generation)) return;
     recommendationState.active = null;
-    clearGlobalResultViews('Selected project run is unavailable');
+    clearRecommendationView('Selected project run is unavailable');
   }
 }
 
@@ -2330,20 +1647,7 @@ function renderDatasetStatusSummary() {
     const validation = String(dataset.validation || (dataset.ready ? 'ready' : 'not ready')).replaceAll('_', ' ');
     setText('pdfStatus', `${fmtInt(readyCount)}/${fmtInt(documentCount)}`);
     setText('pdfNote', `${dataset.label || 'Selected project'} · ${validation}`);
-    const active = recommendationState.active;
-    if (
-      active?.source_type === 'uploaded_project'
-      && active.scoring_mode === 'retrieval_labels'
-      && recommendationResultRows(active).some(row => String(row.status || '').toLowerCase() === 'completed')
-    ) {
-      const labelled = recommendationResultRows(active).reduce((max, row) => {
-        const value = Number(row.labelled_queries || row.evaluated_queries || row.query_count || 0);
-        return Number.isFinite(value) ? Math.max(max, value) : max;
-      }, 0);
-      setText('groundTruthStatus', labelled ? `${fmtInt(labelled)} queries evaluated` : 'Project run evaluated');
-    } else {
-      setText('groundTruthStatus', groundtruthId === 'groundtruth:none' ? 'Evidence-only' : 'Selected, awaiting admitted run');
-    }
+    setText('groundTruthStatus', groundtruthId === 'groundtruth:none' ? 'Evidence-only' : 'Selected, not evaluated');
   } else {
     const repo = op.document_repository || {};
     const evaluation = op.evaluation || {};
@@ -2374,34 +1678,22 @@ function renderOperational() {
   const officialPayload = recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations
     ? officialRecommendationPayload('official')
     : null;
-  const projectPayload = recommendationState.sourceType === 'uploaded_project'
-    && recommendationState.active?.source_type === 'uploaded_project'
-    ? recommendationState.active
-    : null;
 
   $('modeLabel').textContent = 'Live artifacts';
   $('latestRun').textContent = ingestion.latest_run_id || snapshot?.ingestion?.latest_run_id || '—';
   $('snapshotAt').textContent = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : '—';
   renderDatasetStatusSummary();
-  const projectOverview = activeProjectOverviewCounts();
-  if (projectOverview) {
-    $('comboStatus').textContent = String(projectOverview.comboCount);
-    $('comboNote').textContent = projectOverview.comboNote;
-    $('retrievalStatus').textContent = String(projectOverview.evidenceCount);
-    $('retrievalNote').textContent = projectOverview.evidenceNote;
-  } else {
-    $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
-    $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
-    const evidenceRowsLoaded = retrieval.length + rerank.length;
-    $('retrievalStatus').textContent = String(evidenceRowsLoaded);
-    $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
-  }
+  $('comboStatus').textContent = String(op.known_matrix_count || ingestion.combo_count || latest.length || 0);
+  $('comboNote').textContent = op.options_formula || 'chunkers × embeddings × vector DBs × retrieval × rerankers';
+  const evidenceRowsLoaded = retrieval.length + rerank.length;
+  $('retrievalStatus').textContent = String(evidenceRowsLoaded);
+  $('retrievalNote').textContent = `${fmtInt(evidenceRowsLoaded)} evidence display rows loaded. Raw artifacts on disk: ${fmtInt(op.retrieval_smoke_total || 0)} retrieval + ${fmtInt(op.reranker_smoke_total || 0)} reranker. Benchmark-detail rows loaded: ${fmtInt(benchmarkEvidence.length)}. Not total document chunks.`;
   setText('embeddingStatus', embeddings.length ? embeddings.join(' + ') : '—');
   setText('dbStatus', stores.length ? stores.join(' + ') : '—');
   syncStatusDialog();
   $('ingestionHint').textContent = `${latest.length} latest successful component rows`;
   $('rerankHint').textContent = `${rerank.length} artifacts`;
-  $('artifactHint').textContent = `${(state.files || []).length} files`;
+  $('artifactHint').textContent = `${state.files.length} files`;
   $('healthHint').textContent = `${health.filter(h => h.ok).length}/${health.length || 0} healthy`;
   const pdfAudit = op.pdf_audit || {};
   $('pdfAuditHint') && ($('pdfAuditHint').textContent = pdfAudit.total ? `${pdfAudit.ok_count || 0}/${pdfAudit.total} ready · review hidden from KPI` : 'No audit file yet');
@@ -2409,9 +1701,7 @@ function renderOperational() {
   renderCoverage(rows);
   renderServices(health);
   renderRetrieval(retrieval, rerank);
-  // Never let official matrix paint overwrite an admitted project source.
-  if (projectPayload) renderCanonicalResultPayload(projectPayload);
-  else if (officialPayload) renderCanonicalResultPayload(officialPayload);
+  if (officialPayload) renderCanonicalResultPayload(officialPayload);
   renderHallucination(op.hallucination || {});
   renderNvidiaRag(op.nvidia_rag || {});
   renderDocumentRepository(op.document_repository || {});
@@ -2482,29 +1772,6 @@ function fillSourceSelect(id, rows, type, preferredId='') {
   else el.value = [...validIds][0] || '';
 }
 
-function selectedDatasetRecord() {
-  const id = $('globalDataset')?.value || 'dataset:wns-default';
-  return (state.sourceCatalog?.datasets || []).find(row => row.id === id) || null;
-}
-
-function linkedGroundtruthId(dataset = selectedDatasetRecord()) {
-  return dataset?.linked_groundtruth_id || 'groundtruth:none';
-}
-
-function syncLinkedGroundtruth() {
-  const linkedId = linkedGroundtruthId();
-  ['globalGroundtruth', 'runGroundtruth', 'nvidiaGroundtruth'].forEach(id => {
-    const select = $(id);
-    if (!select) return;
-    Array.from(select.options || []).forEach(option => {
-      option.disabled = option.value !== linkedId;
-    });
-    select.value = linkedId;
-    select.disabled = true;
-  });
-  return linkedId;
-}
-
 function syncDatasetChunkers() {
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
@@ -2521,7 +1788,7 @@ function syncRunMode() {
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const dataset = (state.sourceCatalog?.datasets || []).find(row => row.id === datasetId);
   const defaultDataset = !dataset || dataset.kind === 'default';
-  if ($('runQueryField')) $('runQueryField').hidden = false;
+  if ($('runQueryField')) $('runQueryField').hidden = !evidenceOnly;
   if ($('runModeHint')) {
     $('runModeHint').textContent = !defaultDataset
       ? evidenceOnly
@@ -2597,16 +1864,15 @@ function renderRunSourceContext(datasetLabel, groundtruthLabel) {
 }
 
 async function applyGlobalSourceContext({syncResults = true} = {}) {
-  const dataset = selectedDatasetRecord();
-  const datasetId = dataset?.id || 'dataset:wns-default';
-  const groundtruthId = syncLinkedGroundtruth();
+  const datasetId = $('globalDataset')?.value || 'dataset:wns-default';
+  const groundtruthId = $('globalGroundtruth')?.value || 'groundtruth:none';
   ['runDataset', 'nvidiaDataset'].forEach(id => setSourceMirrorValue(id, datasetId));
+  ['runGroundtruth', 'nvidiaGroundtruth'].forEach(id => setSourceMirrorValue(id, groundtruthId));
   syncDatasetChunkers();
   syncRunMode();
 
-  const groundtruth = (state.sourceCatalog?.groundtruth || []).find(row => row.id === groundtruthId);
-  const datasetLabel = dataset?.label || datasetId;
-  const groundtruthLabel = groundtruth?.label || (groundtruthId === 'groundtruth:none' ? 'Evidence-only' : groundtruthId);
+  const datasetLabel = $('globalDataset')?.selectedOptions?.[0]?.textContent || datasetId;
+  const groundtruthLabel = $('globalGroundtruth')?.selectedOptions?.[0]?.textContent || groundtruthId;
   setText('globalSourceContext', `${datasetLabel} · ${groundtruthLabel}`);
   renderRunSourceContext(datasetLabel, groundtruthLabel);
   renderDatasetStatusSummary();
@@ -2615,43 +1881,29 @@ async function applyGlobalSourceContext({syncResults = true} = {}) {
   if (datasetId === 'dataset:wns-default') {
     if (groundtruthId !== globalSourceContextState.officialGroundtruthId) {
       clearGlobalResultViews('No completed official result for the selected global ground truth');
-      renderOperational();
       return;
     }
     setSourceMirrorValue('recommendationDataset', 'official');
     setSourceMirrorValue('recommendationGroundtruth', 'groundtruth:official');
     await selectRecommendationDataset('official');
-    renderOperational();
     return;
   }
 
   await selectRecommendationDataset(datasetId);
   if (recommendationState.sourceType !== 'uploaded_project') return;
-  setSourceMirrorValue('recommendationDataset', datasetId);
-  populateRecommendationGroundtruths();
   if (!setSourceMirrorValue('recommendationGroundtruth', groundtruthId)) {
-    // Ensure the locked project GT option exists even before runs finish loading.
-    const select = $('recommendationGroundtruth');
-    if (select && groundtruthId) {
-      const label = (state.sourceCatalog?.groundtruth || []).find(row => row.id === groundtruthId)?.label || groundtruthId;
-      select.insertAdjacentHTML('beforeend', `<option value="${esc(groundtruthId)}">${esc(label)}</option>`);
-      select.value = groundtruthId;
-    }
-  }
-  if (($('recommendationGroundtruth')?.value || '') !== groundtruthId) {
     clearGlobalResultViews('No completed run for the selected dataset and ground truth');
-    renderOperational();
     return;
   }
   await selectRecommendationGroundtruth(groundtruthId);
-  renderOperational();
 }
 
 function renderSourceSelectors(catalog) {
   const datasets = catalog?.datasets || [];
   const groundtruth = catalog?.groundtruth || [];
-  const defaultDataset = datasets.find(row => row.id === 'dataset:wns-default');
-  const preferredGroundtruth = linkedGroundtruthId(defaultDataset);
+  const preferredGroundtruth = groundtruth.find(row => row.valid && /groundtruth_500/i.test(row.id))?.id
+    || groundtruth.find(row => row.valid && row.id !== 'groundtruth:none')?.id
+    || 'groundtruth:none';
   globalSourceContextState.officialGroundtruthId = preferredGroundtruth;
   fillSourceSelect('globalDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('globalGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
@@ -2659,10 +1911,6 @@ function renderSourceSelectors(catalog) {
   fillSourceSelect('nvidiaDataset', datasets, 'dataset', 'dataset:wns-default');
   fillSourceSelect('runGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
   fillSourceSelect('nvidiaGroundtruth', groundtruth, 'groundtruth', preferredGroundtruth);
-  ['runDataset', 'nvidiaDataset'].forEach(id => {
-    if ($(id)) $(id).disabled = true;
-  });
-  syncLinkedGroundtruth();
   applyGlobalSourceContext({syncResults: false}).catch(console.error);
 }
 
@@ -2692,54 +1940,30 @@ async function loadOptions() {
   fillRunMultiSelect('runSheet', benchmarkOptions.chunkers || [], 'All chunkers');
   fillRunMultiSelect('runEmbedding', benchmarkOptions.embeddings || [], 'All embeddings');
   fillRunMultiSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
-  const rerankers = [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName))];
-  fillRunMultiSelect('runRerankerMain', [...rerankers, 'none'], 'All rerankers');
+  const retrieval = $('runRetrievalMethod');
+  if (retrieval) {
+    const methods = [...(benchmarkOptions.retrieval_methods || []), ...(candidateLane().retrieval_methods || [])];
+    retrieval.innerHTML = methods.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+    retrieval.value = methods.includes(retrieval.value) ? retrieval.value : 'Cosine Similarity';
+  }
+  syncRerankerOptionsForMethod();
   updateSelectedMatrixCount();
 }
 
-function activeProjectOverviewCounts() {
-  const datasetId = $('globalDataset')?.value || $('runDataset')?.value || '';
-  if (!String(datasetId).startsWith('project:')) return null;
-  const active = recommendationState.active;
-  if (active?.source_type === 'uploaded_project' && (!active.dataset_id || active.dataset_id === datasetId)) {
-    const rows = recommendationResultRows(active);
-    const comboCount = rows.length || Number(active.combination_count || 0) || 0;
-    const evidenceCount = rows.reduce((sum, row) => {
-      const value = Number(row?.evidence_count);
-      return sum + (Number.isFinite(value) ? value : 0);
-    }, 0) || Number(active.evidence_count || 0) || 0;
-    const failed = rows.filter(row => String(row?.status || '').toLowerCase() === 'failed').length
-      || Number(active.failed || 0);
-    const succeeded = rows.filter(row => String(row?.status || '').toLowerCase() === 'completed').length
-      || Number(active.succeeded || 0);
-    return {
-      comboCount,
-      comboNote: `Project run ${active.run_id || ''} · ${fmtInt(succeeded)} completed · ${fmtInt(failed)} failed`.trim(),
-      evidenceCount,
-      evidenceNote: `${fmtInt(evidenceCount)} evidence rows from the selected project run. Official smoke totals are hidden while a project dataset is active.`,
-    };
+function syncRerankerOptionsForMethod() {
+  const candidate = isCandidateRetrievalMethod();
+  if (candidate) {
+    const lane = candidateLane();
+    fillRunMultiSelect('runEmbedding', lane.embeddings || [], 'All candidate embeddings');
+    fillRunMultiSelect('runStore', lane.vector_stores || ['FAISS'], 'Candidate vector store');
+  } else {
+    fillRunMultiSelect('runEmbedding', benchmarkOptions.embeddings || [], 'All embeddings');
+    fillRunMultiSelect('runStore', benchmarkOptions.vector_stores || [], 'All DBs');
   }
-  const runs = (Array.isArray(recommendationState.runs) ? recommendationState.runs : [])
-    .filter(run => !run.dataset_id || run.dataset_id === datasetId);
-  if (runs.length) {
-    const comboCount = runs.reduce((sum, run) => sum + Number(run?.combination_count || 0), 0);
-    const evidenceCount = runs.reduce((sum, run) => sum + Number(run?.evidence_count || 0), 0);
-    const completed = runs.filter(run => String(run.state || '').toLowerCase() === 'completed').length;
-    return {
-      comboCount,
-      comboNote: `${fmtInt(runs.length)} project run(s) · ${fmtInt(completed)} completed · ${fmtInt(comboCount)} combinations`,
-      evidenceCount,
-      evidenceNote: evidenceCount
-        ? `${fmtInt(evidenceCount)} evidence rows across discovered project runs. Open Metrics/Recommendations for the selected run.`
-        : 'No admitted project-run evidence selected yet. Complete a run or choose a completed project result source.',
-    };
-  }
-  return {
-    comboCount: 0,
-    comboNote: 'No project matrix combinations recorded yet',
-    evidenceCount: 0,
-    evidenceNote: 'Project dataset selected — official evidence/smoke counters are hidden until a project run is admitted.',
-  };
+  const values = candidate
+    ? (candidateLane().rerankers || [])
+    : [...new Set((benchmarkOptions.rerankers || []).map(canonicalRerankerName)), 'none'];
+  fillRunMultiSelect('runRerankerMain', [...new Set(values)], 'All rerankers');
 }
 
 function isProjectDatasetSelected() {
@@ -2765,7 +1989,6 @@ function projectSelectedRerankers() {
 }
 
 function projectMatrixPayload(confirmationToken = null) {
-  syncLinkedGroundtruth();
   const datasetId = $('runDataset')?.value || 'dataset:wns-default';
   const groundtruthId = $('runGroundtruth')?.value || 'groundtruth:none';
   const evidenceOnly = groundtruthId === 'groundtruth:none';
@@ -2794,13 +2017,21 @@ async function postProjectMatrix(path, payload) {
 }
 
 function selectedParams() {
-  syncLinkedGroundtruth();
   const p = new URLSearchParams();
-  expandedSelection('runSheet', activeDatasetSheets()).forEach(v => p.append('sheet', v));
-  selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
-  selectedValues('runStore').forEach(v => p.append('store', v));
+  const candidate = isCandidateRetrievalMethod();
+  const selectedChunkers = candidate ? selectedValues('runSheet') : expandedSelection('runSheet', activeDatasetSheets());
+  selectedChunkers.forEach(v => p.append('sheet', v));
+  if (candidate) {
+    selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
+    p.append('store', 'FAISS');
+  } else {
+    selectedValues('runEmbedding').forEach(v => p.append('embedding', v));
+    selectedValues('runStore').forEach(v => p.append('store', v));
+  }
   selectedValues('runRerankerMain').forEach(v => p.append('reranker', v));
-  p.set('query_limit', '0');
+  p.set('retrieval_method', selectedRetrievalMethod());
+  if (candidate) p.set('candidate_lane', '1');
+  p.set('query_limit', $('runQueryLimit')?.value || '0');
   p.set('retrieval_top_k', $('runRetrievalTopK')?.value || '10');
   p.set('reranked_output_k', $('runRerankedOutputK')?.value || '5');
   p.set('dataset_id', $('runDataset')?.value || 'dataset:wns-default');
@@ -2815,7 +2046,6 @@ function selectedParams() {
 }
 
 async function runNvidiaAction(kind) {
-  syncLinkedGroundtruth();
   const endpoints = {
     health: '/api/run/nvidia-health',
     smoke: '/api/run/nvidia-smoke',
@@ -2870,7 +2100,7 @@ function renderPreflight(payload) {
   if (diagnostics) diagnostics.open = false;
   $('runResultCards').innerHTML = `<article class="run-result-card ${ok ? 'ok' : 'warn'}"><span>Requirements</span><strong>${ok ? 'Ready' : 'Blocked'}</strong><small>${missing.length ? `${missing.length} item(s) needed` : 'All required inputs found'}</small></article>
     <article class="run-result-card"><span>Pipeline size</span><strong>${esc(payload.combo_count || 0)}</strong><small>chunker · embedding · DB combinations</small></article>
-    <article class="run-result-card"><span>Mode</span><strong>${evidenceOnly ? 'Evidence-only' : 'Evaluated'}</strong><small>query limit fixed at 0 (all GT queries)</small></article>`;
+    <article class="run-result-card"><span>Mode</span><strong>${evidenceOnly ? 'Evidence-only' : 'Evaluated'}</strong><small>${payload.query_limit ? `${payload.query_limit} query limit` : 'all queries'}</small></article>`;
   const rows = [
     ...missing.map(x => ({type:'Needed', item:x})),
     ...warnings.map(x => ({type:'Warning', item:x})),
@@ -2899,8 +2129,11 @@ async function runProjectMatrixPreflight() {
 async function runPreflight() {
   if (isProjectDatasetSelected()) return runProjectMatrixPreflight();
   const p = selectedParams();
+  const endpoint = isCandidateRetrievalMethod()
+    ? '/api/run/preflight-candidate'
+    : '/api/run/preflight-complete-pipeline';
   $('runStatus').textContent = 'Checking';
-  const payload = await api(`/api/run/preflight-complete-pipeline?${p.toString()}`, {method:'POST'});
+  const payload = await api(`${endpoint}?${p.toString()}`, {method:'POST'});
   renderPreflight(payload);
   return payload;
 }
@@ -2911,62 +2144,38 @@ function parseLiveOutputRows(output) {
   return stageRows.map((line, i) => ({i:i+1, line}));
 }
 
-async function pollRunJob(jobId) {
+async function pollRunJob(jobId, {candidate = false} = {}) {
   const payload = await api(`/api/run/status?job_id=${encodeURIComponent(jobId)}`);
   const output = payload.output || '';
   const running = !!payload.running;
-  const status = semanticRunStatus({...payload, running, output});
-  $('runStatus').textContent = running ? 'Running' : (status.ok === true ? 'Done' : 'Check output');
+  $('runStatus').textContent = running ? 'Running' : (payload.exit_code === 0 ? 'Done' : 'Check output');
   $('runOutput').textContent = output;
-  const cardClass = running ? '' : (status.ok === true ? 'ok' : 'warn');
-  $('runResultCards').innerHTML = `<article class="run-result-card ${cardClass}"><span>Status</span><strong>${esc(status.label)}</strong><small>job ${esc(jobId)} · ${esc(status.detail)}</small></article>
+  $('runResultCards').innerHTML = `<article class="run-result-card ${payload.exit_code === 0 ? 'ok' : running ? '' : 'warn'}"><span>Status</span><strong>${running ? 'Running' : payload.exit_code === 0 ? 'Passed' : 'Needs attention'}</strong><small>job ${esc(jobId)}</small></article>
     <article class="run-result-card"><span>Live log</span><strong>${output.split('\n').filter(Boolean).length}</strong><small>${esc(payload.log_path || '')}</small></article>
-    <article class="run-result-card"><span>Result view</span><strong>Quality + evidence</strong><small>Tables refresh when stages finish</small></article>`;
+    <article class="run-result-card"><span>Result view</span><strong>${candidate ? 'Candidate artifacts' : 'Quality + evidence'}</strong><small>${candidate ? 'Isolated from official dashboard metrics' : 'Tables refresh when stages finish'}</small></article>`;
   table($('runResultTable'), parseLiveOutputRows(output), [
     {key:'i', label:'#'},
     {key:'line', label:'Live stage/output', render:r=>esc(r.line).slice(0, 260)},
   ]);
   if (running) {
-    setTimeout(() => pollRunJob(jobId).catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }), 1500);
+    setTimeout(() => pollRunJob(jobId, {candidate}).catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }), 1500);
   } else {
     await refresh();
-    await loadResultSources();
-    if ($('globalDataset')?.value) await applyGlobalSourceContext();
   }
 }
 
-
-async function runTypedQuerySmoke() {
-  const queries = typedRunQueries();
-  if (!queries.length) throw new Error('Type at least one query for evidence smoke.');
-  if (!isProjectDatasetSelected()) {
-    return runAction('smoke');
-  }
-  const payload = projectMatrixPayload();
-  payload.groundtruth_id = 'groundtruth:none';
-  payload.typed_queries = queries;
-  $('runStatus').textContent = 'Checking typed evidence smoke';
-  const preflight = await postProjectMatrix('/api/run/preflight-project-matrix', payload);
-  renderPreflight({
-    ...preflight,
-    combo_count: preflight.combination_count || 0,
-    warnings: preflight.warning ? [preflight.warning] : [],
-    groundtruth_id: 'groundtruth:none',
-    query_limit: 0,
-  });
-  if (!preflight.ok) return;
-  $('runStatus').textContent = 'Starting typed evidence smoke';
-  const launched = await postProjectMatrix('/api/run/project-matrix', {
-    ...payload,
-    large_matrix_confirmation: preflight.confirmation_token || null,
-  });
-  const jobId = launched.job?.job_id;
-  if (!jobId) throw new Error('Typed evidence smoke did not return a job ID.');
-  $('runOutput').textContent = `Started typed evidence smoke ${launched.run_id}\njob ${jobId}`;
-  await pollRunJob(jobId);
+async function runCandidateBenchmark() {
+  const p = selectedParams();
+  $('runStatus').textContent = 'Starting candidate lane';
+  $('runOutput').textContent = 'Candidate lane: running selected retrieval/reranker combination';
+  const payload = await api(`/api/run/selected?${p.toString()}`, {method:'POST'});
+  if (!payload.job_id) throw new Error('Candidate benchmark launch did not return a job ID.');
+  $('runOutput').textContent = `Candidate lane job ${payload.job_id}\n${payload.output || ''}`;
+  await pollRunJob(payload.job_id, {candidate: true});
 }
 
 async function runCompletePipeline() {
+  const candidate = isCandidateRetrievalMethod();
   const preflight = await runPreflight();
   if (!preflight.ok) return;
   const comboCount = preflight.combination_count || preflight.combo_count || 0;
@@ -2977,6 +2186,7 @@ async function runCompletePipeline() {
       return;
     }
   }
+  if (candidate) return runCandidateBenchmark();
   if (isProjectDatasetSelected()) {
     $('runStatus').textContent = 'Starting';
     const payload = projectMatrixPayload(preflight.confirmation_token || null);
@@ -2992,6 +2202,180 @@ async function runCompletePipeline() {
   const payload = await api(`/api/run/complete-pipeline?${p.toString()}`, {method:'POST'});
   $('runOutput').textContent = `Started job ${payload.job_id}\n${payload.output || ''}`;
   await pollRunJob(payload.job_id);
+}
+
+function candidateOperatorHeaders() {
+  const token = $('portfolioOperatorToken')?.value || '';
+  if (!token.trim()) throw new Error('Operator token required for candidate mutations.');
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+async function candidateMutation(path, payload) {
+  const response = await fetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: candidateOperatorHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result?.error?.message || result?.message || 'Candidate action was blocked.');
+  }
+  return result;
+}
+
+function candidateStateLabel(value) {
+  const normalized = String(value || 'unknown').replaceAll('_', ' ');
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function selectedPortfolioBatch() {
+  const portfolio = candidateOperationsState.portfolio;
+  if (!portfolio) return null;
+  return (portfolio.batches || []).find(batch => batch.batch_id === portfolio.selected_batch_id) || null;
+}
+
+function renderPortfolioBatches(portfolio) {
+  const target = $('portfolioBatchList');
+  if (!target) return;
+  const batches = portfolio?.batches || [];
+  if (!batches.length) {
+    target.innerHTML = '<p class="candidate-empty">No immutable portfolio batches are available.</p>';
+    return;
+  }
+  const controlsEnabled = candidateOperationsState.adapters?.control_enabled === true;
+  target.innerHTML = batches.map((batch, index) => {
+    const selected = batch.selected === true;
+    const terminal = batch.state === 'completed';
+    const services = (batch.required_service_ids || []).join(', ') || 'No managed services';
+    return `<article class="portfolio-batch-row state-${esc(batch.state)} ${selected ? 'selected' : ''}" data-batch-id="${esc(batch.batch_id)}">
+      <div class="batch-sequence"><span>${String(index + 1).padStart(2, '0')}</span><small>of ${batches.length}</small></div>
+      <div class="batch-identity"><strong>${esc(batch.embedding)}</strong><span>Reranker group ${esc(batch.reranker_group)} · ${fmtInt(batch.combination_count)} combinations</span><small title="${esc(services)}">Requires: ${esc(services)}</small></div>
+      <span class="batch-state">${selected && batch.state === 'not_run' ? 'Selected next' : esc(candidateStateLabel(batch.state))}</span>
+      <button type="button" data-portfolio-run="${esc(batch.batch_id)}" ${!controlsEnabled || terminal || candidateOperationsState.busy ? 'disabled' : ''}>${batch.state === 'failed' ? 'Retry batch' : 'Run batch'}</button>
+    </article>`;
+  }).join('');
+}
+
+function adapterActionForSlot(slot) {
+  if (slot.ok && slot.stoppable) return {action: 'stop', label: 'Stop'};
+  if (slot.status === 'unhealthy' && slot.startable) return {action: 'retry', label: 'Retry'};
+  if (!slot.ok && slot.startable) return {action: 'start', label: 'Start'};
+  return null;
+}
+
+function renderAdapterSlots(payload) {
+  const target = $('adapterSlotList');
+  if (!target) return;
+  const slots = payload?.slots || [];
+  setText('adapterSlotCount', fmtInt(payload?.slot_count));
+  setText('adapterControlMode', payload?.control_enabled ? 'Control enabled' : 'Read only');
+  if (!slots.length) {
+    target.innerHTML = '<p class="candidate-empty">Adapter status is unavailable.</p>';
+    return;
+  }
+  target.innerHTML = slots.map(slot => {
+    const action = adapterActionForSlot(slot);
+    const disabled = !payload.control_enabled || candidateOperationsState.busy;
+    return `<article class="adapter-slot-row ${slot.ok ? 'healthy' : ''}" data-service-id="${esc(slot.service_id)}">
+      <div class="adapter-identity"><strong>${esc(slot.label)}</strong><span>${esc(slot.role)} · ${esc(slot.manage_mode)}</span></div>
+      <code>${esc(slot.port)}</code>
+      <div class="adapter-status"><span class="adapter-dot" aria-hidden="true"></span><strong>${esc(candidateStateLabel(slot.status))}</strong><small>${esc(slot.message || '')}</small></div>
+      ${action ? `<button type="button" data-adapter-action="${esc(action.action)}" data-service-id="${esc(slot.service_id)}" ${disabled ? 'disabled' : ''}>${esc(action.label)}</button>` : '<span class="adapter-managed">Server managed</span>'}
+    </article>`;
+  }).join('');
+}
+
+function renderCandidateOperations() {
+  const portfolio = candidateOperationsState.portfolio;
+  const adapters = candidateOperationsState.adapters;
+  if (portfolio) {
+    setText('portfolioConfiguredCount', fmtInt(portfolio.configured_combination_count));
+    setText('portfolioExcludedCount', fmtInt(portfolio.excluded_combination_count));
+    setText('portfolioBatchCount', fmtInt(portfolio.batch_count));
+    setText('portfolioCompletedCount', fmtInt(portfolio.combination_state_counts?.completed));
+    setText('portfolioPromotionStatus', `Promotion: ${String(portfolio.promotion_status || 'not_accepted').replaceAll('_', ' ')}`);
+    setText('portfolioIdentity', `${portfolio.portfolio_id} · max ${portfolio.max_combinations_per_batch} per batch`);
+    renderPortfolioBatches(portfolio);
+  }
+  if (adapters) renderAdapterSlots(adapters);
+  const selected = selectedPortfolioBatch();
+  const mutable = adapters?.control_enabled === true && selected && !candidateOperationsState.busy;
+  if ($('portfolioStartRequired')) $('portfolioStartRequired').disabled = !mutable;
+  if ($('portfolioRunNext')) $('portfolioRunNext').disabled = !mutable;
+}
+
+async function loadCandidateOperations() {
+  setText('candidateOperationsStatus', 'Refreshing candidate state');
+  const [adapters, portfolio] = await Promise.all([
+    api('/api/adapters'),
+    api('/api/portfolio'),
+  ]);
+  candidateOperationsState.adapters = adapters;
+  candidateOperationsState.portfolio = portfolio;
+  renderCandidateOperations();
+  setText('candidateOperationsStatus', `Live · ${fmtInt(adapters.slot_count)} slots · ${fmtInt(portfolio.batch_count)} batches`);
+}
+
+async function loadPortfolioCombinationDetails() {
+  if (!candidateOperationsState.details) {
+    setText('portfolioCombinationHint', 'Loading 4,320 portfolio rows…');
+    candidateOperationsState.details = await api('/api/portfolio/batches');
+  }
+  renderPortfolioCombinationRows();
+}
+
+function renderPortfolioCombinationRows() {
+  const target = $('portfolioCombinationRows');
+  const details = candidateOperationsState.details;
+  if (!target || !details) return;
+  const query = String($('portfolioCombinationFilter')?.value || '').trim().toLowerCase();
+  const rows = [
+    ...(details.configured_combinations || []),
+    ...(details.excluded_combinations || []),
+  ];
+  const visible = query ? rows.filter(row => JSON.stringify(row).toLowerCase().includes(query)) : rows;
+  setText('portfolioCombinationHint', `${fmtInt(visible.length)} of ${fmtInt(rows.length)} rows`);
+  target.innerHTML = visible.map(row => `<article class="combination-row state-${esc(row.execution_state || row.state)}">
+    <code>${esc(row.combination_id)}</code>
+    <strong>${esc(row.chunker)} · ${esc(row.embedding)}</strong>
+    <span>${esc(row.vector_store)} / ${esc(row.index_type)} · ${esc(row.retrieval_method)} · ${esc(row.reranker)}</span>
+    <small>${esc(candidateStateLabel(row.execution_state || row.state))}${row.reason_code ? ` · ${esc(row.reason_code)}` : ''}</small>
+  </article>`).join('') || '<p class="candidate-empty">No combinations match this filter.</p>';
+}
+
+async function runCandidateOperation(action) {
+  if (candidateOperationsState.busy) return;
+  candidateOperationsState.busy = true;
+  renderCandidateOperations();
+  setText('candidateActionMessage', 'Submitting candidate operation…');
+  try {
+    const result = await action();
+    setText('candidateActionMessage', result?.message || `Candidate operation accepted${result?.job_id ? ` · job ${result.job_id}` : ''}.`);
+    await loadCandidateOperations();
+  } catch (error) {
+    setText('candidateActionMessage', error?.message || String(error));
+  } finally {
+    candidateOperationsState.busy = false;
+    renderCandidateOperations();
+  }
+}
+
+async function startRequiredAdapters() {
+  const batchId = selectedPortfolioBatch()?.batch_id;
+  if (!batchId) throw new Error('No incomplete batch is selected.');
+  return candidateMutation('/api/adapters/start-required', {batch_id: batchId});
+}
+
+async function runPortfolioBatch(batchId) {
+  return candidateMutation('/api/portfolio/run-batch', {batch_id: batchId});
+}
+
+async function runNextPortfolioBatch() {
+  return candidateMutation('/api/portfolio/run-next', {});
 }
 
 async function runAction(kind) {
@@ -3041,22 +2425,24 @@ async function runAction(kind) {
   await refresh();
 }
 
-['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => {
-  if (recommendationState.active?.source_type === 'uploaded_project') {
-    renderProjectEvidenceBrowser(recommendationState.active);
-    return;
-  }
-  renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows());
-}));
+['retrievalChunkerFilter','retrievalDbFilter','retrievalEmbeddingFilter','retrievalRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => renderRetrieval(state.operational?.retrieval_smokes || [], operationalRerankRows())));
 ['qualityComboFilter','qualityChunkerFilter','qualityEmbeddingFilter','qualityDbFilter','qualityRerankerFilter'].forEach(id => $(id)?.addEventListener('input', () => {
   const payload = recommendationState.active || officialRecommendationPayload('official');
   renderMetricsSource(payload);
 }));
-['metricXAxis','metricYAxis','metricColorBy','metricBubbleBy','metricQuickView','heatmapMetric','heatmapEmbedding','heatmapReranker'].forEach(id => {
-  $(id)?.addEventListener('input', () => renderRecommendationAnalytics(recommendationState.active || {}));
-});
 ['runSheet','runEmbedding','runStore','runRerankerMain'].forEach(id => $(id)?.addEventListener('input', updateSelectedMatrixCount));
+$('runRetrievalMethod')?.addEventListener('input', () => {
+  syncRerankerOptionsForMethod();
+  updateSelectedMatrixCount();
+});
 $('globalDataset')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
+$('globalGroundtruth')?.addEventListener('change', () => applyGlobalSourceContext().catch(console.error));
+$('runDataset')?.addEventListener('input', () => {
+  syncDatasetChunkers();
+  syncRunMode();
+});
+$('runGroundtruth')?.addEventListener('input', syncRunMode);
+$('nvidiaGroundtruth')?.addEventListener('input', syncRunMode);
 $('uploadType')?.addEventListener('input', () => {
   const groundtruth = $('uploadType').value === 'groundtruth';
   if ($('datasetFile')) $('datasetFile').accept = groundtruth ? '.csv,.xlsx' : '.pdf,.zip,.csv,.txt,.md';
@@ -3064,12 +2450,22 @@ $('uploadType')?.addEventListener('input', () => {
 });
 $('nvidiaBenchmarkMode')?.addEventListener('input', () => { syncNvidiaBenchmarkMode(); renderNvidiaRag(state.operational?.nvidia_rag || {}); });
 $('refreshBtn').addEventListener('click', () => refresh().catch(e => { $('statusPill').textContent = 'Error'; console.error(e); }));
+$('candidateOperationsRefresh')?.addEventListener('click', () => loadCandidateOperations().catch(error => {
+  setText('candidateOperationsStatus', 'Candidate state unavailable');
+  setText('candidateActionMessage', error?.message || String(error));
+}));
+$('portfolioStartRequired')?.addEventListener('click', () => runCandidateOperation(startRequiredAdapters));
+$('portfolioRunNext')?.addEventListener('click', () => runCandidateOperation(runNextPortfolioBatch));
+$('portfolioCombinationDetails')?.addEventListener('toggle', event => {
+  if (event.target.open) loadPortfolioCombinationDetails().catch(error => setText('portfolioCombinationHint', error?.message || String(error)));
+});
+$('portfolioCombinationFilter')?.addEventListener('input', renderPortfolioCombinationRows);
 $('runPreflightBtn')?.addEventListener('click', () => runPreflight().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runCompletePipelineBtn')?.addEventListener('click', () => runCompletePipeline().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runQueryUploadBtn')?.addEventListener('click', () => uploadRunQueries().catch(e => { if ($('runQueryUploadStatus')) $('runQueryUploadStatus').textContent = String(e); }));
 $('runParseMineruBtn')?.addEventListener('click', () => runAction('parseMineru').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runIngestBtn')?.addEventListener('click', () => runAction('ingest').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
-$('runSmokeBtn')?.addEventListener('click', () => runTypedQuerySmoke().catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
+$('runSmokeBtn')?.addEventListener('click', () => runAction('smoke').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runFullGtBtn')?.addEventListener('click', () => runAction('full').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankerBtn')?.addEventListener('click', () => runAction('rerank').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
 $('runRerankedEvalBtn')?.addEventListener('click', () => runAction('rerankEval').catch(e => { $('runStatus').textContent='Error'; $('runOutput').textContent=String(e); }));
@@ -3081,6 +2477,18 @@ $('runNvidiaSmokeBtn')?.addEventListener('click', () => runNvidiaAction('smoke')
 $('runNvidiaIngestBtn')?.addEventListener('click', () => runNvidiaAction('ingest').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 $('runNvidiaBenchmarkBtn')?.addEventListener('click', () => runNvidiaAction('benchmark').catch(e => { $('nvidiaStatus').textContent='Error'; $('nvidiaOutput').textContent=String(e); }));
 document.addEventListener('click', e => {
+  const adapterButton = e.target.closest('[data-adapter-action]');
+  if (adapterButton) {
+    const action = adapterButton.dataset.adapterAction;
+    const serviceId = adapterButton.dataset.serviceId;
+    runCandidateOperation(() => candidateMutation(`/api/adapters/${action}`, {service_id: serviceId}));
+    return;
+  }
+  const portfolioButton = e.target.closest('[data-portfolio-run]');
+  if (portfolioButton) {
+    runCandidateOperation(() => runPortfolioBatch(portfolioButton.dataset.portfolioRun));
+    return;
+  }
   const coverageButton = e.target.closest('.coverage-metric-btn');
   if (coverageButton) {
     showMetricsCombination(coverageButton.dataset.combo || '');
@@ -3133,23 +2541,20 @@ async function selectRecommendationSource(sourceType) {
 
 async function selectRecommendationDataset(datasetId) {
   if (datasetId === 'official') {
-    if ($('recommendationDataset')) $('recommendationDataset').value = 'official';
-    if ($('recommendationSource')) $('recommendationSource').value = 'official';
+    $('recommendationSource').value = 'official';
     await selectRecommendationSource('official');
     return;
   }
   const project = recommendationState.projects.find(item => (item.dataset_id || `project:${item.project_id}`) === datasetId);
   if (!project) {
     recommendationState.runs = [];
-    recommendationState.active = null;
     populateRecommendationGroundtruths();
     populateRecommendationRuns();
-    clearGlobalResultViews('No completed results for this dataset');
+    clearRecommendationView('No completed results for this dataset');
     return;
   }
-  if ($('recommendationDataset')) $('recommendationDataset').value = datasetId;
-  if ($('recommendationSource')) $('recommendationSource').value = 'uploaded_project';
-  if ($('recommendationProject')) $('recommendationProject').value = project.project_id;
+  $('recommendationSource').value = 'uploaded_project';
+  $('recommendationProject').value = project.project_id;
   await selectRecommendationSource('uploaded_project');
 }
 
@@ -3213,3 +2618,7 @@ document.querySelectorAll('[data-status-card]').forEach(btn => btn.addEventListe
 showPage((location.hash || '#overview').slice(1));
 $('uploadForm')?.addEventListener('submit', e => uploadDataset(e).catch(err => { $('uploadStatus').textContent='Error'; $('uploadOutput').textContent=String(err); }));
 loadOptions().then(refresh).then(loadResultSources).catch(e => { $('statusPill').textContent = 'Error'; document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">${esc(e.message)}</pre>`); });
+loadCandidateOperations().catch(error => {
+  setText('candidateOperationsStatus', 'Candidate state unavailable');
+  setText('candidateActionMessage', error?.message || String(error));
+});

@@ -5,7 +5,7 @@ import os
 from functools import lru_cache
 from typing import List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="WNS VM Model Adapter Service")
@@ -14,6 +14,43 @@ app = FastAPI(title="WNS VM Model Adapter Service")
 GTE_CANDIDATE_MODEL = "Alibaba-NLP/gte-multilingual-base"
 NEMOTRON_CANDIDATE_MODEL = "nvidia/llama-nemotron-rerank-1b-v2"
 GTE_MODERNBERT_CANDIDATE_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
+
+PROFILE_ENDPOINTS = {
+    "jina": ("/embed/jina",),
+    "gte": ("/embed/gte",),
+    "bge": ("/rerank/bge",),
+    "qwen": ("/rerank/qwen",),
+    "nemotron-rerank": ("/rerank/nemotron",),
+    "gte-modernbert": ("/rerank/gte-modernbert",),
+    "legacy-unified": (
+        "/embed/jina",
+        "/embed/gte",
+        "/rerank/bge",
+        "/rerank/qwen",
+        "/rerank/nemotron",
+        "/rerank/gte-modernbert",
+    ),
+}
+
+
+def validated_profile(value: str) -> str:
+    profile = value.strip()
+    if profile not in PROFILE_ENDPOINTS:
+        raise RuntimeError(
+            "WNS_ADAPTER_PROFILE must be one of " + ", ".join(sorted(PROFILE_ENDPOINTS))
+        )
+    return profile
+
+
+ACTIVE_PROFILE = validated_profile(os.getenv("WNS_ADAPTER_PROFILE", "legacy-unified"))
+
+
+def require_profile(endpoint: str) -> None:
+    if endpoint not in PROFILE_ENDPOINTS[ACTIVE_PROFILE]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Endpoint is not enabled for adapter profile {ACTIVE_PROFILE!r}",
+        )
 
 
 def candidate_model_env(name: str, expected: str) -> str:
@@ -166,25 +203,24 @@ def nemotron_scores(query: str, documents: List[str]) -> List[float]:
 
 @app.get("/health")
 def health():
+    models = {
+        "/embed/jina": ("jina", JINA_MODEL_NAME),
+        "/embed/gte": ("gte", GTE_MODEL_NAME),
+        "/rerank/bge": ("bge_reranker", BGE_RERANK_MODEL),
+        "/rerank/qwen": ("qwen_reranker", QWEN_RERANK_MODEL),
+        "/rerank/nemotron": ("nemotron_reranker", NEMOTRON_RERANK_MODEL),
+        "/rerank/gte-modernbert": (
+            "gte_modernbert_reranker",
+            GTE_MODERNBERT_RERANK_MODEL,
+        ),
+    }
+    endpoints = list(PROFILE_ENDPOINTS[ACTIVE_PROFILE])
     return {
         "ok": True,
+        "profile": ACTIVE_PROFILE,
         "device": DEVICE,
-        "models": {
-            "jina": JINA_MODEL_NAME,
-            "gte": GTE_MODEL_NAME,
-            "bge_reranker": BGE_RERANK_MODEL,
-            "qwen_reranker": QWEN_RERANK_MODEL,
-            "nemotron_reranker": NEMOTRON_RERANK_MODEL,
-            "gte_modernbert_reranker": GTE_MODERNBERT_RERANK_MODEL,
-        },
-        "endpoints": [
-            "/embed/jina",
-            "/embed/gte",
-            "/rerank/bge",
-            "/rerank/qwen",
-            "/rerank/nemotron",
-            "/rerank/gte-modernbert",
-        ],
+        "models": {models[endpoint][0]: models[endpoint][1] for endpoint in endpoints},
+        "endpoints": endpoints,
     }
 
 
@@ -205,11 +241,13 @@ def embed(key: str, req: EmbedRequest):
 
 @app.post("/embed/jina")
 def embed_jina(req: EmbedRequest):
+    require_profile("/embed/jina")
     return embed("jina", req)
 
 
 @app.post("/embed/gte")
 def embed_gte(req: EmbedRequest):
+    require_profile("/embed/gte")
     return embed("gte", req)
 
 
@@ -249,19 +287,23 @@ def rerank(key: str, req: RerankRequest):
 
 @app.post("/rerank/bge")
 def rerank_bge(req: RerankRequest):
+    require_profile("/rerank/bge")
     return rerank("bge", req)
 
 
 @app.post("/rerank/qwen")
 def rerank_qwen(req: RerankRequest):
+    require_profile("/rerank/qwen")
     return rerank("qwen", req)
 
 
 @app.post("/rerank/nemotron")
 def rerank_nemotron(req: RerankRequest):
+    require_profile("/rerank/nemotron")
     return rerank("nemotron", req)
 
 
 @app.post("/rerank/gte-modernbert")
 def rerank_gte_modernbert(req: RerankRequest):
+    require_profile("/rerank/gte-modernbert")
     return rerank("gte-modernbert", req)
