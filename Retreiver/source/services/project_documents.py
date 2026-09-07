@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -364,45 +363,6 @@ def _display_source_name(project_root: Path, source_path: Path) -> str:
     return _normalized_source_name(relative.as_posix())
 
 
-def _parse_pdf_with_mineru(source_path: Path, output_dir: Path):
-    """Parse one project PDF with layout-aware MinerU and no text-only fallback."""
-    from source.services.document_parser import DocumentParserService
-
-    try:
-        parser = DocumentParserService(output_dir=output_dir, force_backend="mineru")
-        return asyncio.run(
-            parser.parse_pdf(
-                str(source_path),
-                source_path.name,
-                allow_fallback=False,
-            )
-        )
-    except ProjectDocumentStorageError:
-        raise
-    except Exception:
-        raise ProjectDocumentStorageError("MinerU PDF extraction is unavailable") from None
-
-
-def _mineru_page_text(page: Any) -> str:
-    parts = [str(getattr(page, "content", "") or "").strip()]
-    for table in getattr(page, "tables", []) or []:
-        if not isinstance(table, Mapping):
-            continue
-        table_text = str(
-            table.get("table_body")
-            or table.get("table_caption")
-            or table.get("text")
-            or table.get("content")
-            or ""
-        ).strip()
-        if table_text and table_text not in parts[0]:
-            parts.append(table_text)
-    image_count = len(getattr(page, "images", []) or [])
-    if image_count:
-        parts.append(f"MinerU image regions: {image_count}")
-    return "\n\n".join(part for part in parts if part).strip()
-
-
 def extract_project_documents(project_root: Path, source_paths: Iterable[Path]) -> list[ProjectDocument]:
     project_root = Path(project_root).resolve()
     raw_root = project_root / "raw_uploads"
@@ -438,36 +398,32 @@ def extract_project_documents(project_root: Path, source_paths: Iterable[Path]) 
                 )
             )
             continue
-        parsed = _parse_pdf_with_mineru(
-            source_path,
-            project_root / "extracted_text" / "mineru",
-        )
-        pages = getattr(parsed, "content", None)
-        metadata = getattr(parsed, "metadata", None)
-        parser_method = metadata.get("parsing_method") if isinstance(metadata, Mapping) else None
-        if not isinstance(parser_method, str) or not parser_method.strip():
-            parser_method = "MinerU"
-        if not isinstance(pages, list) or not pages:
-            raise ProjectDocumentValidationError("MinerU PDF extraction returned no pages")
-        for index, page in enumerate(pages, 1):
-            raw_page_number = getattr(page, "page_number", index - 1)
-            try:
-                page_number = int(raw_page_number) + 1
-            except (TypeError, ValueError):
-                page_number = index
-            text = _mineru_page_text(page)
-            if not text:
-                raise ProjectDocumentValidationError("MinerU PDF page has no searchable content")
-            documents.append(
-                ProjectDocument(
-                    source_name=source_name,
-                    text=text,
-                    metadata={
-                        "page_number": str(page_number),
-                        "parser_method": parser_method,
-                    },
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            raise ProjectDocumentStorageError("PDF parser is unavailable") from None
+        try:
+            reader = PdfReader(str(source_path))
+            if not reader.pages:
+                raise ProjectDocumentValidationError("PDF has no pages")
+            for page_number, page in enumerate(reader.pages, 1):
+                text = page.extract_text() or ""
+                if not text.strip():
+                    raise ProjectDocumentValidationError("PDF page has no extractable text")
+                documents.append(
+                    ProjectDocument(
+                        source_name=source_name,
+                        text=text,
+                        metadata={
+                            "page_number": str(page_number),
+                            "parser_method": "pypdf_v1",
+                        },
+                    )
                 )
-            )
+        except ProjectDocumentValidationError:
+            raise
+        except Exception:
+            raise ProjectDocumentValidationError("PDF source is malformed") from None
     if not documents:
         raise ProjectDocumentValidationError("project has no canonical document sources")
     return documents

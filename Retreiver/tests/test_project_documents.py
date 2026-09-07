@@ -54,24 +54,6 @@ def _text_pdf(text: str) -> bytes:
     return payload.getvalue()
 
 
-def _stub_mineru(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    class Page:
-        page_number = 0
-        content = text
-        images: list[str] = []
-        tables: list[dict[str, str]] = []
-
-    class Parsed:
-        content = [Page()]
-        metadata = {"parsing_method": "MinerU"}
-
-    monkeypatch.setattr(
-        project_documents,
-        "_parse_pdf_with_mineru",
-        lambda *_args, **_kwargs: Parsed(),
-    )
-
-
 def test_project_documents_round_trip_with_canonical_hashes(tmp_path: Path):
     document = ProjectDocument(
         source_name="policy.txt",
@@ -343,10 +325,6 @@ def test_dashboard_upload_publishes_canonical_pdf_corpus(
 
     base = tmp_path / "user_projects"
     monkeypatch.setattr(dashboard, "USER_PROJECTS_DIR", base)
-    _stub_mineru(
-        monkeypatch,
-        "PROJECT_ALPHA_SENTINEL refunds require a booking reference.",
-    )
     payload = dashboard.create_user_project_upload(
         "policy.pdf",
         _text_pdf("PROJECT_ALPHA_SENTINEL refunds require a booking reference."),
@@ -360,7 +338,7 @@ def test_dashboard_upload_publishes_canonical_pdf_corpus(
         expected_sha256=manifest["corpus_sha256"],
     )
     assert manifest["extraction_status"] == "complete"
-    assert manifest["parser_versions"] == ["MinerU"]
+    assert manifest["parser_versions"] == ["pypdf_v1"]
     assert documents[0].source_name == "policy.pdf"
     assert "PROJECT_ALPHA_SENTINEL" in documents[0].text
 
@@ -373,10 +351,6 @@ def test_dashboard_zip_corpus_uses_only_that_projects_validated_members(
 
     base = tmp_path / "user_projects"
     monkeypatch.setattr(dashboard, "USER_PROJECTS_DIR", base)
-    _stub_mineru(
-        monkeypatch,
-        "PROJECT_ALPHA_SENTINEL baggage rules require a receipt.",
-    )
     archive = _zip_bytes(
         [
             ("docs/alpha.txt", b"PROJECT_ALPHA_SENTINEL refund rules."),

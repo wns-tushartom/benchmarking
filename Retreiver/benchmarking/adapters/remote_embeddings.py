@@ -72,18 +72,32 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None
 
 
 def _extract_embeddings(response: dict[str, Any]) -> List[List[float]]:
+    def vector(raw: Any) -> List[float]:
+        if not isinstance(raw, list) or not raw:
+            raise RuntimeError("embedding endpoint returned an empty or malformed vector")
+        values: List[float] = []
+        for value in raw:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError("embedding endpoint vectors must contain finite numeric values")
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise RuntimeError("embedding endpoint vectors must contain finite numeric values")
+            values.append(numeric)
+        return values
+
     if isinstance(response.get("data"), list):
         vectors = []
         for item in response["data"]:
-            if isinstance(item, dict) and "embedding" in item:
-                vectors.append([float(x) for x in item["embedding"]])
+            if not isinstance(item, dict) or "embedding" not in item:
+                raise RuntimeError("embedding endpoint returned a malformed data item")
+            vectors.append(vector(item["embedding"]))
         if vectors:
             return vectors
     for key in ("embeddings", "vectors"):
         if isinstance(response.get(key), list):
-            return [[float(x) for x in vec] for vec in response[key]]
+            return [vector(item) for item in response[key]]
     if isinstance(response.get("embedding"), list):
-        return [[float(x) for x in response["embedding"]]]
+        return [vector(response["embedding"])]
     raise RuntimeError(f"Embedding endpoint response did not contain embeddings. Keys: {sorted(response.keys())}")
 
 
@@ -131,7 +145,6 @@ class OpenAIEmbeddingAdapter:
         self.batch_size = int(batch_size)
         self.url = url
         self.last_response_metadata: dict[str, Any] = {}
-        self.response_metadata_history: list[dict[str, Any]] = []
         self.input_tokens = 0
         self.input_tokens_complete = True
         self.api_key = os.environ.get(api_key_env, "").strip()
@@ -190,7 +203,6 @@ class OpenAIEmbeddingAdapter:
             if self.input_tokens_complete:
                 metadata["embedding_input_tokens"] = self.input_tokens
             self.last_response_metadata = metadata
-            self.response_metadata_history.append(dict(metadata))
             vectors = _extract_embeddings(response)
             if len(vectors) != len(batch):
                 raise RuntimeError(f"OpenAI returned {len(vectors)} embeddings for {len(batch)} inputs")
@@ -213,10 +225,20 @@ class RemoteHTTPEmbeddingAdapter:
         api_key_env: str | None = None,
         require_response_model: bool = False,
         expected_response_model: str | None = None,
+        request_model: str | None = None,
+        query_prefix: str = "",
+        document_prefix: str = "",
+        serving_contract: str = "",
+        max_input_tokens: int | None = None,
         **_: Any,
     ):
         self.name = model_name
         self.model_name = model_name
+        self.request_model = request_model or model_name
+        self.query_prefix = str(query_prefix)
+        self.document_prefix = str(document_prefix)
+        self.serving_contract = str(serving_contract)
+        self.max_input_tokens = int(max_input_tokens) if max_input_tokens is not None else None
         self.require_response_model = bool(require_response_model)
         self.expected_response_model = expected_response_model or model_name
         self.dimensions = int(dimensions)
@@ -229,16 +251,30 @@ class RemoteHTTPEmbeddingAdapter:
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
 
     def embed_many(self, texts: Iterable[str]) -> List[List[float]]:
+        return self._embed_many(texts)
+
+    def embed_many_with_role(self, texts: Iterable[str], role: str) -> List[List[float]]:
+        prefixes = {"query": self.query_prefix, "document": self.document_prefix}
+        if role not in prefixes:
+            raise ValueError(f"unsupported embedding role: {role!r}")
+        prefix = prefixes[role]
+        return self._embed_many(f"{prefix}{str(text or '')}" for text in texts)
+
+    def _embed_many(self, texts: Iterable[str]) -> List[List[float]]:
         items = [str(t or "") for t in texts]
         out: List[List[float]] = []
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         for i in range(0, len(items), self.batch_size):
             batch = items[i : i + self.batch_size]
             payloads = [
-                {"model": self.model_name, "input": batch},
-                {"inputs": batch, "model": self.model_name},
-                {"texts": batch, "model": self.model_name},
+                {"model": self.request_model, "input": batch},
+                {"inputs": batch, "model": self.request_model},
+                {"texts": batch, "model": self.request_model},
             ]
+            if self.serving_contract == "vllm_openai_compatible":
+                if self.max_input_tokens is None or self.max_input_tokens <= 0:
+                    raise RuntimeError("vLLM embedding adapters require a positive max_input_tokens value")
+                payloads[0]["truncate_prompt_tokens"] = self.max_input_tokens
             last_error: Exception | None = None
             for payload in payloads:
                 try:
@@ -248,6 +284,12 @@ class RemoteHTTPEmbeddingAdapter:
                     self.response_metadata_history.append(dict(self.last_response_metadata))
                     vectors = _extract_embeddings(response)
                     if len(vectors) == len(batch):
+                        for vector in vectors:
+                            if len(vector) != self.dimensions:
+                                raise RuntimeError(
+                                    f"embedding dimension mismatch for {self.model_name}: "
+                                    f"expected {self.dimensions}, got {len(vector)}"
+                                )
                         out.extend(vectors)
                         break
                     last_error = RuntimeError(f"endpoint returned {len(vectors)} embeddings for {len(batch)} inputs")

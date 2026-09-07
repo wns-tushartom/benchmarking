@@ -1,0 +1,53 @@
+{
+  "console_errors": [],
+  "http_errors": [],
+  "request_failures": [],
+  "url": "http://127.0.0.1:17186/",
+  "viewports": {
+    "desktop-1440x1000": {
+      "adapterRows": 20,
+      "batchRows": 12,
+      "clientWidth": 1440,
+      "configured": "2,160",
+      "excluded": "2,160",
+      "promotion": "Promotion: not accepted",
+      "rowsInside": true,
+      "runDisabled": true,
+      "scrollWidth": 1440,
+      "sectionWidth": 1392,
+      "startDisabled": true,
+      "tokenAutocomplete": "off",
+      "transitionDuration": "0s"
+    },
+    "mobile-320x568": {
+      "adapterRows": 20,
+      "batchRows": 12,
+      "clientWidth": 320,
+      "configured": "2,160",
+      "excluded": "2,160",
+      "promotion": "Promotion: not accepted",
+      "rowsInside": true,
+      "runDisabled": true,
+      "scrollWidth": 320,
+      "sectionWidth": 292,
+      "startDisabled": true,
+      "tokenAutocomplete": "off",
+      "transitionDuration": "0s"
+    },
+    "mobile-390x844": {
+      "adapterRows": 20,
+      "batchRows": 12,
+      "clientWidth": 390,
+      "configured": "2,160",
+      "excluded": "2,160",
+      "promotion": "Promotion: not accepted",
+      "rowsInside": true,
+      "runDisabled": true,
+      "scrollWidth": 390,
+      "sectionWidth": 362,
+      "startDisabled": true,
+      "tokenAutocomplete": "off",
+      "transitionDuration": "0s"
+    }
+  }
+}

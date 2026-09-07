@@ -2,7 +2,7 @@
 
 **Scope:** the isolated `retrieval-reranker-candidates` lane only. Never write to `data/modular_runs/latest` or alter the accepted 180-combination configuration.
 
-Run every command below from the **work laptop VM shell**, one at a time. Stop and inspect the output before moving on. The overlay contains source/config/tests only: no data, result artifacts, model weights, or secrets. It deliberately excludes `scripts/serve_benchmark_dashboard.py`, `web/app.js`, and `web/index.html`, because the candidate dashboard was built against an incompatible baseline and must not overwrite the work-laptop recommendations dashboard.
+Run every command below from the **work laptop VM shell**, one at a time. Stop and inspect the output before moving on. The overlay contains source/config/tests only: no data, result artifacts, model weights, or secrets.
 
 ## 1. Verify the deployed checkout and preserve existing generated data
 
@@ -27,8 +27,6 @@ python3 -m zipfile -t Retreiver-retrieval-reranker-candidates-overlay.zip
 ```bash
 cd ~/benchmarking && unzip -o ~/Downloads/Retreiver-retrieval-reranker-candidates-overlay.zip
 ```
-
-Use the CLI commands below for this release. Candidate dashboard controls are not part of this overlay; they remain blocked until the exact `e368d8c` dashboard baseline is supplied and a compatibility port is reviewed.
 
 ```bash
 cd ~/benchmarking/Retreiver && python3 -m pip install -r requirements.txt

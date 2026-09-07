@@ -68,7 +68,7 @@ except Exception:
     pdf_parse_main = None  # type: ignore
 
 def find_mineru_cli() -> str | None:
-    """Locate an executable modern or legacy MinerU CLI."""
+    """Locate a MinerU CLI, including one installed in the active virtualenv."""
     executable_dir = Path(sys.executable).parent
     candidates = [
         str(executable_dir / "mineru"),
@@ -453,6 +453,9 @@ class DocumentParserService:
                 "-m", str(MINERU_PARSE_METHOD or "auto"),
             ]
             if Path(MAGIC_PDF_CLI).name == "mineru":
+                # MinerU 3.x is the supported layout-aware local runtime.
+                # Pipeline avoids the heavyweight VLM engine while preserving
+                # structured text, figures, image crops, and table bodies.
                 cmd = [
                     MAGIC_PDF_CLI,
                     "-p", file_path,

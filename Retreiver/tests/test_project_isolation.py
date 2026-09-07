@@ -7,7 +7,6 @@ import zipfile
 
 import pytest
 
-import source.services.project_documents as project_documents
 import source.services.project_workspace as project_workspace
 from source.services.project_workspace import (
     ProjectWorkspace,
@@ -1465,13 +1464,6 @@ def test_dashboard_rejects_malformed_pdf_without_publication(
 
     base = tmp_path / "user_projects"
     monkeypatch.setattr(dashboard, "USER_PROJECTS_DIR", base)
-    monkeypatch.setattr(
-        project_documents,
-        "_parse_pdf_with_mineru",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            project_documents.ProjectDocumentValidationError("malformed PDF")
-        ),
-    )
     malformed_pdf = b"%PDF-1.7\nnot a valid PDF package"
     name = "bundle.zip" if nested else "broken.pdf"
     content = (

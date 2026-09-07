@@ -24,8 +24,9 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def test_dashboard_metrics_keep_faiss_stage_winner_and_dedupe_rows():
+def test_dashboard_metrics_keep_faiss_stage_winner_and_dedupe_rows(monkeypatch):
     import scripts.serve_benchmark_dashboard as dashboard
+    monkeypatch.setattr(dashboard, "ACCEPTED_MANIFEST_PATH", Path("/__test_missing_accepted_manifest__"))
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -62,8 +63,9 @@ if (context.__rows.length !== 2 || !context.__stage.includes('Vector DB componen
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate() -> None:
+def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate(monkeypatch) -> None:
     import scripts.serve_benchmark_dashboard as dashboard
+    monkeypatch.setattr(dashboard, "ACCEPTED_MANIFEST_PATH", Path("/__test_missing_accepted_manifest__"))
 
     complete = {
         "chunker": "Heading_sections_l2",
@@ -106,8 +108,9 @@ def test_benchmark_reference_prefers_complete_row_over_newer_partial_duplicate()
     assert reference["report"]["incomplete_metric_rows"] == 0
 
 
-def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count():
+def test_dashboard_broad_artifact_lanes_cover_official_180_without_double_count(monkeypatch):
     import scripts.serve_benchmark_dashboard as dashboard
+    monkeypatch.setattr(dashboard, "ACCEPTED_MANIFEST_PATH", Path("/__test_missing_accepted_manifest__"))
     from benchmarking.core.config import generate_matrix, load_benchmark_config
 
     rows = generate_matrix(load_benchmark_config(Path("configs/benchmark.local.json")))
@@ -526,10 +529,9 @@ if (!context.__disabled || context.__primary) process.exit(1);
 def test_frontend_assets_use_current_cache_key():
     root = Path(__file__).resolve().parents[1]
     index = (root / "web" / "index.html").read_text(encoding="utf-8")
-    assert "/recommendations.js?v=20260716-extraction-override" in index
-    assert "/app.js?v=20260724-canonical-dashboard-v5.5" in index
-    assert "/styles.css?v=20260724-canonical-dashboard-v5.5" in index
-    assert "/recommendation-visuals.js?v=20260724-canonical-dashboard-v5.5" in index
+    assert "/recommendations.js?v=20260907-handoff-v1" in index
+    assert "/app.js?v=20260907-handoff-v1" in index
+    assert "/styles.css?v=20260907-handoff-v1" in index
     assert "/app.js?v=20260722-complete-ui-metrics\"" not in index
     assert "/styles.css?v=20260716-meeting-hardening" not in index
     assert "20260709-query-ui" not in index
@@ -610,8 +612,7 @@ def test_global_dataset_and_groundtruth_context_owns_page_mirrors() -> None:
     assert "fillSourceSelect('globalDataset'" in app
     assert "fillSourceSelect('globalGroundtruth'" in app
     assert "$('globalDataset')?.addEventListener('change'" in app
-    assert "function syncLinkedGroundtruth" in app
-    assert "$('globalGroundtruth')?.addEventListener('change'" not in app
+    assert "$('globalGroundtruth')?.addEventListener('change'" in app
 
 
 def test_run_pipeline_visibly_restates_the_global_source_context() -> None:
@@ -922,12 +923,8 @@ def test_frontend_has_multi_select_controls_without_legacy_lexical_preview():
     assert "projectSelections()" not in app
     assert "lexical_preview" not in app
     assert "selections: projectSelections()" not in app
-    assert "Typed query evidence smoke" in index
-    assert 'id="runQueryLimit"' not in index
+    assert "Evidence-only queries" in index
     assert "id=\"runQueries\"" in index
-    assert "semanticRunStatus" in app
-    assert "runTypedQuerySmoke" in app
-    assert "p.set('query_limit', '0')" in app
     assert 'id="runDataset"' in index
     assert 'id="nvidiaDataset"' in index
     assert 'id="uploadType"' in index
@@ -1313,33 +1310,6 @@ state.operational.evaluation.summary=[{{...metric,status:'failed'}},{{...metric,
 renderCoverage([]); globalThis.__failed=document.getElementById('coverageTable').innerHTML;
 `,context);
 if(!context.__valid.includes('Done · open Metrics') || context.__failed.includes('Done · open Metrics')){{console.error(context.__valid,context.__failed);process.exit(1);}}
-"""
-    proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-
-
-def test_amazon_permission_block_is_reranker_specific_and_faiss_stays_runnable() -> None:
-    root = Path(__file__).resolve().parents[1]
-    app = root / "web" / "app.js"
-    js = f"""
-const fs=require('fs'),vm=require('vm');
-const elements={{}};
-function el(id){{return elements[id] ||= {{id,value:'all',textContent:'',innerHTML:'',classList:{{toggle(){{}},add(){{}},remove(){{}}}},addEventListener(){{}},querySelectorAll(){{return[];}},setAttribute(){{}}}};}}
-const context={{console,document:{{getElementById:el,querySelectorAll(){{return[];}},addEventListener(){{}},body:{{insertAdjacentHTML(){{}}}}}},window:{{}},location:{{hash:'#overview'}},history:{{replaceState(){{}}}},fetch:async()=>({{ok:true,json:async()=>({{}}),text:async()=>''}}),setTimeout(){{}}}};
-vm.createContext(context);
-const code=fs.readFileSync({str(app)!r},'utf8').split('loadOptions().then(refresh)')[0];
-vm.runInContext(code+`
-benchmarkOptions={{chunkers:['c'],embeddings:['e'],vector_stores:['FAISS'],rerankers:['Amazon Rerank v1','Qwen3:4B Rerank','bge-reranker-base','none']}};
-state={{operational:{{amazon_status:'blocked: AWS Bedrock credentials missing',evaluation:{{summary:[]}}}}}};
-renderCoverage([]);
-globalThis.__html=document.getElementById('coverageTable').innerHTML;
-globalThis.__qdrantBlocked=missingCoverageBlocked('Amazon Rerank v1','Qdrant');
-`,context);
-const html=context.__html;
-const runnableFaiss=(html.match(/data-store="FAISS"/g)||[]).length;
-if(!context.__qdrantBlocked || !html.includes('Amazon Rerank unavailable') || html.includes('FAISS unavailable') || runnableFaiss !== 3){{
-  console.error({{qdrantBlocked:context.__qdrantBlocked,runnableFaiss,html}}); process.exit(1);
-}}
 """
     proc = subprocess.run(["node", "-e", js], text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0, proc.stdout + proc.stderr

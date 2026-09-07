@@ -12,21 +12,12 @@ import os
 import shutil
 import uuid
 import zipfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 DEFAULT_DATASET_ID = "dataset:wns-default"
 NONE_GROUNDTRUTH_ID = "groundtruth:none"
-OFFICIAL_GROUNDTRUTH_ID = "groundtruth:repository:groundtruth_500.csv"
-LEGACY_OFFICIAL_GROUNDTRUTH_ID = "groundtruth:repository:qa_text_test.csv"
-OFFICIAL_GROUNDTRUTH_IDS = frozenset(
-    {OFFICIAL_GROUNDTRUTH_ID, LEGACY_OFFICIAL_GROUNDTRUTH_ID}
-)
-OFFICIAL_GROUNDTRUTH_PREFERENCE = (
-    OFFICIAL_GROUNDTRUTH_ID,
-    LEGACY_OFFICIAL_GROUNDTRUTH_ID,
-)
 CANONICAL_WORKBOOK = Path("data/chunking_methods_output_v2.xlsx")
 BENCHMARK_CONFIG = Path("configs/benchmark.local.json")
 TABLE_SUFFIXES = {".csv", ".xlsx"}
@@ -66,7 +57,6 @@ class DatasetSource:
     chunk_count: int
     ready: bool
     validation: str
-    linked_groundtruth_id: str = NONE_GROUNDTRUTH_ID
     sheets: tuple[str, ...] = ()
     chunk_counts_by_strategy: tuple[tuple[str, int], ...] = ()
     document_path: Path | None = None
@@ -75,7 +65,7 @@ class DatasetSource:
     search_index_path: Path | None = None
 
     def public(self) -> dict[str, Any]:
-        payload = {
+        return {
             "id": self.id,
             "label": self.label,
             "kind": self.kind,
@@ -85,11 +75,7 @@ class DatasetSource:
             "ready": self.ready,
             "validation": self.validation,
             "sheets": list(self.sheets),
-            "linked_groundtruth_id": self.linked_groundtruth_id,
         }
-        if self.linked_groundtruth_id == NONE_GROUNDTRUTH_ID:
-            payload["mode"] = "evidence_only"
-        return payload
 
 
 @dataclass(frozen=True)
@@ -608,30 +594,7 @@ def _discover_sources(root: Path) -> tuple[list[DatasetSource], list[Groundtruth
             )
         )
 
-    groundtruth_by_id = {source.id: source for source in groundtruth}
-    bound_datasets: list[DatasetSource] = []
-    for dataset in datasets:
-        linked_id = NONE_GROUNDTRUTH_ID
-        if dataset.id == DEFAULT_DATASET_ID:
-            for official_id in OFFICIAL_GROUNDTRUTH_PREFERENCE:
-                official = groundtruth_by_id.get(official_id)
-                if official is not None and official.valid and official.kind == "repository":
-                    linked_id = official.id
-                    break
-        elif dataset.id.startswith("project:"):
-            project_id = dataset.id.removeprefix("project:")
-            project_groundtruth_id = f"groundtruth:project:{project_id}"
-            project_groundtruth = groundtruth_by_id.get(project_groundtruth_id)
-            if (
-                project_groundtruth is not None
-                and project_groundtruth.valid
-                and project_groundtruth.kind == "project"
-                and project_groundtruth.project_id == project_id
-            ):
-                linked_id = project_groundtruth.id
-        bound_datasets.append(replace(dataset, linked_groundtruth_id=linked_id))
-
-    return bound_datasets, groundtruth
+    return datasets, groundtruth
 
 
 def register_groundtruth_upload(
@@ -710,23 +673,3 @@ def resolve_groundtruth(root: str | Path, source_id: str) -> GroundtruthSource |
     if not source.valid:
         raise ValueError(f"Unknown or invalid source ID: {source_id}")
     return source
-
-
-def resolve_source_pair(
-    root: str | Path,
-    dataset_id: str,
-    groundtruth_id: str,
-) -> tuple[DatasetSource, GroundtruthSource | None]:
-    """Resolve one freshly discovered catalog-owned dataset/GT pair by IDs only."""
-    datasets, groundtruth = _discover_sources(Path(root))
-    dataset = next((source for source in datasets if source.id == dataset_id), None)
-    if dataset is None:
-        raise ValueError(f"Unknown source ID: {dataset_id}")
-    if groundtruth_id != dataset.linked_groundtruth_id:
-        raise ValueError("Selected linked ground truth does not match the dataset")
-    if groundtruth_id == NONE_GROUNDTRUTH_ID:
-        return dataset, None
-    source = next((item for item in groundtruth if item.id == groundtruth_id), None)
-    if source is None or source.path is None or not source.valid:
-        raise ValueError(f"Unknown or invalid source ID: {groundtruth_id}")
-    return dataset, source

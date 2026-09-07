@@ -71,54 +71,6 @@ _V2_FIELDS = (
     "rerank_usage_scope",
     "error_code",
 )
-_V2_FIELDS_WITH_DETAIL = _V2_FIELDS + ("error_detail",)
-_MULTI_CUTOFF_FIELDS = (
-    "recall_at_1",
-    "recall_at_3",
-    "recall_at_5",
-    "recall_at_10",
-    "precision_at_5",
-    "ndcg_at_5",
-    "avg_first_relevant_rank",
-    "no_hit_queries",
-)
-_V3_FIELDS = (
-    "project_id",
-    "run_id",
-    "combo_id",
-    "status",
-    "summary_schema_version",
-    "chunker_id",
-    "embedding_id",
-    "vector_store_id",
-    "reranker_id",
-    "physical_namespace",
-    "query_count",
-    "labelled_queries",
-    "unlabelled_queries",
-    "recall_at_k",
-    "mrr_at_k",
-    "ndcg_at_k",
-    *_MULTI_CUTOFF_FIELDS,
-    "retrieval_latency_s",
-    "rerank_latency_s",
-    "avg_query_latency_s",
-    "evidence_count",
-    "embedding_input_tokens",
-    "embedding_usage_scope",
-    "embedding_usage_key",
-    "rerank_search_units",
-    "rerank_usage_scope",
-    "error_code",
-)
-_V3_FIELDS_WITH_DETAIL = _V3_FIELDS + ("error_detail",)
-_SUPPORTED_SUMMARY_HEADERS = {
-    _V2_FIELDS,
-    _V2_FIELDS_WITH_DETAIL,
-    _V3_FIELDS,
-    _V3_FIELDS_WITH_DETAIL,
-}
-_SUPPORTED_SUMMARY_SCHEMA_VERSIONS = {2, 3}
 _EVIDENCE_FIELDS = (
     "combo_id",
     "query_id",
@@ -320,51 +272,14 @@ class ProjectRunResultService:
     MAX_EVIDENCE_PART_BYTES = 4 * 1024 * 1024
     MAX_EVIDENCE_PAGE = 100
 
-    _TABLE_SUFFIXES = {".csv", ".xlsx"}
-
-    def _project_owned_groundtruth_identity(
-        self, project_id: str, project_manifest: dict[str, Any] | None = None
-    ) -> dict[str, str] | None:
-        """Map project-owned GT files to the catalog ID the UI locks onto."""
-        try:
-            questions_dir = self.workspace.layout(project_id)["questions"]
-        except (KeyError, TypeError, ValueError, OSError):
-            return None
-        if not questions_dir.is_dir() or questions_dir.is_symlink():
-            return None
-        owned_files = sorted(
-            candidate
-            for candidate in questions_dir.iterdir()
-            if candidate.is_file()
-            and not candidate.is_symlink()
-            and candidate.suffix.lower() in self._TABLE_SUFFIXES
-        )
-        if len(owned_files) != 1:
-            return None
-        label = str((project_manifest or {}).get("label") or project_id).strip() or project_id
-        return {
-            "groundtruth_id": f"groundtruth:project:{project_id}",
-            "groundtruth_label": f"{label} — uploaded ground truth",
-        }
-
-    def _result_source_identity(
-        self,
-        request: Any,
-        *,
-        project_id: str,
-        project_manifest: dict[str, Any] | None = None,
-    ) -> dict[str, str]:
-        # Browser launches convert catalog ground-truth IDs into immutable question sets.
-        # The UI still locks on groundtruth:project:<id> / groundtruth:none, so result
-        # identity must match those catalog IDs or Metrics/Recommendations stay empty.
+    @staticmethod
+    def _result_source_identity(request: Any) -> dict[str, str]:
         source = request.questions_source
         if source.get("type") == "question_set":
-            owned = self._project_owned_groundtruth_identity(project_id, project_manifest)
-            if owned is not None:
-                return owned
+            question_set_id = source["question_set_id"]
             return {
-                "groundtruth_id": "groundtruth:none",
-                "groundtruth_label": "None (evidence-only)",
+                "groundtruth_id": f"groundtruth:question-set:{question_set_id}",
+                "groundtruth_label": f"Question set · {question_set_id}",
             }
         return {
             "groundtruth_id": "groundtruth:none",
@@ -546,11 +461,7 @@ class ProjectRunResultService:
                 created = _safe_time(manifest.get("created_at"))
                 artifact_timestamp = entry.joinpath("manifest.json").lstat().st_mtime
                 semantic = completed or created
-                source_identity = self._result_source_identity(
-                    context["validated"].request,
-                    project_id=project_id,
-                    project_manifest=context.get("project_manifest"),
-                )
+                source_identity = self._result_source_identity(context["validated"].request)
                 runs.append(
                     {
                         "project_id": project_id,
@@ -559,15 +470,6 @@ class ProjectRunResultService:
                         "state": manifest["state"],
                         "scoring_mode": result["scoring_mode"],
                         "metric_k": context["validated"].request.top_k,
-                        "combination_count": int(result.get("combination_count") or manifest.get("combination_count") or 0),
-                        "succeeded": int(result.get("succeeded") or manifest.get("succeeded") or 0),
-                        "failed": int(result.get("failed") or manifest.get("failed") or 0),
-                        "evidence_count": int(
-                            sum(
-                                int(value or 0)
-                                for value in (result.get("evidence_counts_by_combo") or {}).values()
-                            )
-                        ),
                         "created_at": manifest.get("created_at") if created else None,
                         "completed_at": manifest.get("completed_at") if completed else None,
                         "timestamp_label": manifest.get("completed_at") if completed else (manifest.get("created_at") if created else "Legacy artifact time"),
@@ -594,9 +496,8 @@ class ProjectRunResultService:
             if headers is None or len(headers) != len(set(headers)):
                 raise ValueError
             legacy = tuple(headers) == _LEGACY_FIELDS
-            if not legacy and tuple(headers) not in _SUPPORTED_SUMMARY_HEADERS:
+            if not legacy and tuple(headers) != _V2_FIELDS:
                 raise ValueError
-            schema_version_hint = 3 if tuple(headers) in {_V3_FIELDS, _V3_FIELDS_WITH_DETAIL} else 2
             raw_rows: list[dict[str, str]] = []
             for raw in reader:
                 if len(raw_rows) >= self.MAX_SUMMARY_ROWS or None in raw:
@@ -658,12 +559,8 @@ class ProjectRunResultService:
                 observed_matrix.add(matrix_identity)
                 if not raw["physical_namespace"]:
                     raise ValueError
-                if not legacy:
-                    row_schema = _nonnegative_int(raw["summary_schema_version"])
-                    if row_schema not in _SUPPORTED_SUMMARY_SCHEMA_VERSIONS:
-                        raise ValueError
-                    if row_schema != schema_version_hint:
-                        raise ValueError
+                if not legacy and _nonnegative_int(raw["summary_schema_version"]) != 2:
+                    raise ValueError
                 commercial = [
                     adapter_id
                     for adapter_id in (raw["embedding_id"], raw["reranker_id"])
@@ -706,15 +603,6 @@ class ProjectRunResultService:
                 recall_at_k = _quality_float(raw["recall_at_k"])
                 mrr_at_k = None if legacy else _quality_float(raw["mrr_at_k"])
                 ndcg_at_k = None if legacy else _quality_float(raw["ndcg_at_k"])
-                multi_cutoff: dict[str, Any] = {field: None for field in _MULTI_CUTOFF_FIELDS}
-                if not legacy and schema_version_hint >= 3:
-                    for field in _MULTI_CUTOFF_FIELDS:
-                        if field == "no_hit_queries":
-                            multi_cutoff[field] = _nonnegative_int(raw[field], nullable=True)
-                        elif field == "avg_first_relevant_rank":
-                            multi_cutoff[field] = _nonnegative_float(raw[field])
-                        else:
-                            multi_cutoff[field] = _quality_float(raw[field])
                 retrieval_latency_s = None if legacy else _nonnegative_float(raw["retrieval_latency_s"])
                 rerank_latency_s = None if legacy else _nonnegative_float(raw["rerank_latency_s"])
                 avg_query_latency_s = None if legacy else _nonnegative_float(raw["avg_query_latency_s"])
@@ -725,7 +613,7 @@ class ProjectRunResultService:
                     or (raw["status"] == "failed" and error_code not in _ERROR_CODES)
                 ):
                     raise ValueError
-                quality_values = (recall_at_k, mrr_at_k, ndcg_at_k, *multi_cutoff.values())
+                quality_values = (recall_at_k, mrr_at_k, ndcg_at_k)
                 latency_values = (
                     retrieval_latency_s,
                     rerank_latency_s,
@@ -751,24 +639,6 @@ class ProjectRunResultService:
                     if labelled_queries > 0 and (
                         recall_at_k is None
                         or (not legacy and (mrr_at_k is None or ndcg_at_k is None))
-                        or (
-                            not legacy
-                            and schema_version_hint >= 3
-                            and any(
-                                multi_cutoff[field] is None
-                                for field in _MULTI_CUTOFF_FIELDS
-                                if field != "avg_first_relevant_rank"
-                            )
-                        )
-                    ):
-                        raise ValueError
-                    # Full misses: avg_first_relevant_rank may be null when no-hit_queries == labelled.
-                    if (
-                        not legacy
-                        and schema_version_hint >= 3
-                        and labelled_queries > 0
-                        and multi_cutoff["avg_first_relevant_rank"] is None
-                        and multi_cutoff["no_hit_queries"] != labelled_queries
                     ):
                         raise ValueError
                     if not legacy:
@@ -791,7 +661,7 @@ class ProjectRunResultService:
                         "run_id": run_id,
                         "combo_id": combo_id,
                         "status": raw["status"],
-                        "summary_schema_version": 1 if legacy else schema_version_hint,
+                        "summary_schema_version": 1 if legacy else 2,
                         "chunker_id": raw["chunker_id"],
                         "embedding_id": raw["embedding_id"],
                         "vector_store_id": raw["vector_store_id"],
@@ -803,7 +673,6 @@ class ProjectRunResultService:
                         "recall_at_k": recall_at_k,
                         "mrr_at_k": mrr_at_k,
                         "ndcg_at_k": ndcg_at_k,
-                        **multi_cutoff,
                         "retrieval_latency_s": retrieval_latency_s,
                         "rerank_latency_s": rerank_latency_s,
                         "avg_query_latency_s": avg_query_latency_s,
@@ -864,7 +733,7 @@ class ProjectRunResultService:
             type(schema_version) is not int
             or schema_version != 2
             or type(summary_schema_version) is not int
-            or summary_schema_version not in _SUPPORTED_SUMMARY_SCHEMA_VERSIONS
+            or summary_schema_version != 2
             or manifest.get("metric_k") != context["validated"].request.top_k
             or manifest.get("scoring_mode") != expected_scoring_mode
             or manifest.get("succeeded") != succeeded
@@ -1166,11 +1035,7 @@ class ProjectRunResultService:
             {key: value for key, value in row.items() if key != "physical_namespace"}
             for row in rows
         ]
-        source_identity = self._result_source_identity(
-                    context["validated"].request,
-                    project_id=project_id,
-                    project_manifest=context.get("project_manifest"),
-                )
+        source_identity = self._result_source_identity(context["validated"].request)
         return {
             "source_type": "uploaded_project",
             "project_id": project_id,
@@ -1183,23 +1048,8 @@ class ProjectRunResultService:
             "combination_count": len(rows),
             "succeeded": succeeded,
             "failed": failed,
-            "metric_names": [
-                "recall_at_1",
-                "recall_at_3",
-                "recall_at_5",
-                "recall_at_10",
-                "recall_at_k",
-                "mrr_at_k",
-                "precision_at_5",
-                "ndcg_at_5",
-                "ndcg_at_k",
-                "avg_first_relevant_rank",
-                "no_hit_queries",
-                "avg_query_latency_s",
-            ],
-            "summary_schema_version": 1 if legacy else (
-                max((row.get("summary_schema_version") or 2) for row in rows) if rows else 2
-            ),
+            "metric_names": ["recall_at_k", "mrr_at_k", "ndcg_at_k", "avg_query_latency_s"],
+            "summary_schema_version": 1 if legacy else 2,
             "created_at": manifest.get("created_at"),
             "completed_at": manifest.get("completed_at"),
             "rows": public_rows,

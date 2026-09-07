@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const helper = path.resolve(__dirname, '../web/recommendation-visuals.js');
+assert.ok(fs.existsSync(helper), 'Updated recommendation visualization helper must be restored');
+const visuals = require(helper);
+const colors = visuals.categoryColorMap(['GTE', 'Jina']);
+assert.equal(visuals.categoryColorMap(['Jina'], colors).Jina, colors.Jina);
+assert.equal(visuals.rerankerShape('bge-reranker-base'), 'diamond');
+const rows = [{latency: 1, quality: .9}, {latency: 2, quality: .8}, {latency: 3, quality: 1}];
+assert.deepEqual(visuals.paretoRows(rows, r => r.latency, r => r.quality), [rows[0], rows[2]]);
+assert.equal(visuals.applyQuickView(Array.from({length: 20}, (_, i) => i), 'bottom10')[0], 10);
+console.log('PASS: visualization lineage, stable colors, shape, Pareto direction and quick views');

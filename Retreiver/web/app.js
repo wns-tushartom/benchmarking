@@ -44,7 +44,7 @@ function metricRowKey(row) {
 function dedupeMetricRows(rows) {
   const map = new Map();
   rows.map(r => canonicalMetricRow(r)).forEach(r => {
-    const key = metricRowKey(r);
+    const key = sourceStateModule()?.resultRowIdentity(r) || metricRowKey(r);
     if (!map.has(key)) map.set(key, r);
   });
   return [...map.values()];
@@ -660,7 +660,10 @@ function renderRunResult(kind, payload) {
 }
 
 function pipelineLabel(r) {
-  return `${r.sheet || '—'} · ${r.embedding || '—'} · ${r.store || '—'} · ${r.reranker || 'none'}`;
+  const parts = [r.sheet || '—', r.embedding || '—', r.store || '—', r.retrieval_method, r.reranker || 'none'].filter(Boolean);
+  if (r.result_provenance === 'verified_candidate') parts.push('Verified candidate');
+  else if (r.result_provenance === 'accepted') parts.push('Accepted');
+  return parts.join(' · ');
 }
 
 function filterBySelect(rows, mapping) {
@@ -962,7 +965,18 @@ const recommendationState = {
   tablePage: 0,
   tablePayload: null,
   tableResult: null,
+  analyticsResult: null,
+  visualSelectedFamily: '',
+  visualSelectedCombo: '',
+  visualHiddenCategories: new Set(),
+  visualPointData: new Map(),
 };
+
+function recommendationVisualModule() {
+  const module = globalThis.RecommendationVisuals;
+  if (!module || typeof module.categoryColorMap !== 'function') throw new Error('Recommendation visualization rules are unavailable');
+  return module;
+}
 
 function recommendationModule() {
   const module = globalThis.PipelineRecommendations;
@@ -984,6 +998,7 @@ function closeRecommendationEvidence() {
 }
 
 function clearRecommendationView(message) {
+  recommendationState.analyticsResult = null;
   setText('recommendationStatus', message || 'No result source selected');
   setText('recommendationContext', message || 'Choose a result source');
   if ($('recommendationStrip')) $('recommendationStrip').innerHTML = '<div class="empty-state">No recommendations loaded.</div>';
@@ -994,6 +1009,12 @@ function clearRecommendationView(message) {
   ['top10ScoreChart','qualityLatencyChart','comparisonGrid','rerankerLiftChart','stageComparisonChart'].forEach(id => {
     if ($(id)) $(id).innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
   });
+  if ($('tradeoffChart')) $('tradeoffChart').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
+  if ($('metricHeatmap')) $('metricHeatmap').innerHTML = '<div class="empty-state">No trade-off data for the active source.</div>';
+  if ($('metricExplorerKpis')) $('metricExplorerKpis').innerHTML = '';
+  setText('metricExplorerHint', 'Waiting for evaluation');
+  setText('metricHeatmapLegend', 'No active result source');
+  setText('metricInterpretation', '');
   closeRecommendationEvidence();
 }
 
@@ -1022,8 +1043,11 @@ function recommendationPipelineName(row) {
     row.chunker_id || row.sheet,
     row.embedding_id || row.embedding,
     row.vector_store_id || row.store,
+    row.retrieval_method,
     row.reranker_id || row.reranker || 'none',
   ].filter(Boolean);
+  if (row.result_provenance === 'verified_candidate') parts.push('Verified candidate');
+  else if (row.result_provenance === 'accepted') parts.push('Accepted');
   return parts.length ? parts.join(' · ') : (row.combo_id || row.label || 'Not available');
 }
 
@@ -1140,6 +1164,14 @@ function recommendationWinnerDetails(row, roles) {
   };
 }
 
+function recommendationProvenance(row) {
+  if (row?.result_provenance === 'verified_candidate') {
+    return `Verified candidate · ${row.promotion_status || 'not_accepted'} · ${row.artifact_provenance || row.source_lane || 'artifact path unavailable'}`;
+  }
+  if (row?.result_provenance === 'accepted') return 'Accepted benchmark evidence';
+  return '';
+}
+
 function renderRecommendationTable(payload, result, {preservePage = false} = {}) {
   const allRows = recommendationResultRows(result);
   const mode = result?.mode === 'labelled' ? 'labelled' : 'evidence_only';
@@ -1183,7 +1215,9 @@ function renderRecommendationTable(payload, result, {preservePage = false} = {})
       ? `<div class="recommendation-badges">${winner.badges.map(label => `<span>${esc(label)}</span>`).join('')}</div>`
       : '';
     const why = winner.why ? `<small class="recommendation-why">Why it stands out: ${esc(winner.why)}</small>` : '';
-    const pipeline = `<div class="recommendation-pipeline"><span class="recommendation-rank">#${start + index + 1}</span><strong>${esc(recommendationPipelineName(row))}</strong></div>${badges}${why}`;
+    const provenanceText = recommendationProvenance(row);
+    const provenance = provenanceText ? `<small class="recommendation-why">Source: ${esc(provenanceText)}</small>` : '';
+    const pipeline = `<div class="recommendation-pipeline"><span class="recommendation-rank">#${start + index + 1}</span><strong>${esc(recommendationPipelineName(row))}</strong></div>${badges}${why}${provenance}`;
     const prefix = `<td data-label="Pipeline">${pipeline}</td><td data-label="Status"><span class="badge ${failed ? 'warn' : 'ok'}">${esc(row.status || 'completed')}</span></td>`;
     const operationalCells = `<td data-label="Queries">${esc(metricCell(row.query_count))}</td><td data-label="Avg sec/query">${esc(metricCell(row.avg_query_latency_s ?? row.avg_latency_seconds))}</td><td data-label="Cost posture">${esc(recommendationPricingText(pricing))}</td><td data-label="Evidence">${evidence}</td>`;
     const qualityCells = `<td data-label="${esc(recallLabel)}">${esc(qualityMetricCell(row, row.recall_at_k ?? row.recall_at_5, mode))}</td><td data-label="MRR">${esc(qualityMetricCell(row, row.mrr_at_k ?? row.mrr, mode))}</td><td data-label="${esc(ndcgLabel)}">${esc(qualityMetricCell(row, row.ndcg_at_k ?? row.ndcg_at_5, mode))}</td><td data-label="Avg sec/query">${esc(metricCell(row.avg_query_latency_s ?? row.avg_latency_seconds))}</td><td data-label="Cost posture">${esc(recommendationPricingText(pricing))}</td><td data-label="Evidence">${evidence}</td>`;
@@ -1219,15 +1253,512 @@ function clearUploadedTradeoffs() {
   });
 }
 
+const recommendationMetricKeys = ['recall_at_5', 'mrr', 'ndcg_at_5', 'avg_latency_seconds'];
+const recommendationComponentKeys = ['sheet', 'embedding', 'store', 'retrieval_method', 'index_type', 'reranker'];
+
+function recommendationMetricLabel(key) {
+  return {
+    recall_at_5: 'Recall@5',
+    mrr: 'MRR',
+    ndcg_at_5: 'nDCG@5',
+    avg_latency_seconds: 'Average latency/query',
+  }[key] || key;
+}
+
+function recommendationComponentLabel(key) {
+  return {sheet: 'Chunker', embedding: 'Embedding', store: 'Vector DB', retrieval_method: 'Retrieval method', index_type: 'Index type', reranker: 'Reranker'}[key] || key;
+}
+
+function recommendationMetricValue(row, key) {
+  const aliases = {
+    recall_at_5: ['recall_at_5', 'recall_at_k'],
+    mrr: ['mrr', 'mrr_at_k'],
+    ndcg_at_5: ['ndcg_at_5', 'ndcg_at_k'],
+    avg_latency_seconds: ['avg_latency_seconds', 'avg_query_latency_s'],
+  }[key] || [key];
+  for (const alias of aliases) {
+    const raw = row?.[alias];
+    if (raw === null || raw === undefined || raw === '') continue;
+    const value = Number(raw);
+    if (Number.isFinite(value)) return value;
+  }
+  return NaN;
+}
+
+function recommendationCanonicalRetrievalMethod(value) {
+  const sourceState = sourceStateModule();
+  if (sourceState?.canonicalRetrievalMethod) return sourceState.canonicalRetrievalMethod(value);
+  const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (['', 'cosine', 'cosine_similarity', 'dense', 'dense_cosine'].includes(normalized)) return 'dense_cosine';
+  if (['bm25_dense_rrf', 'bm25_dense_and_rrf', 'hybrid_rrf'].includes(normalized)) return 'hybrid_rrf';
+  return normalized;
+}
+
+function recommendationIndexType(row = {}) {
+  return String(row.index_type || row.index || 'HNSW');
+}
+
+function recommendationHeatmapIdentity(row = {}) {
+  const sourceState = sourceStateModule();
+  if (sourceState?.resultRowIdentity) return sourceState.resultRowIdentity(row);
+  return [
+    row.sheet || row.chunker || '',
+    row.embedding || '',
+    row.store || row.vector_store || '',
+    recommendationIndexType(row),
+    recommendationCanonicalRetrievalMethod(row.retrieval_method),
+    canonicalRerankerName(row.reranker || row.reranking_model || 'none'),
+  ].join('|');
+}
+
+function fillRecommendationMetricControl(id, values, labels = {}, fallback = '') {
+  const control = $(id);
+  if (!control) return fallback || values[0] || '';
+  const current = control.value;
+  control.innerHTML = values.map(value => `<option value="${esc(value)}">${esc(labels[value] || value)}</option>`).join('');
+  control.value = values.includes(current) ? current : (values.includes(fallback) ? fallback : (values[0] || ''));
+  return control.value;
+}
+
+function recommendationRowState(row) {
+  const stateName = String(row?.state || row?.status || 'not_run').toLowerCase();
+  if (['complete', 'completed'].includes(stateName)) return 'complete';
+  if (['running', 'failed', 'incomplete', 'not_run'].includes(stateName)) return stateName;
+  return 'incomplete';
+}
+
+function recommendationEvaluatedQueries(row) {
+  return Number(row?.evaluated_queries ?? row?.query_count ?? row?.labelled_queries ?? 0) || 0;
+}
+
+function recommendationMeasuredRow(row) {
+  return recommendationRowState(row) === 'complete'
+    && recommendationEvaluatedQueries(row) === 500
+    && recommendationMetricKeys.every(key => Number.isFinite(recommendationMetricValue(row, key)));
+}
+
+function completeRecommendationRows(payload = {}) {
+  if (payload.scoring_mode !== 'retrieval_labels' && payload.mode !== 'labelled') return [];
+  return (Array.isArray(payload.rows) ? payload.rows : [])
+    .filter(recommendationMeasuredRow)
+    .map(row => canonicalMetricRow(row, {state: 'complete'}));
+}
+
+function recommendationStateRows(payload = {}) {
+  if (
+    payload.source_type === 'official'
+    && payload.result_set !== 'baseline'
+    && Array.isArray(state.operational?.pipeline_state)
+  ) {
+    return state.operational.pipeline_state.map(row => canonicalMetricRow(row));
+  }
+  return (Array.isArray(payload.rows) ? payload.rows : []).map(row => canonicalMetricRow(row));
+}
+
+function recommendationAnalyticsOptions(payload, rows) {
+  if (payload?.source_type === 'official' && payload?.result_set !== 'baseline') {
+    const configured = Object.keys(benchmarkOptions || {}).length ? benchmarkOptions : (state.options || {});
+    return {
+      chunkers: configured.chunkers || uniq(rows, 'sheet'),
+      embeddings: configured.embeddings || uniq(rows, 'embedding'),
+      vector_stores: configured.vector_stores || configured.stores || uniq(rows, 'store'),
+      rerankers: (configured.rerankers || uniq(rows, 'reranker')).map(canonicalRerankerName),
+      retrieval_methods: uniq(rows, 'retrieval_method').map(recommendationCanonicalRetrievalMethod).filter(Boolean),
+      index_types: uniq(rows, 'index_type').map(String).filter(Boolean),
+    };
+  }
+  return {
+    chunkers: uniq(rows, 'sheet'),
+    embeddings: uniq(rows, 'embedding'),
+    vector_stores: uniq(rows, 'store'),
+    rerankers: uniq(rows, 'reranker').map(canonicalRerankerName),
+    retrieval_methods: uniq(rows, 'retrieval_method').map(recommendationCanonicalRetrievalMethod).filter(Boolean),
+    index_types: uniq(rows, 'index_type').map(String).filter(Boolean),
+  };
+}
+
+function recommendationWinnerLabels(payload, result) {
+  const roles = result?.roles || payload?.recommendations?.roles || payload?.roles || {};
+  const labels = new Map();
+  [
+    ['Quality', roles.quality],
+    ['Speed', roles.speed || roles.fastest],
+    ['Value', roles.value],
+  ].forEach(([label, role]) => {
+    const row = roleRow(role);
+    const comboId = String(row?.combo_id || role?.combo_id || '');
+    if (!comboId) return;
+    labels.set(comboId, [...(labels.get(comboId) || []), label]);
+  });
+  return labels;
+}
+
+function recommendationMetricDirection(key) {
+  return key === 'avg_latency_seconds' ? 'lower' : 'higher';
+}
+
+function recommendationMarkerSvg(shape, x, y, radius, color, rankClass) {
+  const common = `class="metric-tradeoff-dot metric-shape-${shape} ${rankClass}" style="--point-color:${color}"`;
+  if (shape === 'diamond') {
+    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="1.5" transform="rotate(45 ${x.toFixed(1)} ${y.toFixed(1)})" ${common} />`;
+  }
+  if (shape === 'triangle') {
+    const top = `${x.toFixed(1)},${(y - radius).toFixed(1)}`;
+    const right = `${(x + radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
+    const left = `${(x - radius * .92).toFixed(1)},${(y + radius * .78).toFixed(1)}`;
+    return `<path d="M ${top} L ${right} L ${left} Z" ${common} />`;
+  }
+  if (shape === 'square') {
+    return `<rect x="${(x - radius * .72).toFixed(1)}" y="${(y - radius * .72).toFixed(1)}" width="${(radius * 1.44).toFixed(1)}" height="${(radius * 1.44).toFixed(1)}" rx="2" ${common} />`;
+  }
+  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(1)}" ${common} />`;
+}
+
+// Rich detail markup is safe because every row-derived string is escaped and every metric is numerically formatted.
+function recommendationPointDetailHtml(meta) {
+  if (!meta) return 'Select a point to inspect exact metrics.';
+  const row = meta.row;
+  const badges = meta.badges.length ? `<span class="metric-detail-badges">${meta.badges.map(badge => `<b>${esc(badge)}</b>`).join('')}</span>` : '';
+  return `<strong>#${fmtInt(meta.rank)} · ${esc(pipelineLabel(row))}</strong>${badges}<span>${esc(recommendationMetricLabel(meta.xKey))}: ${fmt(meta.xValue, 3)} · ${esc(recommendationMetricLabel(meta.yKey))}: ${fmt(meta.yValue, 3)}</span><small>Recall@5 ${fmt(recommendationMetricValue(row, 'recall_at_5'), 3)} · MRR ${fmt(recommendationMetricValue(row, 'mrr'), 3)} · nDCG@5 ${fmt(recommendationMetricValue(row, 'ndcg_at_5'), 3)} · latency ${fmt(recommendationMetricValue(row, 'avg_latency_seconds'), 3)}s · ${fmtInt(recommendationEvaluatedQueries(row))} evaluated queries</small>`;
+}
+
+function applyRecommendationFamilyState(chart, familyKey = '') {
+  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
+  const points = [...chart.querySelectorAll('.metric-point')];
+  const related = points.filter(point => point.dataset.familyKey === familyKey);
+  points.forEach(point => {
+    point.classList.toggle('is-related', Boolean(familyKey) && point.dataset.familyKey === familyKey);
+    point.classList.toggle('is-muted', Boolean(familyKey) && point.dataset.familyKey !== familyKey);
+    point.classList.toggle('is-selected', point.dataset.comboId === recommendationState.visualSelectedCombo);
+  });
+  const overlay = chart.querySelector('.metric-family-overlay');
+  if (!overlay) return;
+  const ordered = related.map(point => ({
+    x: Number(point.dataset.pointX),
+    y: Number(point.dataset.pointY),
+    color: point.dataset.color,
+  })).sort((a, b) => a.x - b.x || a.y - b.y);
+  overlay.innerHTML = ordered.slice(1).map((point, index) => {
+    const previous = ordered[index];
+    return `<line x1="${previous.x}" y1="${previous.y}" x2="${point.x}" y2="${point.y}" class="metric-family-link" style="--family-color:${point.color}" />`;
+  }).join('');
+}
+
+function bindRecommendationChartInteractions(chart, payload) {
+  const details = $('metricPointDetails');
+  const tooltip = $('metricChartTooltip');
+  if (!chart || typeof chart.querySelectorAll !== 'function' || typeof chart.querySelector !== 'function') return;
+  const showPoint = (point, event, lock = false) => {
+    const meta = recommendationState.visualPointData.get(point.dataset.comboId);
+    if (!meta) return;
+    if (lock) {
+      recommendationState.visualSelectedFamily = point.dataset.familyKey;
+      recommendationState.visualSelectedCombo = point.dataset.comboId;
+    }
+    if (details) details.innerHTML = recommendationPointDetailHtml(meta);
+    if (tooltip) {
+      tooltip.innerHTML = recommendationPointDetailHtml(meta);
+      tooltip.hidden = false;
+      const bounds = chart.getBoundingClientRect?.();
+      if (bounds && Number.isFinite(event?.clientX)) {
+        tooltip.style.left = `${Math.max(8, event.clientX - bounds.left + 14)}px`;
+        tooltip.style.top = `${Math.max(8, event.clientY - bounds.top + 14)}px`;
+      }
+    }
+    applyRecommendationFamilyState(chart, point.dataset.familyKey);
+  };
+  const clearTransient = () => {
+    if (tooltip) tooltip.hidden = true;
+    applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
+  };
+  chart.querySelectorAll('.metric-point').forEach(point => {
+    point.addEventListener('pointerenter', event => showPoint(point, event));
+    point.addEventListener('pointerleave', clearTransient);
+    point.addEventListener('focus', event => showPoint(point, event));
+    point.addEventListener('blur', clearTransient);
+    point.addEventListener('click', event => {
+      event.stopPropagation();
+      showPoint(point, event, true);
+    });
+    point.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        showPoint(point, event, true);
+        return;
+      }
+      if (event.key !== 'Escape') return;
+      recommendationState.visualSelectedFamily = '';
+      recommendationState.visualSelectedCombo = '';
+      if (details) details.textContent = 'Select a point to inspect exact metrics.';
+      clearTransient();
+    });
+  });
+  chart.querySelectorAll('.metric-legend-filter').forEach(button => {
+    button.addEventListener('click', () => {
+      const category = button.dataset.category;
+      if (recommendationState.visualHiddenCategories.has(category)) recommendationState.visualHiddenCategories.delete(category);
+      else recommendationState.visualHiddenCategories.add(category);
+      renderRecommendationAnalytics(recommendationState.active || payload);
+    });
+  });
+  chart.addEventListener('click', event => {
+    if (event.target.closest?.('.metric-point') || event.target.closest?.('.metric-legend-filter')) return;
+    recommendationState.visualSelectedFamily = '';
+    recommendationState.visualSelectedCombo = '';
+    if (details) details.textContent = 'Select a point to inspect exact metrics.';
+    clearTransient();
+  });
+  applyRecommendationFamilyState(chart, recommendationState.visualSelectedFamily);
+}
+
+function renderRecommendationExplorer(payload, complete, result) {
+  const chart = $('tradeoffChart');
+  const kpis = $('metricExplorerKpis');
+  const hint = $('metricExplorerHint');
+  const interpretation = $('metricInterpretation');
+  if (!chart || !kpis || !hint || !interpretation) return;
+  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
+  const xKey = fillRecommendationMetricControl('metricXAxis', recommendationMetricKeys, labels, 'avg_latency_seconds');
+  const yKey = fillRecommendationMetricControl('metricYAxis', recommendationMetricKeys, labels, 'recall_at_5');
+  const colorKey = fillRecommendationMetricControl(
+    'metricColorBy',
+    recommendationComponentKeys,
+    Object.fromEntries(recommendationComponentKeys.map(key => [key, recommendationComponentLabel(key)])),
+    'store',
+  );
+  const bubbleKey = fillRecommendationMetricControl(
+    'metricBubbleBy',
+    ['none', 'evaluated_queries'],
+    {none: 'Fixed size', evaluated_queries: 'Evaluated queries'},
+    'none',
+  );
+  const quickView = fillRecommendationMetricControl(
+    'metricQuickView',
+    ['all', 'top10', 'bottom10', 'pareto'],
+    {all: 'All combinations', top10: 'Top 10', bottom10: 'Bottom 10', pareto: 'Pareto frontier'},
+    'all',
+  );
+  const visual = recommendationVisualModule();
+  const completeByKey = new Map(complete.map(row => [recommendationHeatmapIdentity(row), row]));
+  const rankedRows = (Array.isArray(result?.completed) ? result.completed : complete)
+    .map(row => completeByKey.get(recommendationHeatmapIdentity(canonicalMetricRow(row))) || canonicalMetricRow(row))
+    .filter(row => completeByKey.has(recommendationHeatmapIdentity(row)));
+  const rankByKey = new Map(rankedRows.map((row, index) => [recommendationHeatmapIdentity(row), index + 1]));
+  const eligible = complete
+    .filter(row => Number.isFinite(recommendationMetricValue(row, xKey)) && Number.isFinite(recommendationMetricValue(row, yKey)))
+    .map(row => ({...row, recommendation_rank: rankByKey.get(recommendationHeatmapIdentity(row)) || null}))
+    .sort((a, b) => (a.recommendation_rank || Infinity) - (b.recommendation_rank || Infinity) || recommendationHeatmapIdentity(a).localeCompare(recommendationHeatmapIdentity(b)));
+  const categoryValues = [...new Set(eligible.map(row => String(row[colorKey] || 'none')))];
+  const categoryColors = visual.categoryColorMap(categoryValues);
+  let plotted = eligible.filter(row => !recommendationState.visualHiddenCategories.has(String(row[colorKey] || 'none')));
+  if (quickView === 'pareto') {
+    plotted = visual.paretoRows(
+      plotted,
+      row => recommendationMetricValue(row, xKey),
+      row => recommendationMetricValue(row, yKey),
+      recommendationMetricDirection(xKey),
+      recommendationMetricDirection(yKey),
+    ).sort((a, b) => a.recommendation_rank - b.recommendation_rank);
+  } else {
+    plotted = visual.applyQuickView(plotted, quickView);
+  }
+  if (!plotted.length) {
+    const unavailable = 'Metrics unavailable until ground truth evaluation completes';
+    hint.textContent = '0 complete evaluations';
+    kpis.innerHTML = `<div class="metric-unavailable">${unavailable}</div>`;
+    chart.innerHTML = `<div class="empty-state">${unavailable}</div>`;
+    interpretation.textContent = unavailable;
+    return;
+  }
+  hint.textContent = `${plotted.length} shown · ${eligible.length} complete evaluation${eligible.length === 1 ? '' : 's'}`;
+  const best = [...plotted].sort((a, b) => recommendationMetricValue(b, yKey) - recommendationMetricValue(a, yKey) || metricScore(b) - metricScore(a))[0];
+  const fastest = [...plotted].sort((a, b) => recommendationMetricValue(a, 'avg_latency_seconds') - recommendationMetricValue(b, 'avg_latency_seconds'))[0];
+  const mean = plotted.reduce((sum, row) => sum + recommendationMetricValue(row, yKey), 0) / plotted.length;
+  kpis.innerHTML = [
+    ['Complete runs', String(plotted.length), 'Selected source only'],
+    [`Best ${recommendationMetricLabel(yKey)}`, fmt(recommendationMetricValue(best, yKey), 3), pipelineLabel(best)],
+    ['Fastest avg/query', `${fmt(recommendationMetricValue(fastest, 'avg_latency_seconds'), 3)}s`, pipelineLabel(fastest)],
+    [`Mean ${recommendationMetricLabel(yKey)}`, fmt(mean, 3), 'Across complete runs'],
+  ].map(([label, value, note]) => `<article class="metric-explorer-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></article>`).join('');
+
+  const box = {left: 76, top: 58, width: 610, height: 230};
+  const xValues = eligible.map(row => recommendationMetricValue(row, xKey));
+  const yValues = eligible.map(row => recommendationMetricValue(row, yKey));
+  const minX = Math.min(...xValues), maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues), maxY = Math.max(...yValues);
+  const xRange = maxX - minX || 1, yRange = maxY - minY || 1;
+  const queries = plotted.map(recommendationEvaluatedQueries);
+  const minQueries = Math.min(...queries), maxQueries = Math.max(...queries), queryRange = maxQueries - minQueries || 1;
+  const sourceLabel = payload.source_type === 'uploaded_project'
+    ? (payload.project_label || payload.project_id || 'Uploaded project')
+    : 'Official WNS benchmark';
+  const offsets = visual.collisionOffsets(
+    plotted,
+    row => recommendationMetricValue(row, xKey),
+    row => recommendationMetricValue(row, yKey),
+  );
+  recommendationState.visualPointData.clear();
+  const points = plotted.map(row => {
+    const offset = offsets.get(row) || {dx: 0, dy: 0};
+    const x = box.left + ((recommendationMetricValue(row, xKey) - minX) / xRange) * box.width + offset.dx;
+    const y = box.top + box.height - ((recommendationMetricValue(row, yKey) - minY) / yRange) * box.height + offset.dy;
+    const category = String(row[colorKey] || 'none');
+    const color = categoryColors[category] || visual.palette[0];
+    const radius = bubbleKey === 'evaluated_queries'
+      ? 7 + ((recommendationEvaluatedQueries(row) - minQueries) / queryRange) * 10
+      : 8;
+    const comboId = String(row.combo_id || recommendationHeatmapIdentity(row));
+    const rank = row.recommendation_rank || eligible.length;
+    const rankClass = rank <= 5 ? 'metric-rank-top' : rank > Math.max(0, eligible.length - 5) ? 'metric-rank-bottom' : 'metric-rank-middle';
+    const familyKey = visual.familyKey(row);
+    const shape = visual.rerankerShape(row.reranker);
+    const badges = recommendationModule().rowBadges(row, result?.roles || {});
+    const title = `Rank ${rank} · ${pipelineLabel(row)} · ${recommendationMetricLabel(xKey)} ${fmt(recommendationMetricValue(row, xKey), 3)} · ${recommendationMetricLabel(yKey)} ${fmt(recommendationMetricValue(row, yKey), 3)} · ${sourceLabel} · complete`;
+    recommendationState.visualPointData.set(comboId, {
+      row, rank, badges, xKey, yKey,
+      xValue: recommendationMetricValue(row, xKey),
+      yValue: recommendationMetricValue(row, yKey),
+    });
+    const halo = rankClass === 'metric-rank-top'
+      ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 4).toFixed(1)}" class="metric-rank-top-halo" />`
+      : rankClass === 'metric-rank-bottom'
+        ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(radius + 3).toFixed(1)}" class="metric-rank-bottom-halo" />`
+        : '';
+    const rankNumber = rankClass === 'metric-rank-top'
+      ? `<text x="${x.toFixed(1)}" y="${(y + 3).toFixed(1)}" class="metric-rank-number">${rank}</text>`
+      : '';
+    return `<g class="metric-point ${rankClass}" data-combo-id="${esc(comboId)}" data-family-key="${esc(familyKey)}" data-category="${esc(category)}" data-rank="${rank}" data-point-x="${x.toFixed(1)}" data-point-y="${y.toFixed(1)}" data-color="${esc(color)}" tabindex="0"><title>${esc(title)}</title>${halo}${recommendationMarkerSvg(shape, x, y, radius, color, rankClass)}${rankNumber}</g>`;
+  }).join('');
+  const legend = categoryValues.map(value => {
+    const hidden = recommendationState.visualHiddenCategories.has(value);
+    return `<li><button type="button" class="metric-legend-filter${hidden ? ' is-hidden' : ''}" data-category="${esc(value)}" aria-pressed="${hidden ? 'false' : 'true'}"><span class="metric-legend-dot" style="--point-color:${esc(categoryColors[value])}"></span><strong>${esc(value)}</strong></button></li>`;
+  }).join('');
+  const idealZone = recommendationMetricDirection(xKey) === 'lower' && recommendationMetricDirection(yKey) === 'higher'
+    ? `<rect x="${box.left}" y="${box.top}" width="${(box.width * .34).toFixed(1)}" height="${(box.height * .34).toFixed(1)}" rx="12" class="metric-ideal-zone" /><text x="${box.left + 10}" y="${(box.top + box.height * .34 - 10).toFixed(1)}" class="metric-ideal-label">Ideal zone</text>`
+    : '';
+  chart.innerHTML = `<svg viewBox="0 0 760 350" role="img" aria-label="${esc(recommendationMetricLabel(yKey))} versus ${esc(recommendationMetricLabel(xKey))} complete evaluation trade-off chart"><text x="14" y="24" class="svg-title">Complete-run trade-off</text>${idealZone}<line x1="${box.left}" y1="${box.top + box.height}" x2="${box.left + box.width}" y2="${box.top + box.height}" class="svg-axis" /><line x1="${box.left}" y1="${box.top}" x2="${box.left}" y2="${box.top + box.height}" class="svg-axis" /><text x="${box.left}" y="${box.top + box.height + 24}" class="svg-value">${fmt(minX, 3)}</text><text x="${box.left + box.width - 34}" y="${box.top + box.height + 24}" class="svg-value">${fmt(maxX, 3)}</text><text x="${box.left - 54}" y="${box.top + box.height}" class="svg-value">${fmt(minY, 3)}</text><text x="${box.left - 54}" y="${box.top + 5}" class="svg-value">${fmt(maxY, 3)}</text><text x="${box.left + box.width - 120}" y="${box.top + box.height + 48}" class="svg-guidance">${xKey === 'avg_latency_seconds' ? 'Faster ←' : 'Lower ←'}</text><text x="14" y="${box.top - 16}" class="svg-guidance">Better ↑</text><g class="metric-family-overlay" aria-hidden="true"></g>${points}</svg><ul class="metric-tradeoff-legend" aria-label="Color grouping legend">${legend}</ul>`;
+  const details = $('metricPointDetails');
+  if (details && !recommendationState.visualSelectedCombo) details.textContent = 'Select a point to inspect exact metrics.';
+  bindRecommendationChartInteractions(chart, payload);
+  interpretation.textContent = `${recommendationMetricLabel(xKey)} is horizontal${xKey === 'avg_latency_seconds' ? '; lower is faster' : ''}. ${recommendationMetricLabel(yKey)} is vertical; color groups by ${recommendationComponentLabel(colorKey).toLowerCase()}. Mint rings identify the top five; select a point for exact metrics.`;
+}
+
+function bindRecommendationHeatmapInteractions(target) {
+  if (!target || typeof target.querySelectorAll !== 'function') return;
+  const cells = [...target.querySelectorAll('.metric-heatmap-cell')];
+  const clear = () => cells.forEach(cell => cell.classList.remove('is-axis-related'));
+  const highlight = active => {
+    const row = active.dataset.heatmapRow;
+    const column = active.dataset.heatmapColumn;
+    cells.forEach(cell => cell.classList.toggle(
+      'is-axis-related',
+      cell.dataset.heatmapRow === row || cell.dataset.heatmapColumn === column,
+    ));
+  };
+  cells.forEach(cell => {
+    cell.tabIndex = 0;
+    cell.addEventListener('pointerenter', () => highlight(cell));
+    cell.addEventListener('pointerleave', clear);
+    cell.addEventListener('focus', () => highlight(cell));
+    cell.addEventListener('blur', clear);
+  });
+}
+
+function renderRecommendationHeatmap(payload, stateRows) {
+  const target = $('metricHeatmap');
+  const legend = $('metricHeatmapLegend');
+  if (!target || !legend) return;
+  const options = recommendationAnalyticsOptions(payload, stateRows);
+  const chunkers = options.chunkers || [];
+  const stores = options.vector_stores || [];
+  const embeddings = options.embeddings || [];
+  const rerankers = (options.rerankers || []).map(canonicalRerankerName);
+  const labels = Object.fromEntries(recommendationMetricKeys.map(key => [key, recommendationMetricLabel(key)]));
+  const metric = fillRecommendationMetricControl('heatmapMetric', recommendationMetricKeys, labels, 'recall_at_5');
+  const embedding = fillRecommendationMetricControl('heatmapEmbedding', embeddings, {}, embeddings[0] || '');
+  const retrievalMethods = options.retrieval_methods?.length ? options.retrieval_methods : ['dense_cosine'];
+  const indexTypes = options.index_types?.length ? options.index_types : ['HNSW'];
+  const reranker = fillRecommendationMetricControl('heatmapReranker', rerankers.length ? rerankers : ['none'], {}, rerankers[0] || 'none');
+  const retrievalMethod = fillRecommendationMetricControl('heatmapRetrievalMethod', retrievalMethods, {}, retrievalMethods[0]);
+  const indexType = fillRecommendationMetricControl('heatmapIndexType', indexTypes, {}, indexTypes[0]);
+  if (!chunkers.length || !stores.length) {
+    legend.textContent = 'No configured matrix';
+    target.innerHTML = '<div class="empty-state">No configured chunker × vector DB combinations are available.</div>';
+    return;
+  }
+  const rowsByKey = new Map(stateRows.map(row => [recommendationHeatmapIdentity(row), row]));
+  const sliceIdentity = (sheet, store) => recommendationHeatmapIdentity({
+    sheet,
+    embedding,
+    store,
+    retrieval_method: retrievalMethod,
+    index_type: indexType,
+    reranker,
+  });
+  const visibleRows = chunkers.flatMap(sheet => stores.map(store => rowsByKey.get(sliceIdentity(sheet, store))))
+    .filter(Boolean);
+  const measuredValues = visibleRows
+    .filter(recommendationMeasuredRow)
+    .map(row => recommendationMetricValue(row, metric))
+    .filter(Number.isFinite);
+  const minValue = measuredValues.length ? Math.min(...measuredValues) : 0;
+  const maxValue = measuredValues.length ? Math.max(...measuredValues) : 0;
+  const range = maxValue - minValue || 1;
+  const lowerIsBetter = recommendationMetricDirection(metric) === 'lower';
+  const bestValue = measuredValues.length ? (lowerIsBetter ? minValue : maxValue) : null;
+  const worstValue = measuredValues.length ? (lowerIsBetter ? maxValue : minValue) : null;
+  const stateSwatches = ['not_run', 'running', 'incomplete', 'failed']
+    .map(value => `<span class="metric-state-swatch" data-state="${value}">${esc(value.replace('_', ' '))}</span>`)
+    .join('');
+  // Heatmap markup is safe: state names are allowlisted, identifiers are escaped, and metrics are numerically formatted.
+  legend.innerHTML = measuredValues.length
+    ? `<span class="metric-scale-label">${esc(retrievalMethod)} · ${esc(indexType)} · Low ${fmt(minValue, 3)}</span><span class="metric-scale-ramp" aria-hidden="true"></span><span class="metric-scale-label">High ${fmt(maxValue, 3)}</span>${stateSwatches}`
+    : `<span>No complete measured values</span>${stateSwatches}`;
+  const cells = chunkers.flatMap(sheet => stores.map(store => {
+    const row = rowsByKey.get(sliceIdentity(sheet, store));
+    const rawState = recommendationRowState(row);
+    const metricValue = recommendationMetricValue(row, metric);
+    const measured = recommendationMeasuredRow(row) && Number.isFinite(metricValue);
+    const rowState = rawState === 'complete' && !measured ? 'incomplete' : rawState;
+    const normalized = measured ? (metricValue - minValue) / range : 0;
+    const performance = lowerIsBetter ? 1 - normalized : normalized;
+    const bucket = measured ? Math.max(0, Math.min(4, Math.round(performance * 4))) : 0;
+    const extrema = measured && metricValue === bestValue
+      ? ' is-best'
+      : measured && metricValue === worstValue
+        ? ' is-worst'
+        : '';
+    const stateLabel = rowState.replace('_', ' ');
+    const display = measured ? fmt(metricValue, 3) : stateLabel;
+    return `<div class="metric-heatmap-cell ${measured ? `metric-quality-${bucket}` : ''}${extrema}" data-state="${esc(rowState)}" data-heatmap-row="${esc(sheet)}" data-heatmap-column="${esc(store)}" role="gridcell" aria-label="${esc(`${sheet}, ${store}: ${measured ? `${recommendationMetricLabel(metric)} ${display}` : stateLabel}`)}"><strong>${esc(display)}</strong><small>${measured ? esc(recommendationMetricLabel(metric)) : 'No complete metric'}</small></div>`;
+  }));
+  target.innerHTML = `<div class="metric-heatmap-scroll-note">Scroll horizontally to view all configured vector DB columns.</div><div class="metric-heatmap-grid" role="grid" aria-label="${esc(recommendationMetricLabel(metric))} by chunker and vector DB" style="grid-template-columns:minmax(180px,1.2fr) repeat(${stores.length},minmax(132px,1fr))"><div class="metric-heatmap-head">Chunker / vector DB</div>${stores.map(store => `<div class="metric-heatmap-head">${esc(store)}</div>`).join('')}${chunkers.map((sheet, index) => `<div class="metric-heatmap-row-label">${esc(sheet)}</div>${cells.slice(index * stores.length, (index + 1) * stores.length).join('')}`).join('')}</div>`;
+  bindRecommendationHeatmapInteractions(target);
+}
+
+function renderRecommendationAnalytics(payload = recommendationState.active || {}) {
+  const complete = completeRecommendationRows(payload);
+  const stateRows = recommendationStateRows(payload);
+  const result = recommendationState.analyticsResult;
+  renderRecommendationExplorer(payload, complete, result);
+  renderRecommendationHeatmap(payload, stateRows);
+}
+
 function renderRecommendationSource(payload) {
   const result = recommendationModule().recommendationsForSource(payload);
   recommendationState.active = payload;
+  recommendationState.analyticsResult = result;
   const uploaded = payload.source_type === 'uploaded_project';
+  const combined = payload.source_type === 'combined';
   const baseline = !uploaded && payload.result_set === 'baseline';
   recommendationState.sourceType = uploaded ? 'uploaded_project' : 'official';
-  setText('recommendationStatus', uploaded ? (payload.run_state || 'Uploaded matrix run') : (baseline ? 'No-reranker baseline' : 'Official benchmark'));
+  setText('recommendationStatus', uploaded
+    ? (payload.run_state || 'Uploaded matrix run')
+    : (combined ? 'Accepted + verified candidates' : (baseline ? 'No-reranker baseline' : 'Official benchmark')));
   const context = uploaded
     ? `Viewing: ${payload.project_label || payload.project_id} · ${payload.run_id} · ${payload.scoring_mode === 'retrieval_labels' ? `retrieval labels @${payload.metric_k}` : 'evidence only'}`
+    : combined
+      ? `Viewing: ${fmtInt(payload.accepted_count || 0)} accepted + ${fmtInt(payload.candidate_count || 0)} receipt-verified candidates · ${fmtInt(payload.verified_batch_count || 0)} verified batches · candidate status ${payload.candidate_promotion_status || 'not_accepted'}`
     : baseline
       ? `Viewing: No-reranker baseline · ${fmtInt(payload.rows?.length ?? 0)} measured combinations · separate from the official matrix`
       : `Viewing: Official WNS benchmark · ${fmtInt(payload.configured ?? 180)} configured combinations · ${fmtInt(payload.evaluated ?? payload.rows?.length ?? 0)} evaluated`;
@@ -1235,6 +1766,7 @@ function renderRecommendationSource(payload) {
   setText('recommendationModeNote', result.mode === 'labelled' ? 'Quality, speed, and honest cost posture for the active source.' : 'Operational speed, run health, and evidence coverage. Quality is not claimed without labels.');
   renderRecommendationStrip(result);
   renderRecommendationTable(payload, result);
+  renderRecommendationAnalytics(payload);
   renderPricingLedger(payload);
   if (uploaded) clearUploadedTradeoffs();
   return result;
@@ -1248,7 +1780,7 @@ function officialRecommendationPayload(resultSet = 'official') {
   if (resultSet === 'baseline') {
     return sourceState.baselineResultPayload(evaluation, state.operational?.benchmark_detail_evidence || []);
   }
-  return sourceState.officialResultPayload(
+  const official = sourceState.officialResultPayload(
     evaluation,
     {
       configured: descriptor.configured ?? 180,
@@ -1257,6 +1789,11 @@ function officialRecommendationPayload(resultSet = 'official') {
     },
     state.operational?.benchmark_detail_evidence || [],
   );
+  if (resultSet === 'combined') {
+    const candidateResults = state.operational?.candidate_results || {};
+    return sourceState.combinedResultPayload(official, candidateResults);
+  }
+  return official;
 }
 
 function setSelectOptionLabel(selectId, value, label) {
@@ -1267,12 +1804,17 @@ function setSelectOptionLabel(selectId, value, label) {
 
 function showOfficialRecommendations() {
   recommendationState.sourceType = 'official';
-  const resultSet = $('recommendationOfficialSet')?.value === 'baseline' ? 'baseline' : 'official';
+  const selected = $('recommendationOfficialSet')?.value;
+  const resultSet = selected === 'baseline' || selected === 'combined' ? selected : 'official';
   const payload = officialRecommendationPayload(resultSet);
   const baselineCount = officialRecommendationPayload('baseline')?.rows.length || 0;
+  const combinedCount = officialRecommendationPayload('combined')?.rows.length || 0;
   const baselineLabel = `No-reranker baseline — ${baselineCount} measured`;
+  const combinedLabel = `Accepted + verified candidates — ${combinedCount} actual`;
   setSelectOptionLabel('recommendationOfficialSet', 'baseline', baselineLabel);
   setSelectOptionLabel('metricsResultSet', 'baseline', baselineLabel);
+  setSelectOptionLabel('recommendationOfficialSet', 'combined', combinedLabel);
+  setSelectOptionLabel('metricsResultSet', 'combined', combinedLabel);
   renderCanonicalResultPayload(payload);
 }
 
@@ -1675,8 +2217,9 @@ function renderOperational() {
   const optsForStatus = matrixOptions();
   const embeddings = optsForStatus.embeddings.length ? optsForStatus.embeddings : uniq(latest, 'embedding');
   const stores = optsForStatus.stores.length ? optsForStatus.stores : uniq(latest, 'store');
+  const activeOfficialResultSet = $('recommendationOfficialSet')?.value || 'official';
   const officialPayload = recommendationState.sourceType === 'official' && globalThis.PipelineRecommendations
-    ? officialRecommendationPayload('official')
+    ? officialRecommendationPayload(activeOfficialResultSet)
     : null;
 
   $('modeLabel').textContent = 'Live artifacts';
@@ -2249,7 +2792,7 @@ function renderPortfolioBatches(portfolio) {
   const controlsEnabled = candidateOperationsState.adapters?.control_enabled === true;
   target.innerHTML = batches.map((batch, index) => {
     const selected = batch.selected === true;
-    const terminal = batch.state === 'completed';
+    const terminal = ['completed', 'archived_query_depth'].includes(batch.state);
     const services = (batch.required_service_ids || []).join(', ') || 'No managed services';
     return `<article class="portfolio-batch-row state-${esc(batch.state)} ${selected ? 'selected' : ''}" data-batch-id="${esc(batch.batch_id)}">
       <div class="batch-sequence"><span>${String(index + 1).padStart(2, '0')}</span><small>of ${batches.length}</small></div>
@@ -2322,7 +2865,7 @@ async function loadCandidateOperations() {
 
 async function loadPortfolioCombinationDetails() {
   if (!candidateOperationsState.details) {
-    setText('portfolioCombinationHint', 'Loading 4,320 portfolio rows…');
+    setText('portfolioCombinationHint', 'Loading selected portfolio combinations…');
     candidateOperationsState.details = await api('/api/portfolio/batches');
   }
   renderPortfolioCombinationRows();
@@ -2610,6 +3153,9 @@ $('metricsGroundtruth')?.addEventListener('input', event => {
 });
 $('metricsResultSet')?.addEventListener('input', event => {
   selectRecommendationResultSet(event.target.value).catch(console.error);
+});
+['metricXAxis','metricYAxis','metricColorBy','metricBubbleBy','metricQuickView','heatmapMetric','heatmapEmbedding','heatmapReranker','heatmapRetrievalMethod','heatmapIndexType'].forEach(id => {
+  $(id)?.addEventListener('input', () => renderRecommendationAnalytics(recommendationState.active || {}));
 });
 $('projectEvidenceMore')?.addEventListener('click', () => loadProjectEvidencePage({append: true}).catch(console.error));
 $('projectEvidenceDialog')?.addEventListener('close', closeRecommendationEvidence);

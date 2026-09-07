@@ -130,8 +130,12 @@ def verify_completed_batch(
     portfolio_root: Path,
     plan: PortfolioPlan,
     batch: PortfolioBatch,
+    *,
+    candidate_lane: str = CANDIDATE_LANE,
 ) -> dict[str, Any]:
     """Validate one completion receipt, every artifact hash, and exact ordered IDs."""
+    if not candidate_lane or len(Path(candidate_lane).parts) != 1:
+        raise BatchReceiptError("candidate lane is not a safe direct output namespace")
     batch_dir = portfolio_root / batch.batch_id
     if batch_dir.is_symlink():
         raise BatchReceiptError(f"batch {batch.batch_id} directory must not be a symlink or path alias")
@@ -162,7 +166,7 @@ def verify_completed_batch(
     if not isinstance(manifest_context, dict):
         raise BatchReceiptError("batch manifest portfolio context is missing")
     _require_context(manifest_context, expected, "batch manifest")
-    expected_artifact_root = f"{CANDIDATE_LANE}/{plan.portfolio_id}/{batch.batch_id}"
+    expected_artifact_root = f"{candidate_lane}/{plan.portfolio_id}/{batch.batch_id}"
     if manifest.get("artifact_root") != expected_artifact_root:
         raise BatchReceiptError("batch manifest artifact root is not canonical")
 

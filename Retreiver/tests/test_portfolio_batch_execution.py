@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "benchmark.all-methods-portfolio.json"
 
 
+def test_portfolio_result_rows_include_immutable_context():
+    row = {"combination_id": "combo_123", "status": "completed"}
+    context = {
+        "portfolio_id": "portfolio_abc",
+        "portfolio_hash": "abc",
+        "batch_id": "batch_def",
+        "promotion_status": "not_accepted",
+    }
+
+    assert runner.portfolio_result_row(row, context) == {**row, **context}
+    assert runner.portfolio_result_row(row, None) == row
+
+
 def test_default_registry_exposes_turbovec_without_importing_optional_package():
     cls = default_registry().get("vector_store", "turbovec")
     assert cls.__name__ == "TurboVecVectorStoreAdapter"

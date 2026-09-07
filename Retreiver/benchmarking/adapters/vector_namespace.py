@@ -63,38 +63,6 @@ def create_faiss_namespace(index_root: str | Path, identity: str) -> Path:
     return namespace
 
 
-def open_faiss_namespace(index_root: str | Path, identity: str) -> Path:
-    """Open an existing derived FAISS namespace without following symlinks."""
-    root = validated_index_root(index_root)
-    component = safe_lower_namespace(identity)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    root_fd = os.open(root, flags)
-    namespace_fd: int | None = None
-    try:
-        opened_root = os.fstat(root_fd)
-        lexical_root = root.lstat()
-        if (opened_root.st_dev, opened_root.st_ino) != (
-            lexical_root.st_dev,
-            lexical_root.st_ino,
-        ):
-            raise ValueError("index_root changed during namespace open")
-        namespace_fd = os.open(component, flags, dir_fd=root_fd)
-        opened_namespace = os.fstat(namespace_fd)
-        lexical_namespace = (root / component).lstat()
-        if (
-            stat.S_ISLNK(lexical_namespace.st_mode)
-            or not stat.S_ISDIR(lexical_namespace.st_mode)
-            or (opened_namespace.st_dev, opened_namespace.st_ino)
-            != (lexical_namespace.st_dev, lexical_namespace.st_ino)
-        ):
-            raise ValueError("FAISS namespace changed during open")
-    finally:
-        if namespace_fd is not None:
-            os.close(namespace_fd)
-        os.close(root_fd)
-    return root / component
-
-
 def validated_index_root(value: str | Path) -> Path:
     """Validate an existing, canonical, non-symlink directory for FAISS indexes."""
     root = Path(value)

@@ -1,0 +1,16 @@
+{
+  "source_head": "8580bde1b971ee40c286d0cfd5dbbf4b7e2d54e4",
+  "source_branch": "feature/meeting-400-new-methods",
+  "intentional_dirty_snapshot": true,
+  "excluded_historical_files": [
+    "WNS_WORK_LAPTOP_SETUP.md",
+    "VM_DASHBOARD_ARTIFACT_SYNC.md",
+    "WINDOWS_ADAPTER_SETUP.md",
+    "tests/test_qa_text.py",
+    "docs/superpowers/plans/2026-07-14-official-baseline-recommendations-hotfix.md",
+    "docs/superpowers/plans/2026-08-20-all-method-portfolio-and-adapter-control.md",
+    "docs/superpowers/plans/2026-07-11-project-isolation-hardening.md",
+    "docs/superpowers/specs/2026-07-21-benchmark-integrity-lifecycle-and-metrics-design.md"
+  ],
+  "runtime_data_included": false
+}

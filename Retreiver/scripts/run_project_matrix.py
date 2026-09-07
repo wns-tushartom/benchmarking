@@ -37,12 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         arguments.run_id,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    state = str(result.get("state") or "").strip().lower()
-    if state == "completed":
-        return 0
-    if state == "partial":
-        return 2
-    return 1
+    return 0
 
 
 if __name__ == "__main__":

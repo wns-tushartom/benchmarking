@@ -75,6 +75,11 @@ QWEN_RERANK_INSTRUCTION = os.getenv(
     "Given a WNS airline support query, retrieve relevant policy or process passages that answer the query.",
 )
 DEVICE = os.getenv("WNS_MODEL_DEVICE", os.getenv("EMBEDDING_DEVICE", "cuda"))
+RERANK_BATCH_SIZE = int(os.getenv("WNS_RERANK_BATCH_SIZE", "1"))
+QWEN_RERANK_MAX_LENGTH = int(os.getenv("QWEN_RERANK_MAX_LENGTH", "4096"))
+NEMOTRON_RERANK_MAX_LENGTH = int(os.getenv("NEMOTRON_RERANK_MAX_LENGTH", "4096"))
+if RERANK_BATCH_SIZE <= 0:
+    raise RuntimeError("WNS_RERANK_BATCH_SIZE must be positive")
 
 
 class EmbedRequest(BaseModel):
@@ -150,7 +155,13 @@ def cross_encoder_model(key: str):
     if key == "bge":
         return CrossEncoder(BGE_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
     if key == "qwen":
-        model = CrossEncoder(QWEN_RERANK_MODEL, trust_remote_code=True, device=DEVICE)
+        model = CrossEncoder(
+            QWEN_RERANK_MODEL,
+            trust_remote_code=True,
+            device=DEVICE,
+            max_length=QWEN_RERANK_MAX_LENGTH,
+            automodel_args={"torch_dtype": "auto"},
+        )
         if getattr(model, "tokenizer", None) is not None and getattr(model.tokenizer, "pad_token", None) is None:
             model.tokenizer.pad_token = model.tokenizer.eos_token
         if getattr(model, "model", None) is not None and getattr(model.model, "config", None) is not None:
@@ -186,19 +197,23 @@ def nemotron_scores(query: str, documents: List[str]) -> List[float]:
     import torch
 
     tokenizer, model = nemotron_model()
-    encoded = tokenizer(
-        [format_nemotron_pair(query, document) for document in documents],
-        padding=True,
-        truncation=True,
-        max_length=8192,
-        return_tensors="pt",
-    )
-    encoded = {key: value.to(DEVICE) for key, value in encoded.items()}
-    with torch.no_grad():
-        logits = model(**encoded).logits
-    if len(logits.shape) > 1 and logits.shape[-1] > 1:
-        logits = logits[:, -1]
-    return [float(value) for value in logits.reshape(-1).detach().float().cpu().tolist()]
+    scores: List[float] = []
+    for start in range(0, len(documents), RERANK_BATCH_SIZE):
+        batch = documents[start : start + RERANK_BATCH_SIZE]
+        encoded = tokenizer(
+            [format_nemotron_pair(query, document) for document in batch],
+            padding=True,
+            truncation=True,
+            max_length=NEMOTRON_RERANK_MAX_LENGTH,
+            return_tensors="pt",
+        )
+        encoded = {key: value.to(DEVICE) for key, value in encoded.items()}
+        with torch.no_grad():
+            logits = model(**encoded).logits
+        if len(logits.shape) > 1 and logits.shape[-1] > 1:
+            logits = logits[:, -1]
+        scores.extend(float(value) for value in logits.reshape(-1).detach().float().cpu().tolist())
+    return scores
 
 
 @app.get("/health")
@@ -265,10 +280,18 @@ def rerank(key: str, req: RerankRequest):
             else:
                 formatted_query = format_qwen_query(req.query)
                 pairs = [(formatted_query, format_qwen_document(doc)) for doc in docs]
-            raw_scores = model.predict(pairs)
+            raw_scores = model.predict(
+                pairs,
+                batch_size=RERANK_BATCH_SIZE,
+                show_progress_bar=False,
+            )
         else:
             pairs = [(req.query, doc) for doc in docs]
-            raw_scores = model.predict(pairs)
+            raw_scores = model.predict(
+                pairs,
+                batch_size=RERANK_BATCH_SIZE,
+                show_progress_bar=False,
+            )
     scores = [score_float(s) for s in raw_scores]
     ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
     if req.top_k:

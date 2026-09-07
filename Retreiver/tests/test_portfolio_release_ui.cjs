@@ -1,0 +1,14 @@
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync('web/app.js', 'utf8');
+const start = src.indexOf('function renderPortfolioBatches(');
+const end = src.indexOf('\nfunction ', start + 1);
+const target = {};
+const sandbox = {$: () => target, candidateOperationsState: {adapters: {control_enabled: true}}, esc: String, fmtInt: String, candidateStateLabel: String};
+vm.createContext(sandbox);
+vm.runInContext(src.slice(start, end), sandbox);
+sandbox.renderPortfolioBatches({batches: [{batch_id: 'archived', state: 'archived_query_depth', combination_count: 60}]});
+assert.match(target.innerHTML, /data-portfolio-run="archived" disabled/);
+assert.ok(!src.includes('Loading 4,320 portfolio rows'));
+console.log('Portfolio release UI PASS');

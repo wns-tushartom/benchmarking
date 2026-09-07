@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from benchmarking.core.schemas import Chunk, SearchHit
-from benchmarking.adapters.vector_namespace import create_faiss_namespace, open_faiss_namespace
+from benchmarking.adapters.vector_namespace import create_faiss_namespace
 
 
 class FaissVectorStoreAdapter:
@@ -50,11 +50,7 @@ class FaissVectorStoreAdapter:
                 raise ValueError(
                     "explicit FAISS namespace requires index_root and forbids index_dir"
                 )
-            self.index_dir = (
-                open_faiss_namespace(index_root, namespace)
-                if load_existing
-                else create_faiss_namespace(index_root, namespace)
-            )
+            self.index_dir = create_faiss_namespace(index_root, namespace)
         else:
             if index_root is not None:
                 raise ValueError("index_root requires an explicit FAISS namespace")

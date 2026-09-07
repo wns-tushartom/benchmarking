@@ -37,6 +37,14 @@
     return true;
   });
 
+  function qualityEligible(row, sourceType) {
+    if (finite(row && (row.evaluated_queries ?? row.query_count)) !== 500) return false;
+    const values = sourceType === 'official'
+      ? [row && row.recall_at_5, row && row.mrr, row && row.ndcg_at_5, row && row.avg_latency_seconds]
+      : [row && row.recall_at_k, row && row.mrr_at_k, row && row.ndcg_at_k, row && row.avg_query_latency_s];
+    return values.every(value => finite(value) !== null);
+  }
+
   function projectQualityCompare(a, b) {
     return (finite(b.ndcg_at_k) ?? -1) - (finite(a.ndcg_at_k) ?? -1)
       || (finite(b.mrr_at_k) ?? -1) - (finite(a.mrr_at_k) ?? -1)
@@ -341,9 +349,9 @@
 
   function recommendationsForSource(source) {
     const safeSource = source && typeof source === 'object' ? source : {};
-    const sourceType = safeSource.source_type === 'official' ? 'official' : 'uploaded_project';
+    const sourceType = safeSource.source_type === 'uploaded_project' ? 'uploaded_project' : 'official';
     const allRows = Array.isArray(safeSource.rows) ? safeSource.rows.filter(Boolean) : [];
-    const completedRows = completed(allRows, sourceType);
+    const completedRows = completed(allRows, safeSource.source_type);
     const failedRows = allRows.filter(row => row.status === 'failed').slice()
       .sort((a, b) => stableKey(a).localeCompare(stableKey(b)));
     const qualityCompare = sourceType === 'official'
@@ -380,21 +388,21 @@
       };
     }
 
-    const qualityRows = completedRows.slice().sort(qualityCompare);
+    const qualityRows = completedRows.filter(row => qualityEligible(row, sourceType)).sort(qualityCompare);
     const quality = qualityRows.find(row => qualityRecorded(row, sourceType)) || null;
-    const speedRows = completedRows.filter(row => rowLatency(row, sourceType) !== null);
+    const speedRows = qualityRows.filter(row => rowLatency(row, sourceType) !== null);
     speedRows.sort((a, b) => rowLatency(a, sourceType) - rowLatency(b, sourceType)
       || qualityCompare(a, b));
     const roles = {
       quality,
       speed: speedRows[0] || null,
-      value: valueRole(completedRows, sourceType, qualityCompare),
+      value: valueRole(qualityRows, sourceType, qualityCompare),
     };
     return {
       source_type: sourceType,
       mode,
       roles,
-      rows: qualityRows.concat(failedRows),
+      rows: qualityRows.concat(completedRows.filter(row => !qualityRows.includes(row) && finite(row.evaluated_queries ?? row.query_count) === 500), failedRows),
       completed: qualityRows,
       failed: failedRows,
       completed_rows: qualityRows,
@@ -439,6 +447,7 @@
     positive,
     stableKey,
     completed,
+    qualityEligible,
     projectQualityCompare,
     officialQualityCompare,
     pricingForRow,

@@ -76,6 +76,32 @@
     return Object.freeze({complete: invalid.length === 0, missing_metrics: Object.freeze(invalid)});
   }
 
+  function candidateMetricCompleteness(row) {
+    const invalid = OFFICIAL_METRICS.filter(field => finite(row?.[field]) === null);
+    const reject = field => { if (!invalid.includes(field)) invalid.push(field); };
+    const queryCount = finite(row?.evaluated_queries);
+    if (queryCount !== 500 || !Number.isInteger(queryCount)) reject('evaluated_queries');
+
+    [
+      'recall_at_1', 'recall_at_3', 'recall_at_5', 'recall_at_10',
+      'mrr', 'precision_at_5', 'ndcg_at_5',
+    ].forEach(field => {
+      const value = finite(row?.[field]);
+      if (value !== null && (value < 0 || value > 1)) reject(field);
+    });
+    ['avg_first_relevant_rank', 'avg_latency_seconds'].forEach(field => {
+      const value = finite(row?.[field]);
+      if (value !== null && value < 0) reject(field);
+    });
+    const noHitQueries = finite(row?.no_hit_queries);
+    if (
+      noHitQueries !== null
+      && (noHitQueries < 0 || !Number.isInteger(noHitQueries)
+        || (queryCount !== null && queryCount > 0 && noHitQueries > queryCount))
+    ) reject('no_hit_queries');
+    return Object.freeze({complete: invalid.length === 0, missing_metrics: Object.freeze(invalid)});
+  }
+
   function canonicalMetricRow(row, extra) {
     const normalized = Object.assign({}, row || {}, extra || {});
     normalized.reranker = canonicalRerankerName(normalized.reranker || normalized.reranking_model || 'none');
@@ -84,6 +110,24 @@
 
   function metricRowKey(row) {
     return `${row?.sheet || ''}|${row?.embedding || ''}|${row?.store || ''}|${canonicalRerankerName(row?.reranker || row?.reranking_model || 'none')}`;
+  }
+
+  function canonicalRetrievalMethod(value) {
+    const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (['', 'cosine', 'cosine_similarity', 'dense', 'dense_cosine'].includes(normalized)) return 'dense_cosine';
+    if (['bm25_dense_rrf', 'bm25_dense_and_rrf', 'hybrid_rrf'].includes(normalized)) return 'hybrid_rrf';
+    return normalized;
+  }
+
+  function resultRowIdentity(row) {
+    return [
+      row?.sheet || row?.chunker || '',
+      row?.embedding || '',
+      row?.store || row?.vector_store || '',
+      row?.index_type || 'HNSW',
+      canonicalRetrievalMethod(row?.retrieval_method),
+      canonicalRerankerName(row?.reranker || row?.reranking_model || 'none'),
+    ].join('|');
   }
 
   function isCompleted(row) {
@@ -208,6 +252,83 @@
     });
   }
 
+  function combinedResultPayload(acceptedPayload, candidateSource) {
+    const acceptedRows = Array.isArray(acceptedPayload?.rows) ? acceptedPayload.rows : [];
+    const candidateRows = Array.isArray(candidateSource?.rows) ? candidateSource.rows : [];
+    const acceptedQueryCounts = new Set(
+      acceptedRows.map(row => finite(row?.evaluated_queries)).filter(value => value !== null),
+    );
+    const candidateQueryCounts = new Set();
+    const admitted = new Map();
+    acceptedRows.forEach(raw => {
+      const row = Object.freeze(Object.assign({}, raw, {
+        result_provenance: 'accepted',
+        promotion_status: 'accepted',
+        evaluation_scope: 'accepted_full_evaluation',
+        comparable_to_accepted: true,
+        canonical_identity: resultRowIdentity(raw),
+      }));
+      admitted.set(row.canonical_identity, row);
+    });
+
+    let candidateCount = 0;
+    let duplicateCount = 0;
+    candidateRows.forEach(raw => {
+      const completeness = candidateMetricCompleteness(raw);
+      if (
+        raw?.receipt_verified !== true
+        || raw?.promotion_status !== 'not_accepted'
+        || !isCompleted(raw)
+        || !completeness.complete
+      ) return;
+      const identity = resultRowIdentity(raw);
+      if (admitted.has(identity)) {
+        duplicateCount += 1;
+        return;
+      }
+      const queryCount = finite(raw?.evaluated_queries);
+      candidateQueryCounts.add(queryCount);
+      candidateCount += 1;
+      admitted.set(identity, Object.freeze(Object.assign({}, raw, {
+        combo_id: raw.combo_id || raw.combination_id || identity,
+        canonical_identity: identity,
+        result_provenance: 'verified_candidate',
+        promotion_status: 'not_accepted',
+        evaluation_scope: 'exploratory_candidate',
+        comparable_to_accepted: acceptedQueryCounts.has(queryCount),
+        winner_score: metricScore(raw),
+      })));
+    });
+
+    const rows = [...admitted.values()].sort((left, right) =>
+      (metricScore(right) ?? -Infinity) - (metricScore(left) ?? -Infinity)
+      || left.canonical_identity.localeCompare(right.canonical_identity)
+    );
+    const acceptedQueryCountValues = [...acceptedQueryCounts].sort((a, b) => a - b);
+    const candidateQueryCountValues = [...candidateQueryCounts].sort((a, b) => a - b);
+    const allQueryCounts = new Set([...acceptedQueryCountValues, ...candidateQueryCountValues]);
+    return Object.freeze({
+      source_type: 'combined',
+      result_set: 'combined',
+      scoring_mode: 'retrieval_labels',
+      metric_k: 5,
+      configured: rows.length,
+      evaluated: rows.length,
+      accepted_count: acceptedRows.length,
+      candidate_count: candidateCount,
+      duplicate_count: duplicateCount,
+      query_count_basis: allQueryCounts.size <= 1 ? 'uniform' : 'mixed',
+      accepted_query_counts: Object.freeze(acceptedQueryCountValues),
+      candidate_query_counts: Object.freeze(candidateQueryCountValues),
+      candidate_source_lane: candidateSource?.source_lane || 'meeting-400-candidates',
+      candidate_promotion_status: candidateSource?.promotion_status || 'not_accepted',
+      verified_batch_count: Number(candidateSource?.verified_batch_count || 0),
+      rejected_batch_count: Number(candidateSource?.rejected_batch_count || 0),
+      rows: Object.freeze(rows),
+      incomplete_rows: Object.freeze([]),
+    });
+  }
+
   function baselineResultPayload(evaluation, evidenceRows) {
     const expectedKeys = expectedKeySet(evaluation?.benchmark_reference?.report?.baseline_expected_keys);
     const evidenceCounts = new Map();
@@ -285,10 +406,13 @@
     canonicalRerankerName,
     canonicalMetricRow,
     metricRowKey,
+    canonicalRetrievalMethod,
+    resultRowIdentity,
     metricScore,
     officialMetricCompleteness,
     officialRowAdmission,
     officialResultPayload,
+    combinedResultPayload,
     baselineResultPayload,
     normalizeResultPayload,
     normalizeActiveSource,

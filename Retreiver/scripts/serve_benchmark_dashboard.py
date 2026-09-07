@@ -81,7 +81,11 @@ from scripts.dashboard_control_api import (
 )
 from scripts.pipeline_run_contract import parse_query_upload
 from scripts.benchmark_cli import load_verified_portfolio_plan
-from scripts.publish_portfolio_results import portfolio_status as inspect_portfolio_status
+from scripts.publish_portfolio_results import (
+    BatchReceiptError,
+    portfolio_status as inspect_portfolio_status,
+    verify_completed_batch,
+)
 from scripts.vm_adapter_manager import AdapterControlError, PortManifestError, verify_operator_token
 from scripts.wns_env import load_env_files, service_base_from_endpoint
 
@@ -102,8 +106,11 @@ PDF_DIR = ROOT / "data" / "pdfs"
 USER_PROJECTS_DIR = ROOT / "data" / "user_projects"
 PDF_AUDIT_PATH = ROOT / "data" / "pdf_extraction_audit.csv"
 CONFIG_PATH = ROOT / "configs" / "benchmark.local.json"
-CANDIDATE_CONFIG_PATH = ROOT / "configs" / "benchmark.retrieval-reranker-candidates.json"
-PORTFOLIO_CONFIG_PATH = ROOT / "configs" / "benchmark.all-methods-portfolio.json"
+CANDIDATE_CONFIG_PATH = ROOT / "configs" / "benchmark.meeting-400-candidates.json"
+PORTFOLIO_CONFIG_PATH = CANDIDATE_CONFIG_PATH
+MEETING_CANDIDATE_CONFIG_PATH = ROOT / "configs" / "benchmark.meeting-400-candidates.json"
+ACCEPTED_MANIFEST_PATH = ROOT / "data" / "accepted" / "ACCEPTED_180_MANIFEST.json"
+ACCEPTED_MANIFEST_SHA256 = "f9d585134798016a23cbd560464914b364808b1233a076a702fc28d1b64f09eb"
 JOB_DIR = ROOT / "data" / "dashboard_jobs"
 JOBS: dict[str, dict[str, Any]] = {}
 load_env_files(ROOT)
@@ -139,6 +146,42 @@ def load_dashboard_portfolio_plan() -> Any:
 
 def dashboard_portfolio_status(plan: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     config = load_benchmark_config(PORTFOLIO_CONFIG_PATH)
+    if config.get("experiment", {}).get("output_lane") == "meeting-400-candidates":
+        source = read_meeting_candidate_results(root=ROOT, config_path=PORTFOLIO_CONFIG_PATH)
+        observed = {
+            item["batch_id"]: item
+            for item in source.get("batches", [])
+            if isinstance(item, dict) and isinstance(item.get("batch_id"), str)
+        }
+        state_map = {
+            "verified": "completed", "rejected": "failed", "not_run": "not_run",
+            "archived_query_depth": "archived_query_depth",
+        }
+        batches = []
+        counts = {"completed": 0, "failed": 0, "not_run": 0, "archived_query_depth": 0}
+        for batch in plan.batches:
+            observation = observed.get(batch.batch_id, {})
+            state = state_map.get(observation.get("state"), "not_run")
+            counts[state] += 1
+            batches.append(
+                {
+                    "batch_id": batch.batch_id,
+                    "state": state,
+                    "selected": False,
+                    "error": observation.get("error") if state == "failed" else None,
+                }
+            )
+        return config, {
+            "schema_version": 1,
+            "portfolio_id": plan.portfolio_id,
+            "portfolio_hash": plan.portfolio_hash,
+            "promotion_status": "not_accepted",
+            "batch_count": len(plan.batches),
+            "max_combinations_per_batch": plan.max_combinations_per_batch,
+            "selected_batch_id": None,
+            "state_counts": counts,
+            "batches": batches,
+        }
     plan_path = _dashboard_portfolio_plan_path(config, plan)
     try:
         return config, inspect_portfolio_status(plan_path)
@@ -225,7 +268,7 @@ def candidate_output_lanes() -> set[str]:
     canonical = load_benchmark_config(CANDIDATE_CONFIG_PATH).get("experiment", {}).get(
         "output_lane", "retrieval-reranker-candidates"
     )
-    return {canonical, "retrieval_reranker_candidates"}
+    return {canonical, "retrieval-reranker-candidates", "retrieval_reranker_candidates"}
 
 
 def candidate_output_lane() -> str:
@@ -305,7 +348,7 @@ def candidate_benchmark_command(
         sys.executable,
         "scripts/benchmark_cli.py",
         "run",
-        "configs/benchmark.retrieval-reranker-candidates.json",
+        "configs/benchmark.meeting-400-candidates.json",
         "--limit-queries",
         limit_queries,
         "--max-runs",
@@ -322,7 +365,7 @@ def candidate_preflight_command() -> list[str]:
         sys.executable,
         "scripts/benchmark_cli.py",
         "validate",
-        "configs/benchmark.retrieval-reranker-candidates.json",
+        "configs/benchmark.meeting-400-candidates.json",
     ]
 
 
@@ -896,6 +939,173 @@ def normalized_benchmark_row(row: dict[str, Any], source: str) -> dict[str, Any]
     }
 
 
+def canonical_retrieval_method(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    if normalized in {"", "cosine", "cosine_similarity", "dense", "dense_cosine"}:
+        return "dense_cosine"
+    if normalized in {"bm25_dense_rrf", "bm25_dense_and_rrf", "hybrid_rrf"}:
+        return "hybrid_rrf"
+    return normalized
+
+
+def candidate_row_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        (
+            str(row.get("sheet") or row.get("chunker") or ""),
+            str(row.get("embedding") or ""),
+            str(row.get("store") or row.get("vector_store") or ""),
+            str(row.get("index_type") or "HNSW"),
+            canonical_retrieval_method(row.get("retrieval_method")),
+            canonical_reranker_name(row.get("reranker") or "none"),
+        )
+    )
+
+
+def read_meeting_candidate_results(
+    *,
+    root: Path = ROOT,
+    config_path: Path = MEETING_CANDIDATE_CONFIG_PATH,
+) -> dict[str, Any]:
+    """Read only receipt-verified meeting candidate batches without publishing them."""
+    base: dict[str, Any] = {
+        "schema_version": 1,
+        "source_type": "verified_candidate_portfolio",
+        "source_lane": "meeting-400-candidates",
+        "promotion_status": "not_accepted",
+        "source_state": "not_run",
+        "portfolio_id": None,
+        "planned_batch_count": 0,
+        "verified_batch_count": 0,
+        "rejected_batch_count": 0,
+        "archived_batch_count": 0,
+        "validated_row_count": 0,
+        "duplicate_row_count": 0,
+        "batches": [],
+        "rows": [],
+    }
+    try:
+        config = load_benchmark_config(config_path)
+        experiment = config.get("experiment", {})
+        lane = experiment.get("output_lane")
+        if lane != "meeting-400-candidates" or experiment.get("promotion_status") != "not_accepted":
+            raise ValueError("meeting candidate source configuration is not isolated")
+        plan = build_portfolio_plan(config)
+        portfolio_root = root.resolve() / "data" / "modular_runs" / lane / plan.portfolio_id
+        base.update(
+            portfolio_id=plan.portfolio_id,
+            planned_batch_count=len(plan.batches),
+        )
+        if not portfolio_root.exists() and not portfolio_root.is_symlink():
+            base["batches"] = [
+                {"batch_id": batch.batch_id, "state": "not_run", "combination_count": len(batch.combination_ids)}
+                for batch in plan.batches
+            ]
+            return base
+        verified_plan = load_verified_portfolio_plan(
+            root.resolve(), config_path.resolve(), portfolio_root / "portfolio_plan.json"
+        )
+    except (OSError, ValueError):
+        base["source_state"] = "rejected"
+        return base
+
+    admitted: dict[str, dict[str, Any]] = {}
+    duplicate_count = 0
+    batches: list[dict[str, Any]] = []
+    verified_batch_count = 0
+    rejected_batch_count = 0
+    for batch in verified_plan.batches:
+        batch_dir = portfolio_root / batch.batch_id
+        if not batch_dir.exists() and not batch_dir.is_symlink():
+            batches.append(
+                {"batch_id": batch.batch_id, "state": "not_run", "combination_count": len(batch.combination_ids)}
+            )
+            continue
+        try:
+            verified = verify_completed_batch(
+                portfolio_root,
+                verified_plan,
+                batch,
+                candidate_lane=lane,
+            )
+            batch_rows: list[dict[str, Any]] = []
+            for raw in verified["summary_rows"]:
+                normalized = normalized_benchmark_row(raw, "meeting_400_candidate")
+                normalized.update(
+                    {
+                        "combination_id": raw.get("combination_id"),
+                        "batch_id": batch.batch_id,
+                        "retrieval_method": raw.get("retrieval_method") or "Dense Cosine",
+                        "index_type": raw.get("index_type") or "",
+                        "evaluator": raw.get("evaluator") or "",
+                        "source_lane": lane,
+                        "result_provenance": "verified_candidate",
+                        "promotion_status": "not_accepted",
+                        "receipt_verified": True,
+                        "artifact_provenance": (
+                            batch_dir / "modular_summary.csv"
+                        ).relative_to(root.resolve()).as_posix(),
+                    }
+                )
+                normalized["canonical_identity"] = candidate_row_identity(normalized)
+                if not normalized["combination_id"] or not benchmark_row_is_evaluated(normalized):
+                    raise BatchReceiptError("candidate summary contains an incomplete metric row")
+                batch_rows.append(normalized)
+        except (BatchReceiptError, OSError, ValueError):
+            rejected_batch_count += 1
+            batches.append(
+                {
+                    "batch_id": batch.batch_id,
+                    "state": "rejected",
+                    "combination_count": len(batch.combination_ids),
+                    "integrity_error": True,
+                }
+            )
+            continue
+
+        # Integrity-valid short runs remain archived, not evidence for the
+        # full-depth leaderboard. Never rewrite their immutable artifacts.
+        if any(float(row["evaluated_queries"]) != 500 for row in batch_rows):
+            batches.append({
+                "batch_id": batch.batch_id,
+                "state": "archived_query_depth",
+                "combination_count": len(batch_rows),
+                "required_query_count": 500,
+                "receipt_verified": True,
+            })
+            continue
+
+        verified_batch_count += 1
+        batches.append(
+            {"batch_id": batch.batch_id, "state": "verified", "combination_count": len(batch_rows)}
+        )
+        for row in batch_rows:
+            identity = row["canonical_identity"]
+            if identity in admitted:
+                duplicate_count += 1
+                continue
+            admitted[identity] = row
+
+    rows = sorted(
+        admitted.values(),
+        key=lambda row: (str(row.get("batch_id")), str(row.get("combination_id"))),
+    )
+    base.update(
+        source_state=("verified" if verified_batch_count else (
+            "rejected" if rejected_batch_count else (
+                "archived" if any(batch["state"] == "archived_query_depth" for batch in batches) else "not_run"
+            )
+        )),
+        verified_batch_count=verified_batch_count,
+        archived_batch_count=sum(batch["state"] == "archived_query_depth" for batch in batches),
+        rejected_batch_count=rejected_batch_count,
+        validated_row_count=len(rows),
+        duplicate_row_count=duplicate_count,
+        batches=batches,
+        rows=rows,
+    )
+    return base
+
+
 def benchmark_reference_sources() -> list[tuple[str, Path]]:
     sources: list[tuple[str, Path]] = []
     modular_runs_dir = MODULAR_DIR.parent
@@ -1067,11 +1277,85 @@ def official_artifact_provenance(path: Path) -> tuple[bool, str, dict[str, Any]]
     return True, "trusted", manifest
 
 
+def read_accepted_benchmark_manifest(
+    path: Path = ACCEPTED_MANIFEST_PATH,
+    *,
+    expected_sha256: str = ACCEPTED_MANIFEST_SHA256,
+) -> dict[str, Any]:
+    rejected: dict[str, Any] = {
+        "state": "rejected",
+        "validated_row_count": 0,
+        "rows": [],
+    }
+    try:
+        if path.is_symlink() or not path.is_file():
+            return rejected
+        if sha256_file(path) != expected_sha256:
+            return rejected
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return rejected
+        rows = payload.get("accepted_rows")
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("expected_combinations") != 180
+            or payload.get("linked_groundtruth_id") != "groundtruth:repository:groundtruth_500.csv"
+            or not isinstance(rows, list)
+            or len(rows) != 180
+        ):
+            return rejected
+        official_keys = official_matrix_keys()
+        admitted: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for raw in rows:
+            if not isinstance(raw, dict):
+                return rejected
+            normalized = normalized_benchmark_row(raw, "accepted_180_manifest")
+            normalized["official_provenance"] = "trusted"
+            normalized["result_provenance"] = "accepted"
+            normalized["promotion_status"] = "accepted"
+            key = (
+                normalized["sheet"],
+                normalized["embedding"],
+                normalized["store"],
+                normalized["reranker"],
+            )
+            try:
+                query_count = int(normalized["evaluated_queries"])
+            except (TypeError, ValueError):
+                return rejected
+            if (
+                key not in official_keys
+                or key in admitted
+                or query_count != 500
+                or not benchmark_row_is_evaluated(normalized)
+                or benchmark_missing_metrics(normalized)
+            ):
+                return rejected
+            admitted[key] = normalized
+        if set(admitted) != official_keys:
+            return rejected
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return rejected
+    return {
+        "state": "verified",
+        "validated_row_count": len(admitted),
+        "rows": sort_summary(list(admitted.values())),
+    }
+
+
 def read_benchmark_reference() -> dict[str, Any]:
     selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
     official_keys = official_matrix_keys()
     skipped_non_official = 0
+    accepted_manifest = read_accepted_benchmark_manifest(
+        ACCEPTED_MANIFEST_PATH,
+        expected_sha256=ACCEPTED_MANIFEST_SHA256,
+    )
+    if accepted_manifest["state"] == "verified":
+        for row in accepted_manifest["rows"]:
+            key = (row["sheet"], row["embedding"], row["store"], row["reranker"])
+            selected[key] = row
     sources = benchmark_reference_sources()
     provenance_by_path = {
         path: official_artifact_provenance(path)
@@ -1119,7 +1403,9 @@ def read_benchmark_reference() -> dict[str, Any]:
         "summary": sort_summary(rows),
         "diagnostics": diagnostics,
         "report": {
-            "source": "manifest-verified official benchmark artifacts",
+            "source": "authoritative accepted manifest and manifest-verified official benchmark artifacts",
+            "accepted_manifest_state": accepted_manifest["state"],
+            "accepted_manifest_rows": accepted_manifest["validated_row_count"],
             "config_rows": len(rows),
             "complete_metric_rows": complete_rows,
             "incomplete_metric_rows": len(rows) - complete_rows,
@@ -1673,6 +1959,18 @@ def launch_portfolio_action(action: str, payload: Any) -> dict[str, Any]:
     if action == "run-next":
         requested_batch_id = status.get("selected_batch_id")
         if requested_batch_id is None:
+            observations = status.get("batches", [])
+            expected_ids = {item.batch_id for item in plan.batches}
+            completed_ids = {
+                item.get("batch_id") for item in observations
+                if isinstance(item, dict) and item.get("state") == "completed"
+            }
+            if len(observations) != len(expected_ids) or completed_ids != expected_ids:
+                raise DashboardControlError(
+                    "no_batch_selected",
+                    "No batch is selected; portfolio completion is not verified. Review batch status before starting.",
+                    409,
+                )
             return {
                 "ok": True,
                 "portfolio_id": plan.portfolio_id,
@@ -1694,6 +1992,12 @@ def launch_portfolio_action(action: str, payload: Any) -> dict[str, Any]:
     )
     if not isinstance(observation, dict):
         raise DashboardControlError("invalid_plan", "Batch status is unavailable", 409)
+    if observation.get("state") == "archived_query_depth":
+        raise DashboardControlError(
+            "batch_archived",
+            "Archived short-query evidence is immutable. Prepare a separate full-depth run destination before rerunning these combinations.",
+            409,
+        )
     if observation.get("state") == "completed":
         raise DashboardControlError("batch_completed", "Batch already has a valid completion receipt", 409)
 
@@ -2767,6 +3071,12 @@ class Handler(SimpleHTTPRequestHandler):
                         official_configured=configured,
                         official_evaluated=official_evaluated_count(evaluation),
                     )
+                    candidate_results = read_meeting_candidate_results()
+                    payload["meeting_candidates"] = {
+                        key: value
+                        for key, value in candidate_results.items()
+                        if key != "rows"
+                    }
                 elif parsed.path == "/api/project-runs":
                     _require_result_query_keys(query, {"project_id"})
                     payload = service.project_runs(exact_query_value(query, "project_id"))
@@ -2902,6 +3212,7 @@ class Handler(SimpleHTTPRequestHandler):
             retrieval_total = retrieval_smoke_count()
             reranker_total = reranker_smoke_count()
             evaluation = read_evaluation()
+            candidate_results = read_meeting_candidate_results()
             hallucination = read_hallucination()
             pdf_audit = read_pdf_audit()
             document_repository = publish_document_readiness(ROOT, read_document_repository())
@@ -2931,6 +3242,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "retrieval_smoke_total": retrieval_total,
                     "retrieval_smoke_loaded": len(retrieval_smokes),
                     "evaluation": evaluation,
+                    "candidate_results": candidate_results,
                     "hallucination": hallucination,
                     "nvidia_rag": nvidia_rag,
                     "reranker_analysis": reranker_analysis,

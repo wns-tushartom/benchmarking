@@ -180,32 +180,6 @@ def test_faiss_explicit_namespace_is_reserved_exclusively(
         )
 
 
-def test_faiss_load_existing_reopens_reserved_explicit_namespace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    _install_fake_provider_modules(monkeypatch)
-    index_root = tmp_path / "indexes"
-    index_root.mkdir()
-    identity = _identity(PROJECT_A, RUN_A)
-
-    created = FaissVectorStoreAdapter(
-        "FAISS", namespace=identity, index_root=str(index_root)
-    )
-    loaded_paths: list[Path | None] = []
-    monkeypatch.setattr(FaissVectorStoreAdapter, "load", lambda self: loaded_paths.append(self.index_dir))
-
-    reopened = FaissVectorStoreAdapter(
-        "FAISS",
-        namespace=identity,
-        index_root=str(index_root),
-        load_existing=True,
-    )
-
-    assert reopened.index_dir == created.index_dir
-    assert reopened.physical_namespace == created.physical_namespace
-    assert loaded_paths == [created.index_dir]
-
-
 def test_drop_namespace_is_idempotent_for_all_adapters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -58,36 +58,12 @@ def _response_metadata(response: dict[str, Any]) -> dict[str, str]:
     return metadata
 
 
-def _require_expected_model(response: dict[str, Any], expected: str, required: bool) -> None:
-    if not required:
-        return
-    actual = response.get("model")
-    if not isinstance(actual, str) or not actual.strip():
-        raise RuntimeError(f"reranker endpoint did not report model; expected {expected!r}")
-    if actual.strip() != expected:
-        raise RuntimeError(
-            f"reranker endpoint model mismatch: expected {expected!r}, got {actual.strip()!r}"
-        )
-
-
 class RemoteHTTPRerankerAdapter:
-    def __init__(
-        self,
-        name: str,
-        endpoint_env: str,
-        api_key_env: str | None = None,
-        model: str | None = None,
-        require_response_model: bool = False,
-        expected_response_model: str | None = None,
-        **_: Any,
-    ):
+    def __init__(self, name: str, endpoint_env: str, api_key_env: str | None = None, model: str | None = None, **_: Any):
         self.name = name
         self.model = model or name
-        self.require_response_model = bool(require_response_model)
-        self.expected_response_model = expected_response_model or self.model
         self.url = os.environ.get(endpoint_env, "").strip()
         self.last_response_metadata: dict[str, str] = {}
-        self.response_metadata_history: list[dict[str, str]] = []
         if not self.url:
             raise RuntimeError(f"{endpoint_env} is required for reranker {name}. Open-source rerankers must run from the VM endpoint, not local fallback.")
         self.api_key = os.environ.get(api_key_env or "", "").strip() if api_key_env else ""
@@ -104,19 +80,10 @@ class RemoteHTTPRerankerAdapter:
         for payload in payloads:
             try:
                 response = _post_json(self.url, payload, headers=headers)
-                _require_expected_model(response, self.expected_response_model, self.require_response_model)
                 self.last_response_metadata = _response_metadata(response)
-                self.response_metadata_history.append(dict(self.last_response_metadata))
                 scores = _scores_from_response(response, len(hits))
                 if len(scores) >= len(hits):
-                    rescored = [
-                        SearchHit(
-                            hit.chunk,
-                            float(scores[i]),
-                            dict(hit.provenance) if hit.provenance is not None else None,
-                        )
-                        for i, hit in enumerate(hits)
-                    ]
+                    rescored = [SearchHit(hit.chunk, float(scores[i])) for i, hit in enumerate(hits)]
                     rescored.sort(key=lambda h: h.score, reverse=True)
                     return rescored[:top_k]
                 last_error = RuntimeError(f"endpoint returned {len(scores)} scores for {len(hits)} documents")
@@ -129,7 +96,6 @@ class AmazonBedrockRerankerAdapter:
     def __init__(self, name: str, model_id_env: str = "AMAZON_RERANK_MODEL_ID", region_env: str = "AWS_REGION", **_: Any):
         self.name = name
         self.last_response_metadata: dict[str, str] = {}
-        self.response_metadata_history: list[dict[str, str]] = []
         self.region = os.environ.get(region_env) or os.environ.get("AWS_DEFAULT_REGION")
         if not self.region:
             raise RuntimeError("AWS_REGION or AWS_DEFAULT_REGION is required for Amazon Rerank v1")
@@ -154,21 +120,13 @@ class AmazonBedrockRerankerAdapter:
             rerankingConfiguration={"type": "BEDROCK_RERANKING_MODEL", "bedrockRerankingConfiguration": {"modelConfiguration": {"modelArn": self.model_id}, "numberOfResults": min(len(hits), max(top_k, 1))}},
         )
         self.last_response_metadata = _response_metadata(response)
-        self.response_metadata_history.append(dict(self.last_response_metadata))
         results = response.get("results", [])
         rescored: List[SearchHit] = []
         for item in results:
             idx = item.get("index")
             score = item.get("relevanceScore", item.get("score", 0.0))
             if isinstance(idx, int) and 0 <= idx < len(hits):
-                hit = hits[idx]
-                rescored.append(
-                    SearchHit(
-                        hit.chunk,
-                        float(score),
-                        dict(hit.provenance) if hit.provenance is not None else None,
-                    )
-                )
+                rescored.append(SearchHit(hits[idx].chunk, float(score)))
         if not rescored:
             raise RuntimeError("Amazon Rerank v1 returned no rerank results")
         rescored.sort(key=lambda h: h.score, reverse=True)

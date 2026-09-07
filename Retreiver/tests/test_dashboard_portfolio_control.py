@@ -10,6 +10,7 @@ from benchmarking.core.portfolio import build_portfolio_plan
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "benchmark.all-methods-portfolio.json"
+MEETING_CONFIG = ROOT / "configs" / "benchmark.meeting-400-candidates.json"
 
 
 def not_run_status(plan):
@@ -38,6 +39,33 @@ def not_run_status(plan):
     }
 
 
+def test_meeting_portfolio_status_uses_strict_meeting_receipt_states(monkeypatch) -> None:
+    config = load_benchmark_config(MEETING_CONFIG)
+    plan = build_portfolio_plan(config)
+    source_batches = [
+        {
+            "batch_id": batch.batch_id,
+            "state": "verified" if index == 0 else "not_run",
+            "combination_count": len(batch.combination_ids),
+        }
+        for index, batch in enumerate(plan.batches)
+    ]
+    monkeypatch.setattr(dashboard, "PORTFOLIO_CONFIG_PATH", MEETING_CONFIG)
+    monkeypatch.setattr(
+        dashboard,
+        "read_meeting_candidate_results",
+        lambda **_: {"batches": source_batches},
+    )
+
+    actual_config, status = dashboard.dashboard_portfolio_status(plan)
+
+    assert actual_config["experiment"]["output_lane"] == "meeting-400-candidates"
+    assert status["selected_batch_id"] is None
+    assert status["state_counts"] == {"completed": 1, "failed": 0, "not_run": 5, "archived_query_depth": 0}
+    assert status["batches"][0]["state"] == "completed"
+    assert all(item["selected"] is False for item in status["batches"])
+
+
 def test_portfolio_summary_preserves_configured_excluded_and_batch_states() -> None:
     config = load_benchmark_config(CONFIG)
     plan = build_portfolio_plan(config)
@@ -61,6 +89,7 @@ def test_portfolio_summary_preserves_configured_excluded_and_batch_states() -> N
         "completed": 0,
         "failed": 0,
         "not_run": 2160,
+        "archived_query_depth": 0,
     }
     assert "/home/" not in json.dumps(payload)
 
@@ -171,7 +200,11 @@ def test_launch_run_next_uses_receipt_selected_batch_and_stops_when_complete(mon
     assert result["batch_id"] == status["selected_batch_id"]
     assert len(launched) == 1
 
-    complete = {**status, "selected_batch_id": None}
+    complete = {
+        **status,
+        "selected_batch_id": None,
+        "batches": [{**item, "state": "completed"} for item in status["batches"]],
+    }
     monkeypatch.setattr(dashboard, "dashboard_portfolio_status", lambda _plan: (config, complete))
     result = dashboard.launch_portfolio_action("run-next", {})
     assert result == {

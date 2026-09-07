@@ -65,14 +65,6 @@ _SUMMARY_FIELDS = (
     "recall_at_k",
     "mrr_at_k",
     "ndcg_at_k",
-    "recall_at_1",
-    "recall_at_3",
-    "recall_at_5",
-    "recall_at_10",
-    "precision_at_5",
-    "ndcg_at_5",
-    "avg_first_relevant_rank",
-    "no_hit_queries",
     "retrieval_latency_s",
     "rerank_latency_s",
     "avg_query_latency_s",
@@ -83,22 +75,7 @@ _SUMMARY_FIELDS = (
     "rerank_search_units",
     "rerank_usage_scope",
     "error_code",
-    "error_detail",
 )
-_SUMMARY_SCHEMA_VERSION = 3
-_EMPTY_QUALITY = {
-    "recall_at_k": None,
-    "mrr_at_k": None,
-    "ndcg_at_k": None,
-    "recall_at_1": None,
-    "recall_at_3": None,
-    "recall_at_5": None,
-    "recall_at_10": None,
-    "precision_at_5": None,
-    "ndcg_at_5": None,
-    "avg_first_relevant_rank": None,
-    "no_hit_queries": None,
-}
 
 
 class ProjectMatrixRunnerError(RuntimeError):
@@ -457,35 +434,6 @@ def _safe_error_code(stage: str) -> str:
         "retrieval": "retrieval_failed",
         "reranker": "reranker_failed",
     }.get(stage, "combination_failed")
-
-
-def _safe_error_detail(exc: BaseException) -> str:
-    """Return a short operator-safe failure detail without free-form provider text."""
-    name = type(exc).__name__
-    if isinstance(exc, FileExistsError):
-        return f"{name}: target already exists"
-    if isinstance(exc, FileNotFoundError):
-        return f"{name}: required path missing"
-    if isinstance(exc, PermissionError):
-        return f"{name}: permission denied"
-    if isinstance(exc, TimeoutError):
-        return f"{name}: timed out"
-    if isinstance(exc, ConnectionError):
-        return f"{name}: connection failed"
-    if isinstance(exc, OSError) and getattr(exc, "errno", None) is not None:
-        return f"{name}: errno={exc.errno}"
-    if isinstance(exc, ValueError):
-        message = " ".join(str(exc).split())
-        if (
-            message
-            and len(message) <= 80
-            and "://" not in message
-            and "/home/" not in message
-            and "token" not in message.lower()
-            and "key" not in message.lower()
-        ):
-            return f"{name}: {message}"
-    return name
 
 
 class ProjectMatrixRunner:
@@ -1139,7 +1087,7 @@ class ProjectMatrixRunner:
                     "run_id": run_id,
                     "combo_id": combo_id,
                     "status": "completed",
-                    "summary_schema_version": _SUMMARY_SCHEMA_VERSION,
+                    "summary_schema_version": 2,
                     "chunker_id": chunker_id,
                     "embedding_id": embedding_id,
                     "vector_store_id": vector_store_id,
@@ -1151,20 +1099,11 @@ class ProjectMatrixRunner:
                     "recall_at_k": query_metrics["recall_at_k"],
                     "mrr_at_k": query_metrics["mrr_at_k"],
                     "ndcg_at_k": query_metrics["ndcg_at_k"],
-                    "recall_at_1": query_metrics["recall_at_1"],
-                    "recall_at_3": query_metrics["recall_at_3"],
-                    "recall_at_5": query_metrics["recall_at_5"],
-                    "recall_at_10": query_metrics["recall_at_10"],
-                    "precision_at_5": query_metrics["precision_at_5"],
-                    "ndcg_at_5": query_metrics["ndcg_at_5"],
-                    "avg_first_relevant_rank": query_metrics["avg_first_relevant_rank"],
-                    "no_hit_queries": query_metrics["no_hit_queries"],
                     "retrieval_latency_s": retrieval_latency_s,
                     "rerank_latency_s": rerank_latency_s,
                     "avg_query_latency_s": query_metrics["avg_query_latency_s"],
                     "evidence_count": len(combo_evidence_rows),
                     "error_code": "",
-                    "error_detail": "",
                 }
                 receipt = {
                     "combo_id": combo_id,
@@ -1204,17 +1143,16 @@ class ProjectMatrixRunner:
                     _atomic_write(reranking_artifact, reranking_content)
                 details_rows.extend(combo_detail_rows)
                 evidence_rows.extend(combo_evidence_rows)
-            except Exception as exc:
+            except Exception:
                 if failure_stage == "reranker":
                     rerank_search_units = None
                 error_code = _safe_error_code(failure_stage or "combination")
-                error_detail = _safe_error_detail(exc)
                 summary = {
                     "project_id": project_id,
                     "run_id": run_id,
                     "combo_id": combo_id,
                     "status": "failed",
-                    "summary_schema_version": _SUMMARY_SCHEMA_VERSION,
+                    "summary_schema_version": 2,
                     "chunker_id": chunker_id,
                     "embedding_id": embedding_id,
                     "vector_store_id": vector_store_id,
@@ -1223,19 +1161,19 @@ class ProjectMatrixRunner:
                     "query_count": len(questions),
                     "labelled_queries": labelled_queries,
                     "unlabelled_queries": unlabelled_queries,
-                    **_EMPTY_QUALITY,
+                    "recall_at_k": None,
+                    "mrr_at_k": None,
+                    "ndcg_at_k": None,
                     "retrieval_latency_s": None,
                     "rerank_latency_s": None,
                     "avg_query_latency_s": None,
                     "evidence_count": 0,
                     "error_code": error_code,
-                    "error_detail": error_detail,
                 }
                 receipt = {
                     "combo_id": combo_id,
                     "status": "failed",
                     "error_code": error_code,
-                    "error_detail": error_detail,
                     "config_sha256": config_sha256,
                     "adapters": {
                         "chunker": {
@@ -1362,14 +1300,6 @@ class ProjectMatrixRunner:
                 "recall_at_k": row["recall_at_k"],
                 "mrr_at_k": row["mrr_at_k"],
                 "ndcg_at_k": row["ndcg_at_k"],
-                "recall_at_1": row.get("recall_at_1"),
-                "recall_at_3": row.get("recall_at_3"),
-                "recall_at_5": row.get("recall_at_5"),
-                "recall_at_10": row.get("recall_at_10"),
-                "precision_at_5": row.get("precision_at_5"),
-                "ndcg_at_5": row.get("ndcg_at_5"),
-                "avg_first_relevant_rank": row.get("avg_first_relevant_rank"),
-                "no_hit_queries": row.get("no_hit_queries"),
                 "retrieval_latency_s": row["retrieval_latency_s"],
                 "rerank_latency_s": row["rerank_latency_s"],
                 "avg_query_latency_s": row["avg_query_latency_s"],
@@ -1382,8 +1312,8 @@ class ProjectMatrixRunner:
             _atomic_json(
                 run_layout["root"] / "analysis.json",
                 {
-                    "schema_version": _SUMMARY_SCHEMA_VERSION,
-                    "summary_schema_version": _SUMMARY_SCHEMA_VERSION,
+                    "schema_version": 2,
+                    "summary_schema_version": 2,
                     "project_id": project_id,
                     "run_id": run_id,
                     "metric_k": request.top_k,
@@ -1397,7 +1327,7 @@ class ProjectMatrixRunner:
             run_layout["root"] / "manifest.json",
             {
                 "schema_version": 2,
-                "summary_schema_version": _SUMMARY_SCHEMA_VERSION,
+                "summary_schema_version": 2,
                 "project_id": project_id,
                 "run_id": run_id,
                 "request_fingerprint": validated.request_fingerprint,

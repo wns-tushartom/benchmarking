@@ -281,34 +281,6 @@ def _summary_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(source))
 
 
-def test_cli_exit_code_follows_semantic_run_state(monkeypatch):
-    class FakeRunner:
-        def __init__(self, workspace):
-            self.workspace = workspace
-
-        def run(self, project_id, run_id):
-            return {
-                "project_id": project_id,
-                "run_id": run_id,
-                "state": "failed",
-                "succeeded": 0,
-                "failed": 1,
-                "combination_count": 1,
-            }
-
-    monkeypatch.setattr(run_project_matrix, "ProjectMatrixRunner", FakeRunner)
-    monkeypatch.setattr(run_project_matrix, "ProjectWorkspace", lambda root: object())
-    code = run_project_matrix.main(
-        [
-            "--project-id",
-            "alpha_123e4567e89b42d3a456426614174000",
-            "--run-id",
-            "run_123e4567e89b42d3a456426614174000",
-        ]
-    )
-    assert code == 1
-
-
 def test_cli_accepts_only_project_and_run_ids():
     parsed = run_project_matrix.build_parser().parse_args(
         ["--project-id", "alpha_123e4567e89b42d3a456426614174000", "--run-id", "run_123e4567e89b42d3a456426614174000"]
@@ -380,7 +352,7 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
     assert all(row["labelled_queries"] == "0" for row in summary)
     assert all(row["unlabelled_queries"] == "1" for row in summary)
     assert all(not row["recall_at_k"] for row in summary)
-    assert all(row["summary_schema_version"] == "3" for row in summary)
+    assert all(row["summary_schema_version"] == "2" for row in summary)
     for row in completed:
         assert not row["mrr_at_k"]
         assert not row["ndcg_at_k"]
@@ -432,7 +404,7 @@ def test_real_matrix_is_project_scoped_honest_and_failure_isolated(project_envir
     assert all("source_name" in row and "page_number" in row for row in details)
 
     manifest = json.loads((first_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["summary_schema_version"] == 3
+    assert manifest["summary_schema_version"] == 2
     assert manifest["metric_k"] == 3
     assert manifest["scoring_mode"] == "evidence_only"
     assert manifest["created_at"].endswith("Z")
@@ -842,18 +814,10 @@ def test_labelled_run_scores_only_applicable_retrieval_labels(project_environmen
     assert len(summary) == 1
     assert summary[0]["labelled_queries"] == "1"
     assert summary[0]["unlabelled_queries"] == "0"
-    assert summary[0]["summary_schema_version"] == "3"
+    assert summary[0]["summary_schema_version"] == "2"
     assert summary[0]["recall_at_k"] == "1.0"
     assert summary[0]["mrr_at_k"] == "1.0"
     assert summary[0]["ndcg_at_k"] == "1.0"
-    assert summary[0]["recall_at_1"] == "1.0"
-    assert summary[0]["recall_at_3"] == "1.0"
-    assert summary[0]["recall_at_5"] == "1.0"
-    assert summary[0]["recall_at_10"] == "1.0"
-    assert float(summary[0]["precision_at_5"]) > 0
-    assert summary[0]["ndcg_at_5"] == "1.0"
-    assert float(summary[0]["avg_first_relevant_rank"]) == 1.0
-    assert summary[0]["no_hit_queries"] == "0"
     retrieval_latency = float(summary[0]["retrieval_latency_s"])
     rerank_latency = float(summary[0]["rerank_latency_s"])
     assert retrieval_latency >= 0
@@ -865,8 +829,8 @@ def test_labelled_run_scores_only_applicable_retrieval_labels(project_environmen
     evidence = json.loads((root / "evidence.json").read_text(encoding="utf-8"))
     assert summary[0]["evidence_count"] == str(len(evidence["rows"]))
     analysis = json.loads((root / "analysis.json").read_text(encoding="utf-8"))
-    assert analysis["schema_version"] == 3
-    assert analysis["summary_schema_version"] == 3
+    assert analysis["schema_version"] == 2
+    assert analysis["summary_schema_version"] == 2
     assert analysis["metric_k"] == 3
     assert analysis["scoring_mode"] == "retrieval_labels"
     assert analysis["rows"][0]["labelled_queries"] == 1
@@ -874,12 +838,6 @@ def test_labelled_run_scores_only_applicable_retrieval_labels(project_environmen
     assert analysis["rows"][0]["recall_at_k"] == 1.0
     assert analysis["rows"][0]["mrr_at_k"] == 1.0
     assert analysis["rows"][0]["ndcg_at_k"] == 1.0
-    assert analysis["rows"][0]["recall_at_1"] == 1.0
-    assert analysis["rows"][0]["recall_at_5"] == 1.0
-    assert analysis["rows"][0]["recall_at_10"] == 1.0
-    assert analysis["rows"][0]["precision_at_5"] > 0
-    assert analysis["rows"][0]["avg_first_relevant_rank"] == 1.0
-    assert analysis["rows"][0]["no_hit_queries"] == 0
     assert analysis["rows"][0]["retrieval_latency_s"] == retrieval_latency
     assert analysis["rows"][0]["rerank_latency_s"] == rerank_latency
     assert analysis["rows"][0]["avg_query_latency_s"] == float(

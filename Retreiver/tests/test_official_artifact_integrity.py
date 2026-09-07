@@ -158,17 +158,6 @@ def test_official_manifest_binds_artifact_location_and_content(tmp_path: Path, m
     assert trusted is True
     assert reason == "trusted"
 
-    assert dashboard.OFFICIAL_GROUNDTRUTH_IDS == {
-        "groundtruth:repository:groundtruth_500.csv",
-        "groundtruth:repository:qa_text_test.csv",
-    }
-    for groundtruth_id in dashboard.OFFICIAL_GROUNDTRUTH_IDS:
-        manifest["groundtruth_id"] = groundtruth_id
-        (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        assert dashboard.official_artifact_provenance(summary)[:2] == (True, "trusted")
-    manifest["groundtruth_id"] = dashboard.OFFICIAL_GROUNDTRUTH_ID
-    (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-
     summary.write_text("status,evaluated_queries\ncompleted,500\n", encoding="utf-8")
     trusted, reason, _ = dashboard.official_artifact_provenance(summary)
     assert trusted is False

@@ -202,6 +202,13 @@ def source_provenance(root: Path) -> Dict[str, Any]:
     }
 
 
+def portfolio_result_row(
+    row: Dict[str, Any],
+    portfolio_context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    return {**row, **(portfolio_context or {})}
+
+
 def run_experiment(
     config_path: Path,
     root: Path,
@@ -319,9 +326,11 @@ def run_experiment(
 
     chunk_cache: Dict[str, Any] = {}
     embedding_cache: Dict[Tuple[str, str], Any] = {}
+    vector_store_cache: Dict[Tuple[str, str, str, str], Tuple[Any, Dict[str, Any]]] = {}
     bm25_cache: Dict[str, BM25Retriever] = {}
 
     for idx, row in enumerate(matrix, 1):
+        result_row = portfolio_result_row(row, portfolio_context)
         combo_label = f"[{idx}/{len(matrix)}] {row['chunker']} | {row['embedding']} | {row['vector_store']} | {row['reranker']}"
         print(f"START {combo_label}", flush=True)
         chunker_cfg = technique(cfg, "chunkers", row["chunker"])
@@ -365,12 +374,24 @@ def run_experiment(
             print(f"  embedding cached: {row['embedding']}", flush=True)
         embedder, chunk_vectors, query_vectors, embedding_latency_s, embedding_response_metadata = embedding_cache[embed_key]
 
-        print(f"  upsert start: {row['vector_store']} vectors={len(chunk_vectors)}", flush=True)
-        vector_cls = registry.get("vector_store", vector_cfg["adapter"])
-        vector_params = vector_store_parameters(vector_cfg, row, output_dir)
-        store = vector_cls(name=row["vector_store"], **vector_params)
-        upsert_metrics = store.upsert(chunks, chunk_vectors)
-        print(f"  upsert done: {row['vector_store']} seconds={float(upsert_metrics.get('upsert_latency_s', 0)):.2f}", flush=True)
+        store_key = (
+            row["chunker"],
+            row["embedding"],
+            row["vector_store"],
+            row["index_type"],
+        )
+        store_cache_hit = store_key in vector_store_cache
+        if not store_cache_hit:
+            print(f"  upsert start: {row['vector_store']} vectors={len(chunk_vectors)}", flush=True)
+            vector_cls = registry.get("vector_store", vector_cfg["adapter"])
+            vector_params = vector_store_parameters(vector_cfg, row, output_dir)
+            store = vector_cls(name=row["vector_store"], **vector_params)
+            upsert_metrics = store.upsert(chunks, chunk_vectors)
+            vector_store_cache[store_key] = (store, upsert_metrics)
+            print(f"  upsert done: {row['vector_store']} seconds={float(upsert_metrics.get('upsert_latency_s', 0)):.2f}", flush=True)
+        else:
+            store, upsert_metrics = vector_store_cache[store_key]
+            print(f"  vector index cached: {row['vector_store']}", flush=True)
         dense_retriever = DenseCosineRetriever(store)
         retrieval_method = row.get("retrieval_method", "Cosine Similarity")
         candidate_depth = int(exp.get("candidate_depth", max(top_k, 20)))
@@ -447,7 +468,7 @@ def run_experiment(
             if not values["recall_at_5"] and len(examples_missed) < 10:
                 examples_missed.append({"query_id": q.id, "query": q.query, "category": q.category, "top_ids": [h.chunk.id for h in reranked[:5]]})
             detail_rows.append({
-                **row,
+                **result_row,
                 "query_id": q.id,
                 "query": q.query,
                 "category": q.category,
@@ -465,7 +486,7 @@ def run_experiment(
 
         lo, hi = bootstrap_ci(metric_lists["recall_at_5"], iterations=int(eval_cfg.get("bootstrap_iterations", 200)), seed=int(exp.get("random_seed", 42)))
         summary_rows.append({
-            **row,
+            **result_row,
             "mode": exp.get("mode", "vm_remote_required"),
             "query_count": len(queries),
             "chunk_count": len(chunks),
@@ -474,6 +495,7 @@ def run_experiment(
             "embedding_response_metadata": json.dumps(embedding_response_metadata, ensure_ascii=False, sort_keys=True),
             "reranker_response_metadata": json.dumps(reranker_response_metadata, ensure_ascii=False, sort_keys=True),
             "upsert_latency_s": round(float(upsert_metrics.get("upsert_latency_s", 0)), 6),
+            "vector_store_cache_hit": store_cache_hit,
             "avg_latency_ms": round(mean(latencies) * 1000, 6),
             "avg_latency_seconds": round(mean(latencies), 6),
             "avg_first_relevant_rank": round(mean(first_relevant_ranks), 6) if first_relevant_ranks else 0.0,

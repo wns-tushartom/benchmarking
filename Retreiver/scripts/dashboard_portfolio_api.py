@@ -44,7 +44,7 @@ def portfolio_dashboard_payload(
     observed = {item["batch_id"]: item for item in status.get("batches", [])}
     batch_by_combination: dict[str, Any] = {}
     public_batches: list[dict[str, Any]] = []
-    completed = failed = not_run = selected = 0
+    completed = failed = not_run = selected = archived_query_depth = 0
     for batch in plan.batches:
         if len(batch.combination_ids) > MAX_BATCH_COMBINATIONS:
             raise ValueError("immutable portfolio batch exceeds execution maximum")
@@ -52,7 +52,7 @@ def portfolio_dashboard_payload(
         if not isinstance(observation, Mapping):
             raise ValueError("portfolio status omits an immutable batch")
         state = observation.get("state")
-        if state not in {"completed", "failed", "not_run"}:
+        if state not in {"completed", "failed", "not_run", "archived_query_depth"}:
             raise ValueError("portfolio status contains an invalid batch state")
         is_selected = observation.get("selected") is True
         count = len(batch.combination_ids)
@@ -60,6 +60,8 @@ def portfolio_dashboard_payload(
             completed += count
         elif state == "failed":
             failed += count
+        elif state == "archived_query_depth":
+            archived_query_depth += count
         else:
             not_run += count
         if is_selected:
@@ -98,6 +100,7 @@ def portfolio_dashboard_payload(
             "completed": completed,
             "failed": failed,
             "not_run": not_run,
+            "archived_query_depth": archived_query_depth,
         },
         "batches": public_batches,
     }

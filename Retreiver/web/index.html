@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Project Smiley Integrated RAG Pipeline</title>
-  <link rel="stylesheet" href="/styles.css?v=20260820-candidate-portfolio-v1" />
+  <link rel="stylesheet" href="/styles.css?v=20260907-handoff-v1" />
 </head>
 <body>
   <main class="shell">
@@ -112,7 +112,7 @@
           <div>
             <span class="candidate-kicker">Candidate only</span>
             <h2 id="candidateOperationsTitle">Portfolio operations</h2>
-            <p>Plan and operate the isolated 2,160-combination evaluation. Nothing here changes accepted benchmark evidence.</p>
+            <p>Plan and operate the selected isolated candidate portfolio. Counts below come from its immutable plan, not the broader roadmap. Nothing here changes accepted benchmark evidence.</p>
           </div>
           <span id="portfolioPromotionStatus" class="candidate-state">Promotion: not accepted</span>
         </div>
@@ -175,7 +175,7 @@
         <div class="result-source-bar">
           <label hidden data-source-mirror><select id="metricsDataset"><option value="official">Official WNS corpus</option></select></label>
           <label hidden data-source-mirror><select id="metricsGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
-          <label>Result set<select id="metricsResultSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
+          <label>Result set<select id="metricsResultSet"><option value="official">Official reranked matrix — 180</option><option value="combined">Accepted + verified candidates — 180 actual</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
         </div>
         <p id="metricsSourceContext" class="result-context">Viewing: Official WNS benchmark</p>
       </section>
@@ -211,7 +211,7 @@
           <label hidden>Result source<select id="recommendationSource"><option value="official">Official WNS benchmark</option><option value="uploaded_project">Uploaded project</option></select></label>
           <label hidden data-source-mirror><select id="recommendationDataset"><option value="official">Official WNS corpus</option></select></label>
           <label hidden data-source-mirror><select id="recommendationGroundtruth"><option value="groundtruth:official">Official benchmark ground truth</option></select></label>
-          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
+          <label id="recommendationOfficialSetField">Result set<select id="recommendationOfficialSet"><option value="official">Official reranked matrix — 180</option><option value="combined">Accepted + verified candidates — 180 actual</option><option value="baseline">No-reranker baseline — measured results</option></select></label>
           <label id="recommendationProjectField" hidden>Project<select id="recommendationProject"></select></label>
           <label id="recommendationRunField" hidden>Matrix run<select id="recommendationRun"></select></label>
         </div>
@@ -223,6 +223,40 @@
         <div class="section-head"><div><h2>Top combinations</h2><p id="recommendationModeNote">Quality, speed, and honest cost posture for the active source.</p></div><div id="recommendationSort" class="compact-sort"></div></div>
         <div id="recommendationFilters" class="filter-row"></div>
         <div class="table-wrap"><table id="recommendationTable"></table></div>
+      </section>
+
+      <section class="panel metric-explorer-panel" aria-labelledby="metricExplorerTitle">
+        <div class="section-head">
+          <div><h2 id="metricExplorerTitle">Accuracy, cost, and latency trade-offs</h2><p>Only complete 500-query evaluations from the selected result set are plotted. Left is faster; higher is better for quality.</p></div>
+          <span id="metricExplorerHint" class="mini-stat">Waiting for evaluation</span>
+        </div>
+        <div class="metric-control-strip">
+          <label>X axis<select id="metricXAxis"></select></label>
+          <label>Y axis<select id="metricYAxis"></select></label>
+          <label>Color by<select id="metricColorBy"></select></label>
+          <label>Bubble size<select id="metricBubbleBy"></select></label>
+          <label>Show<select id="metricQuickView"><option value="all">All combinations</option><option value="top10">Top 10</option><option value="bottom10">Bottom 10</option><option value="pareto">Pareto frontier</option></select></label>
+        </div>
+        <div id="metricExplorerKpis" class="metric-explorer-kpis"></div>
+        <div id="tradeoffChart" class="svg-chart metric-tradeoff-chart"></div>
+        <div id="metricChartTooltip" class="metric-chart-tooltip" hidden></div>
+        <div id="metricPointDetails" class="metric-point-details" aria-live="polite">Select a point to inspect exact metrics.</div>
+        <p id="metricInterpretation" class="metric-interpretation"></p>
+      </section>
+
+      <section class="panel metric-heatmap-panel" aria-labelledby="heatmapTitle">
+        <div class="section-head">
+          <div><h2 id="heatmapTitle">Configuration heatmap</h2><p>Chunker × vector database for one explicit metric, embedding, reranker, retrieval method, and index type. Missing never means zero.</p></div>
+          <div id="metricHeatmapLegend" class="metric-heatmap-legend"></div>
+        </div>
+        <div class="metric-control-strip heatmap-controls">
+          <label>Metric<select id="heatmapMetric"></select></label>
+          <label>Embedding<select id="heatmapEmbedding"></select></label>
+          <label>Reranker<select id="heatmapReranker"></select></label>
+          <label>Retrieval method<select id="heatmapRetrievalMethod"></select></label>
+          <label>Index type<select id="heatmapIndexType"></select></label>
+        </div>
+        <div id="metricHeatmap" class="metric-heatmap" role="region" aria-label="Configuration metric heatmap"></div>
       </section>
 
       <section class="panel pricing-panel">
@@ -494,8 +528,9 @@ Passenger wants return refund due to illness</textarea><span class="inline-uploa
       </details>
     </section>
   </main>
-  <script src="/source-state.js?v=20260716-metrics-integrity"></script>
-  <script src="/recommendations.js?v=20260716-extraction-override"></script>
-  <script src="/app.js?v=20260820-candidate-portfolio-v1"></script>
+  <script src="/source-state.js?v=20260907-handoff-v1"></script>
+  <script src="/recommendations.js?v=20260907-handoff-v1"></script>
+  <script src="/recommendation-visuals.js?v=20260907-handoff-v1"></script>
+  <script src="/app.js?v=20260907-handoff-v1"></script>
 </body>
 </html>
