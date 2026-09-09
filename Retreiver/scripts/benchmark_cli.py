@@ -174,6 +174,8 @@ def run_next_portfolio_batch(
             "message": "all portfolio batches are already completed",
         }
     selected = next(item for item in status["batches"] if item["batch_id"] == batch_id)
+    if selected.get("state") != "not_run":
+        raise ValueError("selected batch is not unstarted; existing evidence preserved")
     result = run_portfolio_batch(
         root,
         config_path,

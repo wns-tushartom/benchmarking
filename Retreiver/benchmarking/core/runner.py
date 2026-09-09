@@ -259,6 +259,11 @@ def run_experiment(
         )
         if output_dir != expected_output:
             raise ValueError("output directory does not match the immutable portfolio batch")
+    if portfolio_context is not None:
+        parent = output_dir.parent
+        if not parent.is_dir() or parent.is_symlink() or parent.resolve() != parent:
+            raise ValueError("canonical portfolio root must already exist")
+        output_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     load_env_file(root)
     cfg = official_cfg
     run_selection: Dict[str, str] = {}

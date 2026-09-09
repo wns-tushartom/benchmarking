@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "release_status": "not_deployable",
+  "installation_authorized": false,
+  "ownership_boundary": "cooperating_patched_writers_only",
+  "before_sha256": {
+    "benchmarking/core/runner.py": "2ee504a6176cccfaf5239fefc09fd66214be4612bd4b47c1c4157c5f6547881a",
+    "scripts/benchmark_cli.py": "fd0a3d88f3ffa5b9acf98cc35bc3395dc6ee3035fcf56a4a76f8056142d50c5b"
+  },
+  "after_sha256": {
+    "benchmarking/core/runner.py": "abbfc5d7b28b7330fca1deac05f2452ffdc9e6e5de4c117f51c0ec56b207729f",
+    "scripts/benchmark_cli.py": "60ae9b4546285cf92271e9722fdf166291d35976fd4a37f9fab3ad3b941e6087"
+  },
+  "transform_sha256": "e49aba6ae32e9fd0b191a0f8aeb92d3f833fb0038c6c099096be201ce595e7ca"
+}
